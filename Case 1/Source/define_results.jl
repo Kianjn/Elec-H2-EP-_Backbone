@@ -89,5 +89,5 @@ function define_results!(data::Dict, results::Dict, ADMM::Dict, agents::Dict,
 
     # Print a confirmation message indicating structures are ready
     # This helps track the initialization progress during setup
-    println("Results structures initialized.")
+    # Initialization print removed to reduce console noise
 end

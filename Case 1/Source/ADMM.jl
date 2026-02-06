@@ -37,10 +37,8 @@
 #   - Prints convergence status to console
 # ==============================================================================
 function ADMM!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, mdict, agents, data, TO)
-
+    
     # --- 1. INITIALIZATION ---
-    # Print a start message to the console to indicate algorithm has begun
-    println("Starting ADMM Optimization...")
     
     # Retrieve maximum allowed iterations from the configuration dictionary
     # This prevents infinite loops if convergence is not achieved
@@ -56,15 +54,15 @@ function ADMM!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_mark
     # This flag will be set to true when convergence criteria are met
     converged = false
     
-    # Initialize the iteration counter starting at 1
-    # This tracks the current ADMM iteration number
-    iter = 1
-    
     # --- 2. MAIN ITERATION LOOP ---
-    # Start the while loop. It runs until max_iter is reached or convergence is achieved.
+    # Start the iteration loop. It runs until max_iter is reached or convergence is achieved.
     # The @timeit macro records the total time spent in this "ADMM Loop" section for profiling.
     # This helps identify performance bottlenecks in the optimization process.
-    @timeit TO "ADMM Loop" while iter <= max_iter && !converged
+    @timeit TO "ADMM Loop" begin
+        # Use a ProgressBars.jl progress bar to track ADMM iterations.
+        # This provides a single, continuously updated line instead of many printlns.
+        pb = ProgressBar(1:max_iter)
+        for iter in pb
         
         # ======================================================================
         # STEP A: SOLVE AGENT SUBPROBLEMS (X-UPDATE)
@@ -87,9 +85,8 @@ function ADMM!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_mark
         # Profile this specific block under "Solve H2" for performance tracking
         # Hydrogen agents include: Electrolytic H2 producers, Hydrogen consumers
         @timeit TO "Solve H2" for id in agents[:H2]
-            # Solve the optimization model for the specific Hydrogen agent
-            # Electrolytic producers optimize electricity purchase, H2 production, and GC trades
-            # FIXED: Added elec_GC_market to arguments so Green Producers can buy electricity GCs
+            # Solve the optimization model for the specific Hydrogen agent.
+            # Electrolytic producers optimize electricity purchase, H2 production, and GC trades.
             solve_H2_agent!(id, mdict[id], elec_market, H2_market, elec_GC_market, H2_GC_market, data["ADMM"])
         end
         
@@ -138,74 +135,67 @@ function ADMM!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_mark
         # ======================================================================
         # STEP D: LOG CONVERGENCE METRICS
         # ======================================================================
-        # Store the current iteration number for convergence history tracking
-        # This allows plotting convergence graphs after the algorithm finishes
-        push!(ADMM["iter"], iter)
+            # Store the current iteration number for convergence history tracking
+            # This allows plotting convergence graphs after the algorithm finishes
+            push!(ADMM["iter"], iter)
         
-        # Store the current Primal Residual (maximum imbalance)
-        # This tracks how close the markets are to equilibrium
-        push!(ADMM["primal_residual"], primal_res)
+            # Store the current Primal Residual (maximum imbalance)
+            # This tracks how close the markets are to equilibrium
+            push!(ADMM["primal_residual"], primal_res)
         
-        # Store the current Dual Residual (stationarity measure)
-        # This tracks how stable the solution is
-        push!(ADMM["dual_residual"], dual_res)
+            # Store the current Dual Residual (stationarity measure)
+            # This tracks how stable the solution is
+            push!(ADMM["dual_residual"], dual_res)
         
-        # Store diagnostic information about where the maximum imbalance occurs
-        # This helps identify which market and time period is causing convergence issues
-        push!(ADMM["diagnostics"], diagnostics)
-        
-        # Print a status update to the console every 10 iterations to track progress
-        # This provides real-time feedback on convergence without cluttering the output
-        if iter % 10 == 0
-            @printf("Iter %4d | Primal: %.4e | Dual: %.4e\n", iter, primal_res, dual_res)
-        end
+            # Store diagnostic information about where the maximum imbalance occurs
+            # This helps identify which market and time period is causing convergence issues
+            push!(ADMM["diagnostics"], diagnostics)
 
         # ======================================================================
         # STEP E: CHECK CONVERGENCE
         # ======================================================================
-        # If both residuals are below the epsilon threshold, the algorithm has converged.
-        # Convergence means: markets are balanced (primal) and solution is stable (dual)
-        if primal_res < epsilon && dual_res < epsilon
-            # Set flag to true to exit the loop
-            converged = true
-            # Print success message with iteration number
-            println(">> Converged at iteration $iter")
-        else
-            # ==================================================================
-            # STEP F: UPDATE DUAL VARIABLES (PRICES)
-            # ==================================================================
-            # If not converged, update the market prices (Lagrange multipliers).
-            # This is the dual update step in ADMM.
-            # Logic: Price = Price - Rho * Balance (Dual Ascent step)
-            # If balance > 0 (excess supply), price decreases (encourages more demand)
-            # If balance < 0 (excess demand), price increases (encourages more supply)
-            # The step size is controlled by rho (penalty parameter)
-            @timeit TO "Update Prices" update_prices!(elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market)
-            
-            # ==================================================================
-            # STEP G: UPDATE PENALTY PARAMETER (RHO)
-            # ==================================================================
-            # Dynamically adjust the penalty parameter rho to balance primal and dual convergence.
-            # This helps speed up convergence if one residual is much larger than the other.
-            # Adaptive rho strategy:
-            #   - If primal >> dual: increase rho (stronger penalty for imbalances)
-            #   - If dual >> primal: decrease rho (weaker penalty, allow prices to adjust)
-            # Note: EP_market is included to ensure its penalty is also updated.
-            update_rho!(elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, primal_res, dual_res, data["ADMM"])
+            # If both residuals are below the epsilon threshold, the algorithm has converged.
+            # Convergence means: markets are balanced (primal) and solution is stable (dual)
+            if primal_res < epsilon && dual_res < epsilon
+                # Set flag to true and break out of the loop
+                converged = true
+                break
+            else
+                # ==============================================================
+                # STEP F: UPDATE DUAL VARIABLES (PRICES)
+                # ==============================================================
+                # If not converged, update the market prices (Lagrange multipliers).
+                # This is the dual update step in ADMM.
+                # Logic: Price = Price - Rho * Balance (Dual Ascent step)
+                # If balance > 0 (excess supply), price decreases (encourages more demand)
+                # If balance < 0 (excess demand), price increases (encourages more supply)
+                # The step size is controlled by rho (penalty parameter)
+                @timeit TO "Update Prices" update_prices!(elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market)
+
+                # ==============================================================
+                # STEP G: UPDATE PENALTY PARAMETER (RHO)
+                # ==============================================================
+                # Dynamically adjust the penalty parameter rho to balance primal and dual convergence.
+                # This helps speed up convergence if one residual is much larger than the other.
+                # Adaptive rho strategy:
+                #   - If primal >> dual: increase rho (stronger penalty for imbalances)
+                #   - If dual >> primal: decrease rho (weaker penalty, allow prices to adjust)
+                # Note: EP_market is included to ensure its penalty is also updated.
+                update_rho!(elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, primal_res, dual_res, data["ADMM"])
+            end
         end
-        
-        # Increment the iteration counter for the next iteration
-        iter += 1
-    end
+    end  # end @timeit "ADMM Loop"
     
     # --- 3. FINAL CHECK ---
-    # If the loop finished but converged is still false, print a warning.
-    # This indicates that the algorithm reached max_iter without achieving convergence.
-    # Possible reasons: epsilon too strict, rho not well-tuned, problem infeasible, etc.
+    # If the loop finished but converged is still false, print a short summary warning.
+    # This runs only once, so it has negligible impact on performance.
     if !converged
-        println(">> Max iterations reached without convergence.")
-        println("  Final Primal Residual: $(ADMM["primal_residual"][end])")
-        println("  Final Dual Residual: $(ADMM["dual_residual"][end])")
-        println("  Consider: adjusting rho_initial, increasing max_iter, or checking problem feasibility")
+        println()  # move to next line after progress bar
+        println(">> ADMM reached max iterations without convergence.")
+        println("   Final Primal Residual = ", ADMM["primal_residual"][end])
+        println("   Final Dual Residual   = ", ADMM["dual_residual"][end])
+    else
+        println()  # move to next line after progress bar
+        println(">> ADMM converged successfully.")
     end
 end

@@ -90,5 +90,5 @@ function define_elec_GC_demand_parameters!(agent_id::String, model::JuMP.Model, 
 
     # Print a confirmation message indicating parameters have been defined for this agent
     # This helps track the initialization progress during setup
-    println("Defined Electricity GC Demand parameters for agent: $agent_id")
+    # Initialization print removed to reduce console noise
 end

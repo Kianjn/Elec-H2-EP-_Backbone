@@ -56,6 +56,11 @@ function define_electricity_market_parameters!(market::Dict, data::Dict, ts::Dic
     # Default: 1.0 if not specified
     market["rho"] = get(data, "rho_initial", 1.0)
 
+    # Store a scaling factor for price updates to account for representative days.
+    # Scaling = (nTimesteps * nReprDays) / 8760.0 (fraction of full-year hours represented).
+    # This keeps ADMM penalty updates comparable to a full-year hourly model.
+    market["scale"] = (nTimesteps * nReprDays) / 8760.0
+
     # --- 3. POPULATE DATA PER YEAR ---
     # Loop through each year available in the time series data
     for y in Y
@@ -81,5 +86,5 @@ function define_electricity_market_parameters!(market::Dict, data::Dict, ts::Dic
 
     # Print a confirmation message indicating the electricity market parameters are set
     # This helps track the initialization progress during setup
-    println("Defined Electricity Market parameters.")
+    # Initialization print removed to reduce console noise
 end

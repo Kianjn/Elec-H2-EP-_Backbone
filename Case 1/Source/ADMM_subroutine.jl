@@ -52,32 +52,88 @@ function update_market_balances!(agents, mdict, elec, h2, elec_gc, h2_gc, ep, da
         # This will accumulate: Generation - Consumption - Electrolytic H2 input
         elec["balance"][y] .= 0.0
         
+        # DEBUG: Initialize tracking variables for Electricity market (hourly matrix)
+        # Track supply and demand separately for diagnostics
+        if !haskey(elec, "debug_supply")
+            elec["debug_supply"] = Dict()
+            elec["debug_demand"] = Dict()
+        end
+        if !haskey(elec["debug_supply"], y)
+            elec["debug_supply"][y] = zeros(size(elec["balance"][y]))
+            elec["debug_demand"][y] = zeros(size(elec["balance"][y]))
+        else
+            elec["debug_supply"][y] .= 0.0
+            elec["debug_demand"][y] .= 0.0
+        end
+        
         # Reset Hydrogen Market Balance to 0.0
         # This will accumulate: H2 Production - H2 Consumption
         h2["balance"][y] .= 0.0
+        
+        # DEBUG: Initialize tracking variables for Hydrogen market (hourly matrix)
+        if !haskey(h2, "debug_supply")
+            h2["debug_supply"] = Dict()
+            h2["debug_demand"] = Dict()
+        end
+        if !haskey(h2["debug_supply"], y)
+            h2["debug_supply"][y] = zeros(size(h2["balance"][y]))
+            h2["debug_demand"][y] = zeros(size(h2["balance"][y]))
+        else
+            h2["debug_supply"][y] .= 0.0
+            h2["debug_demand"][y] .= 0.0
+        end
         
         # Reset Electricity GC Market Balance to 0.0
         # This will accumulate: VRES GC Production - GC Consumption - GC Demand Agent purchases
         elec_gc["balance"][y] .= 0.0
         
-        # Reset Hydrogen GC Market Balance to 0.0
-        # This will accumulate: H2 GC Production - H2 GC Consumption (green + grey offtakers)
-        # 
-        # STRUCTURAL NOTE: Annual constraints (green backing, 42% mandate) allow temporal flexibility,
-        # meaning agents can buy/sell GCs at different times as long as annual totals match.
-        # However, ADMM enforces hourly market clearing (Supply = Demand at each hour).
-        # This creates a fundamental trade-off: annual compliance vs. perfect hourly clearing.
-        # As a result, small persistent hourly imbalances (~1-10 MWh) may remain even when
-        # annual constraints are satisfied. This is expected behavior and not a bug.
-        h2_gc["balance"][y] .= 0.0
+        # DEBUG: Initialize tracking variables for Electricity GC market (hourly matrix)
+        if !haskey(elec_gc, "debug_supply")
+            elec_gc["debug_supply"] = Dict()
+            elec_gc["debug_demand"] = Dict()
+        end
+        if !haskey(elec_gc["debug_supply"], y)
+            elec_gc["debug_supply"][y] = zeros(size(elec_gc["balance"][y]))
+            elec_gc["debug_demand"][y] = zeros(size(elec_gc["balance"][y]))
+        else
+            elec_gc["debug_supply"][y] .= 0.0
+            elec_gc["debug_demand"][y] .= 0.0
+        end
+        
+        # Reset Hydrogen GC Market Balance to 0.0.
+        # This will accumulate annual H2 GC Production - H2 GC Consumption (green + grey offtakers).
+        # The H2 GC market is modeled with an annual scalar balance; GC decisions are hourly but aggregated.
+        h2_gc["balance"][y] = 0.0
+        
+        # DEBUG: Initialize tracking variables for H2 GC market (annual aggregation)
+        # These will help diagnose aggregation issues
+        if !haskey(h2_gc, "debug_supply")
+            h2_gc["debug_supply"] = Dict()
+            h2_gc["debug_demand"] = Dict()
+        end
+        h2_gc["debug_supply"][y] = 0.0
+        h2_gc["debug_demand"][y] = 0.0
         
         # Reset End Product Balance
-        # Since Balance = Total Supply - Total Demand, we initialize it with negative Demand.
-        # This represents the "hole" that agents need to fill with supply.
-        # The fixed demand is exogenous (not an agent), so we subtract it here
-        # Then we add supply from green and grey ammonia producers
+        # For inelastic (fixed) EP demand, we start from negative demand and add:
+        #   + Supply from ammonia producers and importer
+        # Fixed demand is exogenous and does not respond directly to price.
         # At equilibrium: Supply - Demand = 0, so balance = 0
         ep["balance"][y] .= -ep["demand"][y]
+        
+        # DEBUG: Initialize tracking variables for End Product market (hourly matrix)
+        # Track supply and fixed demand separately for diagnostics
+        if !haskey(ep, "debug_supply")
+            ep["debug_supply"] = Dict()
+            ep["debug_demand"] = Dict()
+        end
+        if !haskey(ep["debug_supply"], y)
+            ep["debug_supply"][y] = zeros(size(ep["balance"][y]))
+            ep["debug_demand"][y] = copy(ep["demand"][y])
+        else
+            ep["debug_supply"][y] .= 0.0
+            ep["debug_demand"][y] .= ep["demand"][y]
+        end
     end
 
     # --- 2. ADD CONTRIBUTIONS FROM POWER SECTOR AGENTS ---
@@ -98,7 +154,10 @@ function update_market_balances!(agents, mdict, elec, h2, elec_gc, h2_gc, ep, da
                  # Consumers have elastic demand with quadratic utility function
                  # Subtract consumption from Electricity Balance (Demand)
                  # This reduces the balance (negative contribution to balance)
-                 elec["balance"][y] .-= Array(value.(m[:d_E][:,:,y]))
+                 demand_values = Array(value.(m[:d_E][:,:,y]))
+                 elec["balance"][y] .-= demand_values
+                 # DEBUG: Track demand contribution
+                 elec["debug_demand"][y] .+= demand_values
             # Check if agent is a Generator (has generation variable q_E, but NOT d_E)
             # Generators include: VRES (solar, wind) and Conventional (gas, coal)
             elseif haskey(m, :q_E)
@@ -106,7 +165,10 @@ function update_market_balances!(agents, mdict, elec, h2, elec_gc, h2_gc, ep, da
                  # value.(m[:q_E][:,:,y]) extracts the optimal generation values
                  # This is a JuMP DenseAxisArray, so we convert to standard Array to avoid broadcasting errors
                  # The .+= operator adds the generation matrix element-wise to the balance
-                 elec["balance"][y] .+= Array(value.(m[:q_E][:,:,y]))
+                 gen_values = Array(value.(m[:q_E][:,:,y]))
+                 elec["balance"][y] .+= gen_values
+                 # DEBUG: Track supply contribution
+                 elec["debug_supply"][y] .+= gen_values
                  
                  # If VRES, they also produce Green Certificates
                  # VRES generators produce 1 GC per 1 MWh of electricity (1:1 ratio)
@@ -114,7 +176,10 @@ function update_market_balances!(agents, mdict, elec, h2, elec_gc, h2_gc, ep, da
                  if haskey(m, :gc_E)
                      # Add GCs to Electricity GC Balance (Supply)
                      # For VRES: gc_E = q_E (1 MWh electricity = 1 GC)
-                     elec_gc["balance"][y] .+= Array(value.(m[:gc_E][:,:,y]))
+                     gc_values = Array(value.(m[:gc_E][:,:,y]))
+                     elec_gc["balance"][y] .+= gc_values
+                     # DEBUG: Track supply contribution
+                     elec_gc["debug_supply"][y] .+= gc_values
                  end
             end
         end
@@ -134,27 +199,53 @@ function update_market_balances!(agents, mdict, elec, h2, elec_gc, h2_gc, ep, da
             if haskey(m, :e_buy)
                 # Subtract electricity consumption (Demand)
                 # Electrolytic H2 producers consume electricity as input
-                elec["balance"][y] .-= Array(value.(m[:e_buy][:,:,y]))
+                e_buy_values = Array(value.(m[:e_buy][:,:,y]))
+                elec["balance"][y] .-= e_buy_values
+                # DEBUG: Track demand contribution
+                elec["debug_demand"][y] .+= e_buy_values
                 
                 # Subtract Elec GC consumption (Demand)
                 # Electrolytic H2 producers buy Elec GCs to certify their hydrogen as green
                 # Required by the green backing constraint
-                elec_gc["balance"][y] .-= Array(value.(m[:gc_e_buy][:,:,y]))
+                gc_e_buy_values = Array(value.(m[:gc_e_buy][:,:,y]))
+                elec_gc["balance"][y] .-= gc_e_buy_values
+                # DEBUG: Track demand contribution
+                elec_gc["debug_demand"][y] .+= gc_e_buy_values
                 
                 # Add Hydrogen production (Supply)
                 # Electrolytic H2 producers sell hydrogen to the market
-                h2["balance"][y] .+= Array(value.(m[:h_sell][:,:,y]))
+                h_sell_values = Array(value.(m[:h_sell][:,:,y]))
+                h2["balance"][y] .+= h_sell_values
+                # DEBUG: Track supply contribution
+                h2["debug_supply"][y] .+= h_sell_values
                 
-                # Add Hydrogen GC production (Supply)
-                # Electrolytic H2 producers sell H2 GCs when using green electricity
-                h2_gc["balance"][y] .+= Array(value.(m[:gc_h_sell][:,:,y]))
+                # Add Hydrogen GC production (Supply), aggregated annually across hours and representative days.
+                # Electrolytic H2 producers sell H2 GCs when using green electricity.
+                gc_h_sell_values = Array(value.(m[:gc_h_sell][:,:,y]))
+                h_sell_values = Array(value.(m[:h_sell][:,:,y]))  # DEBUG: Also get H2 sales for comparison
+                W = m[:W]  # Representative day weights
+                T = m[:T]  # Time steps
+                R = m[:R]  # Representative days
+                annual_raw_supply = sum(W[y][r] * gc_h_sell_values[t, r] for t in T, r in R)
+                annual_h2_sales = sum(W[y][r] * h_sell_values[t, r] for t in T, r in R)  # DEBUG: Weighted annual H2 sales
+                h2_gc["balance"][y] += annual_raw_supply
+                # DEBUG: Track GC supply from producer
+                h2_gc["debug_supply"][y] += annual_raw_supply
+                # DEBUG: Store H2 sales for comparison (to verify gc_h_sell <= h_sell constraint)
+                if !haskey(h2_gc, "debug_h2_sales")
+                    h2_gc["debug_h2_sales"] = Dict()
+                end
+                h2_gc["debug_h2_sales"][y] = annual_h2_sales
             # Note: Only Electrolytic Producers exist now (no conventional H2 producers)
             # Check if Hydrogen Consumer
             # Identified by presence of d_H variable (hydrogen demand)
             elseif haskey(m, :d_H)
                 # Subtract Hydrogen consumption (Demand)
                 # Hydrogen consumers reduce the H2 market balance
-                h2["balance"][y] .-= Array(value.(m[:d_H][:,:,y]))
+                d_H_values = Array(value.(m[:d_H][:,:,y]))
+                h2["balance"][y] .-= d_H_values
+                # DEBUG: Track demand contribution
+                h2["debug_demand"][y] .+= d_H_values
             end
         end
     end
@@ -173,12 +264,22 @@ function update_market_balances!(agents, mdict, elec, h2, elec_gc, h2_gc, ep, da
             if haskey(m, :h_buy)
                 # Subtract Hydrogen consumption (Demand)
                 # Green offtakers buy hydrogen as feedstock for ammonia production
-                h2["balance"][y] .-= Array(value.(m[:h_buy][:,:,y]))
+                h_buy_values = Array(value.(m[:h_buy][:,:,y]))
+                h2["balance"][y] .-= h_buy_values
+                # DEBUG: Track demand contribution
+                h2["debug_demand"][y] .+= h_buy_values
                 
-                # Subtract Hydrogen GC consumption (Demand)
+                # Subtract Hydrogen GC consumption (Demand), aggregated annually across hours and representative days.
                 # Green offtakers buy H2 GCs to certify their ammonia as green
-                # Required by the 42% policy mandate
-                h2_gc["balance"][y] .-= Array(value.(m[:gc_h_buy][:,:,y]))
+                # as required by the 42% policy mandate.
+                gc_h_buy_values = Array(value.(m[:gc_h_buy][:,:,y]))
+                W = m[:W]  # Representative day weights
+                T = m[:T]  # Time steps
+                R = m[:R]  # Representative days
+                annual_demand_green = sum(W[y][r] * gc_h_buy_values[t, r] for t in T, r in R)
+                h2_gc["balance"][y] -= annual_demand_green
+                # DEBUG: Track demand contribution from green offtaker
+                h2_gc["debug_demand"][y] += annual_demand_green
             end
             
             # Check if Grey Ammonia Producer (buys H2 GCs directly)
@@ -186,9 +287,16 @@ function update_market_balances!(agents, mdict, elec, h2, elec_gc, h2_gc, ep, da
             # Grey producers don't buy physical H2 (they produce it internally via SMR)
             # But they must buy H2 GCs to meet the 42% policy mandate
             if haskey(m, :gc_h_buy_G)
-                # Subtract Hydrogen GC consumption (Demand)
-                # Grey producers buy H2 GCs based on their internal H2 consumption equivalent
-                h2_gc["balance"][y] .-= Array(value.(m[:gc_h_buy_G][:,:,y]))
+                # Subtract Hydrogen GC consumption (Demand), aggregated annually across hours and representative days.
+                # Grey producers buy H2 GCs based on their internal H2 consumption equivalent.
+                gc_h_buy_G_values = Array(value.(m[:gc_h_buy_G][:,:,y]))
+                W = m[:W]  # Representative day weights
+                T = m[:T]  # Time steps
+                R = m[:R]  # Representative days
+                annual_demand_grey = sum(W[y][r] * gc_h_buy_G_values[t, r] for t in T, r in R)
+                h2_gc["balance"][y] -= annual_demand_grey
+                # DEBUG: Track demand contribution from grey offtaker
+                h2_gc["debug_demand"][y] += annual_demand_grey
             end
             
             # Check if selling End Product (Both Green and Grey do this)
@@ -197,7 +305,10 @@ function update_market_balances!(agents, mdict, elec, h2, elec_gc, h2_gc, ep, da
                 # Add End Product production (Supply)
                 # This fills the "hole" created by the fixed demand in step 1
                 # Both green and grey ammonia producers contribute to meeting the fixed demand
-                ep["balance"][y] .+= Array(value.(m[:ep_sell][:,:,y]))
+                ep_sell_values = Array(value.(m[:ep_sell][:,:,y]))
+                ep["balance"][y] .+= ep_sell_values
+                # DEBUG: Track supply contribution
+                ep["debug_supply"][y] .+= ep_sell_values
             end
         end
     end
@@ -218,7 +329,26 @@ function update_market_balances!(agents, mdict, elec, h2, elec_gc, h2_gc, ep, da
                 if haskey(m, :d_GC_E)
                     # Subtract GC consumption from Electricity GC Balance (Demand)
                     # These agents purchase GCs for environmental compliance or preferences
-                    elec_gc["balance"][y] .-= Array(value.(m[:d_GC_E][:,:,y]))
+                    d_GC_E_values = Array(value.(m[:d_GC_E][:,:,y]))
+                    elec_gc["balance"][y] .-= d_GC_E_values
+                    # DEBUG: Track demand contribution
+                    elec_gc["debug_demand"][y] .+= d_GC_E_values
+                end
+            end
+        end
+    end
+
+    # --- 6. ADD CONTRIBUTIONS FROM EP DEMAND AGENTS (ELASTIC AMMONIA DEMAND) ---
+    if haskey(agents, :EP_demand)
+        for id in agents[:EP_demand]
+            m = mdict[id]
+            for y in keys(ep["balance"])
+                if haskey(m, :d_EP)
+                    d_EP_values = Array(value.(m[:d_EP][:,:,y]))
+                    # Subtract EP demand from EP Balance
+                    ep["balance"][y] .-= d_EP_values
+                    # DEBUG: Track EP demand
+                    ep["debug_demand"][y] .+= d_EP_values
                 end
             end
         end
@@ -256,25 +386,86 @@ function update_prices!(elec, h2, elec_gc, h2_gc, ep)
         # Update Electricity Price
         # Price decreases if excess supply, increases if excess demand
         # The .-= operator performs element-wise subtraction
-        # elec["rho"] is a scalar, so it's broadcast across the entire balance matrix
-        elec["price"][y] .-= elec["rho"] .* elec["balance"][y]
+        # Use a scaling factor to account for representative days (fraction of full-year hours).
+        local elec_scale = haskey(elec, "scale") ? elec["scale"] : 1.0
+        elec["price"][y] .-= (elec["rho"] * elec_scale) .* elec["balance"][y]
+        # DEBUG: Track price history (store average price for hourly markets)
+        if !haskey(elec, "price_history")
+            elec["price_history"] = Dict()
+            elec["balance_history"] = Dict()
+        end
+        if !haskey(elec["price_history"], y)
+            elec["price_history"][y] = Float64[]
+            elec["balance_history"][y] = Float64[]
+        end
+        push!(elec["price_history"][y], sum(elec["price"][y]) / length(elec["price"][y]))  # Average price across all hours
+        push!(elec["balance_history"][y], sum(elec["balance"][y]))  # Total balance
         
         # Update Hydrogen Price
         # Same logic: price adjusts based on H2 market imbalance
-        h2["price"][y] .-= h2["rho"] .* h2["balance"][y]
+        local h2_scale = haskey(h2, "scale") ? h2["scale"] : 1.0
+        h2["price"][y] .-= (h2["rho"] * h2_scale) .* h2["balance"][y]
+        # DEBUG: Track price history (store average price for hourly markets)
+        if !haskey(h2, "price_history")
+            h2["price_history"] = Dict()
+            h2["balance_history"] = Dict()
+        end
+        if !haskey(h2["price_history"], y)
+            h2["price_history"][y] = Float64[]
+            h2["balance_history"][y] = Float64[]
+        end
+        push!(h2["price_history"][y], sum(h2["price"][y]) / length(h2["price"][y]))  # Average price across all hours
+        push!(h2["balance_history"][y], sum(h2["balance"][y]))  # Total balance
         
         # Update Electricity GC Price
         # Price adjusts based on Elec GC market imbalance
-        elec_gc["price"][y] .-= elec_gc["rho"] .* elec_gc["balance"][y]
+        local elec_gc_scale = haskey(elec_gc, "scale") ? elec_gc["scale"] : 1.0
+        elec_gc["price"][y] .-= (elec_gc["rho"] * elec_gc_scale) .* elec_gc["balance"][y]
+        # DEBUG: Track price history (store average price for hourly markets)
+        if !haskey(elec_gc, "price_history")
+            elec_gc["price_history"] = Dict()
+            elec_gc["balance_history"] = Dict()
+        end
+        if !haskey(elec_gc["price_history"], y)
+            elec_gc["price_history"][y] = Float64[]
+            elec_gc["balance_history"][y] = Float64[]
+        end
+        push!(elec_gc["price_history"][y], sum(elec_gc["price"][y]) / length(elec_gc["price"][y]))  # Average price across all hours
+        push!(elec_gc["balance_history"][y], sum(elec_gc["balance"][y]))  # Total balance
         
-        # Update Hydrogen GC Price
-        # Price adjusts based on H2 GC market imbalance
-        h2_gc["price"][y] .-= h2_gc["rho"] .* h2_gc["balance"][y]
+        # Update Hydrogen GC Price.
+        # H2 GC price is an annual scalar (one value per year) rather than an hourly matrix.
+        # The same rho * scale * balance logic is used as in other markets.
+        local h2_gc_scale = haskey(h2_gc, "scale") ? h2_gc["scale"] : 1.0
+        h2_gc["price"][y] -= (h2_gc["rho"] * h2_gc_scale) * h2_gc["balance"][y]
+        # DEBUG: Track price evolution
+        if !haskey(h2_gc, "price_history")
+            h2_gc["price_history"] = Dict()
+            h2_gc["balance_history"] = Dict()
+        end
+        if !haskey(h2_gc["price_history"], y)
+            h2_gc["price_history"][y] = Float64[]
+            h2_gc["balance_history"][y] = Float64[]
+        end
+        push!(h2_gc["price_history"][y], h2_gc["price"][y])
+        push!(h2_gc["balance_history"][y], h2_gc["balance"][y])
         
         # Update End Product Shadow Price
         # This coordinates the competition between green and grey ammonia producers
         # Price adjusts based on EP market imbalance (Supply - Fixed Demand)
-        ep["price"][y] .-= ep["rho"] .* ep["balance"][y]
+        local ep_scale = haskey(ep, "scale") ? ep["scale"] : 1.0
+        ep["price"][y] .-= (ep["rho"] * ep_scale) .* ep["balance"][y]
+        # DEBUG: Track price history (store average price for hourly markets)
+        if !haskey(ep, "price_history")
+            ep["price_history"] = Dict()
+            ep["balance_history"] = Dict()
+        end
+        if !haskey(ep["price_history"], y)
+            ep["price_history"][y] = Float64[]
+            ep["balance_history"][y] = Float64[]
+        end
+        push!(ep["price_history"][y], sum(ep["price"][y]) / length(ep["price"][y]))  # Average price across all hours
+        push!(ep["balance_history"][y], sum(ep["balance"][y]))  # Total balance
     end
 end
 
@@ -367,15 +558,16 @@ function calculate_residuals(elec, h2, elec_gc, h2_gc, ep, data)
             max_imbalance = h2["balance"][y][h2_idx]
         end
         
-        # Check max imbalance in Hydrogen GC Market
-        # Find maximum absolute imbalance in H2 GC market
-        h2_gc_max, h2_gc_idx = findmax(abs.(h2_gc["balance"][y]))
-        if h2_gc_max > p_res
-            p_res = h2_gc_max
+        # Check max imbalance in Hydrogen GC Market.
+        # The H2 GC balance is an annual scalar, so we simply use the absolute value of that scalar.
+        h2_gc_abs = abs(h2_gc["balance"][y])
+        if h2_gc_abs > p_res
+            p_res = h2_gc_abs
             max_market = "Hydrogen_GC"
             max_year = y
-            max_time, max_repr_day = h2_gc_idx[1], h2_gc_idx[2]
-            max_imbalance = h2_gc["balance"][y][h2_gc_idx]
+            max_time = 0  # Annual market has no specific time step
+            max_repr_day = 0  # Annual market has no specific representative day
+            max_imbalance = h2_gc["balance"][y]
         end
         
         # Check max imbalance in End Product Market (Supply vs Fixed Demand)

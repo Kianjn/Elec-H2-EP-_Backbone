@@ -54,13 +54,14 @@ function build_offtaker_agent!(agent_id::String, model::JuMP.Model, EP_market::D
     model[:H_ref] = Dict(y => zeros(length(T), length(R)) for y in Y)
 
     # -- Hydrogen Green Certificate (GC) Market Parameters --
-    # Both Green and Grey offtakers need H2 GCs (for policy mandate)
-    # Initialize H2 GC prices (cost when buying H2 GCs)
+    # Both Green and Grey offtakers need H2 GCs for meeting the policy mandate.
+    # Initialize H2 GC prices (cost when buying H2 GCs). Prices are annual scalars,
+    # while purchases are modeled hourly and aggregated annually for constraints.
     model[:lambda_GC_H] = Dict(y => H2_GC_market["price"][y] for y in Y)
     # Initialize H2 GC penalty factor
     model[:rho_GC_H] = H2_GC_market["rho"]
-    # Initialize H2 GC reference quantity
-    model[:GC_H_ref] = Dict(y => zeros(length(T), length(R)) for y in Y)
+    # Initialize annual reference quantities for H2 GCs, used in the aggregate penalty term.
+    model[:GC_H_ref] = Dict(y => 0.0 for y in Y)
 
     # --- 3. BUILD VARIABLES AND OBJECTIVES BASED ON AGENT TYPE ---
 
@@ -101,10 +102,20 @@ function build_offtaker_agent!(agent_id::String, model::JuMP.Model, EP_market::D
         
         # Constraint 3: Production Efficiency / Material Balance
         # Output (EP) is limited by Input (H2) multiplied by conversion factor alpha
-        # ep_sell <= alpha * h_buy
+        # ep_sell <= alpha * h_buy (upper bound: cannot produce more EP than H2 allows)
         # alpha: Stoichiometric efficiency (yield of NH3 per unit of H2)
         # Example: If alpha = 1.0, then 1 MWh H2 produces 1 MWh NH3
         @constraint(model, [t=T, r=R, y=Y], ep_sell[t,r,y] <= model[:alpha] * h_buy[t,r,y])
+        
+        # Constraint 3b: H2 Utilization Requirement
+        # If the electrolytic offtaker buys H2, they must use it to produce EP
+        # This prevents the agent from buying H2 at negative prices without producing EP
+        # ep_sell >= alpha * h_buy (lower bound: must use all H2 bought)
+        # Combined with Constraint 3, this enforces: ep_sell = alpha * h_buy
+        # This ensures that H2 purchases are directly tied to EP production
+        # If H2 prices are negative (subsidy), the offtaker must produce EP to benefit
+        # This creates the proper economic incentive: negative H2 prices make EP production profitable
+        @constraint(model, [t=T, r=R, y=Y], ep_sell[t,r,y] >= model[:alpha] * h_buy[t,r,y])
         
         # Constraint 4: Policy Requirement - 42% H2 GC Mandate (YEARLY CONSTRAINT)
         # At least 42% of annual hydrogen consumed must be green-certified
@@ -117,8 +128,11 @@ function build_offtaker_agent!(agent_id::String, model::JuMP.Model, EP_market::D
             0.42 * sum(W[y][r] * h_buy[t,r,y] for t in T, r in R))
 
         # -- OBJECTIVE FUNCTION --
-        # Maximize: Revenue (EP) - Costs (H2 + GCs + Processing) - ADMM Penalties
+        # Maximize: Revenue (EP) - Costs (H2 + GCs + Processing) - ADMM Penalties.
+        # H2 GC cost is calculated annually as (aggregate purchases × annual price),
+        # while GC purchases remain hourly for mandate tracking.
         @expression(model, obj_green,
+            # Hourly terms (EP revenue, H2 cost, processing, penalties)
             sum(W[y][r] * (
                 # (+) Revenue from End Product (Shadow Price)
                 # Market price of ammonia times quantity sold
@@ -126,20 +140,22 @@ function build_offtaker_agent!(agent_id::String, model::JuMP.Model, EP_market::D
                 # (-) Cost of Hydrogen Input
                 # Market price of hydrogen times quantity purchased
                 (model[:lambda_H][y][t,r] * h_buy[t,r,y]) -
-                # (-) Cost of Green Certificates
-                # Price premium for green-certified hydrogen
-                (model[:lambda_GC_H][y][t,r] * gc_h_buy[t,r,y]) -
                 # (-) Variable Processing Cost
                 # Cost of converting hydrogen to ammonia (non-fuel variable costs)
                 # C_proc: Processing cost per unit of End Product (EUR/MWh_EP)
                 (model[:C_proc] * ep_sell[t,r,y]) -
-                # (-) ADMM Penalties for coupled variables (EP, H2, GC)
+                # (-) ADMM Penalties for hourly variables (EP, H2)
                 # These penalties enforce consensus with market clearing conditions
                 # Penalty = (rho/2) * variable^2 (since references are zero in Exchange ADMM)
                 (model[:rho_EP] / 2 * (ep_sell[t,r,y] - model[:EP_ref][y][t,r])^2) -
-                (model[:rho_H] / 2 * (h_buy[t,r,y] - model[:H_ref][y][t,r])^2) -
-                (model[:rho_GC_H] / 2 * (gc_h_buy[t,r,y] - model[:GC_H_ref][y][t,r])^2)
-            ) for t in T, r in R, y in Y)
+                (model[:rho_H] / 2 * (h_buy[t,r,y] - model[:H_ref][y][t,r])^2)
+            ) for t in T, r in R, y in Y) -
+            # Annual H2 GC Cost (outside hourly loop)
+            # Cost = Annual Price × Weighted Annual Aggregate Purchases
+            sum(model[:lambda_GC_H][y] * sum(W[y][r] * gc_h_buy[t,r,y] for t in T, r in R) for y in Y) -
+            # Annual ADMM Penalty for H2 GC (aggregate penalty)
+            # Penalty = (rho/2) * (annual_aggregate_purchases - annual_reference)^2
+            sum(model[:rho_GC_H] / 2 * (sum(W[y][r] * gc_h_buy[t,r,y] for t in T, r in R) - model[:GC_H_ref][y])^2 for y in Y)
         )
         # Set the maximization objective
         @objective(model, Max, obj_green)
@@ -155,7 +171,7 @@ function build_offtaker_agent!(agent_id::String, model::JuMP.Model, EP_market::D
     # This agent produces ammonia using natural gas (SMR process)
     # Now must buy H2 GCs to meet 42% mandate based on internal H2 consumption
     # ==========================================================================
-    elseif !haskey(model, :alpha) && haskey(model, :EP_sell_bar)
+    elseif !haskey(model, :alpha) && haskey(model, :EP_sell_bar) && !haskey(model, :is_importer)
         
         # -- DECISION VARIABLES --
         
@@ -190,7 +206,12 @@ function build_offtaker_agent!(agent_id::String, model::JuMP.Model, EP_market::D
 
         # -- OBJECTIVE FUNCTION --
         # Maximize: Revenue (EP) - Costs (Marginal + GC Purchase) - ADMM Penalties
+        # 
+        # H2 GC cost is now calculated ANNUALLY (aggregate purchases × annual price)
+        # This reflects the annual clearing nature of the H2 GC market
+        # GCs are still purchased hourly (for mandate constraint tracking) but paid for annually
         @expression(model, obj_grey,
+            # Hourly terms (EP revenue, processing cost, EP penalty)
             sum(W[y][r] * (
                 # (+) Revenue from End Product
                 # Market price of ammonia times quantity sold
@@ -199,15 +220,16 @@ function build_offtaker_agent!(agent_id::String, model::JuMP.Model, EP_market::D
                 # Cost of producing ammonia via SMR (includes natural gas + O&M)
                 # C_proc: Marginal cost per unit of End Product (EUR/MWh_EP)
                 (model[:C_proc] * ep_sell[t,r,y]) -
-                # (-) Cost of H2 Green Certificates
-                # Price premium for green-certified hydrogen (required by policy)
-                # Grey producers must buy GCs even though they don't buy physical H2
-                (model[:lambda_GC_H][y][t,r] * gc_h_buy_G[t,r,y]) -
-                # (-) ADMM Penalties for EP and GC purchases
+                # (-) ADMM Penalties for hourly variables (EP)
                 # These penalties enforce consensus with market clearing conditions
-                (model[:rho_EP] / 2 * (ep_sell[t,r,y] - model[:EP_ref][y][t,r])^2) -
-                (model[:rho_GC_H] / 2 * (gc_h_buy_G[t,r,y] - model[:GC_H_ref][y][t,r])^2)
-            ) for t in T, r in R, y in Y)
+                (model[:rho_EP] / 2 * (ep_sell[t,r,y] - model[:EP_ref][y][t,r])^2)
+            ) for t in T, r in R, y in Y) -
+            # Annual H2 GC Cost (outside hourly loop)
+            # Cost = Annual Price × Weighted Annual Aggregate Purchases
+            sum(model[:lambda_GC_H][y] * sum(W[y][r] * gc_h_buy_G[t,r,y] for t in T, r in R) for y in Y) -
+            # Annual ADMM Penalty for H2 GC (aggregate penalty)
+            # Penalty = (rho/2) * (annual_aggregate_purchases - annual_reference)^2
+            sum(model[:rho_GC_H] / 2 * (sum(W[y][r] * gc_h_buy_G[t,r,y] for t in T, r in R) - model[:GC_H_ref][y])^2 for y in Y)
         )
         # Set the maximization objective
         @objective(model, Max, obj_grey)
@@ -215,8 +237,47 @@ function build_offtaker_agent!(agent_id::String, model::JuMP.Model, EP_market::D
         # Create aliases for generic access in ADMM updates and market balancing
         model[:ep_sell] = ep_sell
         model[:gc_h_buy_G] = gc_h_buy_G
+
+    # ==========================================================================
+    # CASE C: END PRODUCT IMPORTER (EP IMPORT)
+    # ==========================================================================
+    # Identified by :is_importer flag set in define_offtaker_parameters!
+    # Process: Supplies EP directly to the market at a given marginal import cost.
+    # Does NOT participate in H2 or H2 GC markets; no policy mandate applies.
+    # This agent provides a high-cost backstop supply that caps EP prices and
+    # adds flexibility to satisfy fixed demand.
+    # ==========================================================================
+    elseif haskey(model, :is_importer)
+
+        # -- DECISION VARIABLES --
+
+        # ep_sell: Imported End Product sold to the market (MWh)
+        @variable(model, 0 <= ep_sell[t=T, r=R, y=Y])
+
+        # -- OPERATIONAL CONSTRAINTS --
+
+        # Constraint 1: Import Capacity Limit
+        # Limit imported EP to maximum import capacity
+        @constraint(model, [t=T, r=R, y=Y], ep_sell[t,r,y] <= model[:EP_sell_bar])
+
+        # -- OBJECTIVE FUNCTION --
+        # Maximize: Revenue (EP) - Import Cost - ADMM Penalties
+        @expression(model, obj_import,
+            sum(W[y][r] * (
+                # (+) Revenue from selling imported EP at market shadow price
+                (model[:lambda_EP][y][t,r] * ep_sell[t,r,y]) -
+                # (-) Import cost (treated as processing cost)
+                (model[:C_proc] * ep_sell[t,r,y]) -
+                # (-) ADMM penalty for EP variable
+                (model[:rho_EP] / 2 * (ep_sell[t,r,y] - model[:EP_ref][y][t,r])^2)
+            ) for t in T, r in R, y in Y)
+        )
+        @objective(model, Max, obj_import)
+
+        # Alias for market balancing
+        model[:ep_sell] = ep_sell
     end
 
     # Print confirmation message for debugging and progress tracking
-    println("Built Offtaker Agent: $agent_id")
+    # Agent build message removed to avoid unnecessary console output in large runs
 end

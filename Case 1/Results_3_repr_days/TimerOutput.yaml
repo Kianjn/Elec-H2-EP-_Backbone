@@ -1,15 +1,15 @@
 ───────────────────────────────────────────────────────────────────────────────────
                                           Time                    Allocations      
                                  ───────────────────────   ────────────────────────
-        Tot / % measured:             45.9s /  93.8%           10.5GiB /  94.3%    
+        Tot / % measured:              146s /  98.7%           71.7GiB /  99.6%    
 
 Section                  ncalls     time    %tot     avg     alloc    %tot      avg
 ───────────────────────────────────────────────────────────────────────────────────
-ADMM Loop                     1    43.0s  100.0%   43.0s   9.85GiB  100.0%  9.85GiB
-  Solve Offtaker          2.00k    15.4s   35.8%  7.71ms   2.89GiB   29.3%  1.48MiB
-  Solve H2                2.00k    10.9s   25.4%  5.46ms   1.98GiB   20.1%  1.01MiB
-  Solve Power             2.00k    10.0s   23.2%  4.99ms   3.03GiB   30.7%  1.55MiB
-  Solve Elec GC Demand    2.00k    3.38s    7.9%  1.69ms   1.10GiB   11.1%   575KiB
-  Update Balances         2.00k    2.46s    5.7%  1.23ms    800MiB    7.9%   409KiB
-  Update Prices           2.00k    195ms    0.5%  97.3μs   14.0MiB    0.1%  7.17KiB
+ADMM Loop                     1     144s  100.0%    144s   71.5GiB  100.0%  71.5GiB
+  Solve Offtaker          10.0k    63.5s   44.0%  6.35ms   27.8GiB   39.0%  2.85MiB
+  Solve H2                10.0k    50.3s   34.8%  5.03ms   22.0GiB   30.8%  2.25MiB
+  Solve Power             10.0k    12.5s    8.6%  1.25ms   12.1GiB   16.9%  1.24MiB
+  Update Balances         10.0k    9.90s    6.9%   990μs   5.09GiB    7.1%   534KiB
+  Solve Elec GC Demand    10.0k    5.48s    3.8%   548μs   4.39GiB    6.1%   460KiB
+  Update Prices           10.0k    286ms    0.2%  28.6μs   8.04MiB    0.0%     843B
 ───────────────────────────────────────────────────────────────────────────────────

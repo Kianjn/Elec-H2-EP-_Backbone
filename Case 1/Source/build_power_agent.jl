@@ -266,5 +266,5 @@ function build_power_agent!(agent_id::String, model::JuMP.Model, elec_market::Di
     end
 
     # Print confirmation message for debugging and progress tracking
-    println("Built Power Agent: $agent_id")
+    # Agent build message removed to avoid unnecessary console output in large runs
 end

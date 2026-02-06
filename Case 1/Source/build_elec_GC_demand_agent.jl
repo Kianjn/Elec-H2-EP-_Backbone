@@ -85,5 +85,5 @@ function build_elec_GC_demand_agent!(agent_id::String, model::JuMP.Model, elec_G
     model[:d_GC_E] = d_GC_E
 
     # Print confirmation message for debugging and progress tracking
-    println("Built Electricity GC Demand Agent: $agent_id")
+    # Agent build message removed to avoid unnecessary console output in large runs
 end

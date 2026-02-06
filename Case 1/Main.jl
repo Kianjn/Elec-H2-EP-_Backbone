@@ -1,3 +1,6 @@
+# To run:
+# cd "C:\Users\kjafarinejad\Models\Project01\Case 1"
+# julia main.jl
 # ==============================================================================
 # MAIN SCRIPT: MULTI-AGENT ENERGY MARKET SIMULATION USING ADMM
 # by Kian Jafarinejad - PhD researcher at TPM Faculty of TU Delft (K.Jafarinejad@tudelft.nl)
@@ -80,9 +83,6 @@ using Base: split  # Import split function from standard library
 # Helps with license management and performance
 const GUROBI_ENV = Gurobi.Env()
 
-# Print confirmation message to indicate successful package loading
-println("Environment successfully activated and packages loaded.")
-
 # ==============================================================================
 # SECTION 3: DIRECTORY SETUP
 # ==============================================================================
@@ -106,6 +106,7 @@ include(joinpath(home_dir, "Source", "define_power_parameters.jl"))  # Define Po
 include(joinpath(home_dir, "Source", "define_H2_parameters.jl"))  # Define Hydrogen Sector agent parameters (Electrolytic Producer, Consumer)
 include(joinpath(home_dir, "Source", "define_offtaker_parameters.jl"))  # Define Offtaker agent parameters (Green & Grey Ammonia Producers)
 include(joinpath(home_dir, "Source", "define_elec_GC_demand_parameters.jl"))  # Define Electricity GC Demand Agent parameters
+include(joinpath(home_dir, "Source", "define_EP_demand_parameters.jl"))  # Define End Product Demand Agent parameters
 
 # --- MARKET PARAMETER DEFINITION FUNCTIONS ---
 # These functions initialize market structures (prices, balances, rho)
@@ -123,6 +124,7 @@ include(joinpath(home_dir, "Source", "build_power_agent.jl"))  # Build Power Age
 include(joinpath(home_dir, "Source", "build_H2_agent.jl"))  # Build Hydrogen Agent optimization models
 include(joinpath(home_dir, "Source", "build_offtaker_agent.jl"))  # Build Offtaker Agent optimization models
 include(joinpath(home_dir, "Source", "build_elec_GC_demand_agent.jl"))  # Build Electricity GC Demand Agent optimization models
+include(joinpath(home_dir, "Source", "build_EP_demand_agent.jl"))  # Build End Product Demand Agent optimization models
 
 # --- ADMM AND SOLVING FUNCTIONS ---
 # These functions implement the ADMM algorithm and agent subproblem solving
@@ -134,6 +136,7 @@ include(joinpath(home_dir, "Source", "solve_power_agent.jl"))  # Solve Power Age
 include(joinpath(home_dir, "Source", "solve_H2_agent.jl"))  # Solve Hydrogen Agent subproblem
 include(joinpath(home_dir, "Source", "solve_offtaker_agent.jl"))  # Solve Offtaker Agent subproblem
 include(joinpath(home_dir, "Source", "solve_elec_GC_demand_agent.jl"))  # Solve Electricity GC Demand Agent subproblem
+include(joinpath(home_dir, "Source", "solve_EP_demand_agent.jl"))  # Solve End Product Demand Agent subproblem
 include(joinpath(home_dir, "Source", "update_rho.jl"))  # Update ADMM penalty parameter (adaptive strategy)
 include(joinpath(home_dir, "Source", "save_results.jl"))  # Save simulation results to CSV files
 
@@ -239,6 +242,11 @@ agents[:EP_market] = []  # Initialize list for agents in End Product coordinatio
 # Gurobi.Optimizer specifies that Gurobi will be used as the solver
 # Structure: mdict[agent_id] = JuMP.Model
 mdict = Dict(i => Model(Gurobi.Optimizer) for i in agents[:all])
+
+# Silence solver output for all models to avoid excessive console logs
+for m in values(mdict)
+    set_silent(m)
+end
 
 # ==============================================================================
 # SECTION 9: MARKET PARAMETER DEFINITION
@@ -358,6 +366,7 @@ for m in agents[:elec_GC_demand]
     # Passes elec_GC_market so agents can see current GC prices
     build_elec_GC_demand_agent!(m, mdict[m], elec_GC_market)
 end
+
 
 # ==============================================================================
 # SECTION 12: RUN ADMM ALGORITHM

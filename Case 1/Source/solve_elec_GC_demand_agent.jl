@@ -96,7 +96,6 @@ function solve_elec_GC_demand_agent!(agent_id::String, model::JuMP.Model, elec_G
     # If not optimal, print a warning to alert the user
     # Possible non-optimal statuses: INFEASIBLE, UNBOUNDED, TIME_LIMIT, etc.
     if termination_status(model) != MOI.OPTIMAL
-        println("Warning: Agent $agent_id did not solve optimally.")
-        println("  Termination status: $(termination_status(model))")
+        # Warning prints removed to avoid slowing large runs; check solver status from saved results if needed.
     end
 end

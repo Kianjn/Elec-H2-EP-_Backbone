@@ -65,13 +65,14 @@ function build_H2_agent!(agent_id::String, model::JuMP.Model, H2_market::Dict, H
     model[:H_ref] = Dict(y => zeros(length(T), length(R)) for y in Y)
 
     # -- Hydrogen Green Certificate (GC) Market Parameters (Output) --
-    # Initialize H2 GC prices from global market
-    # These represent the price premium for green-certified hydrogen
+    # Initialize H2 GC prices from the GC market for each year.
+    # These represent the price premium for green-certified hydrogen.
+    # H2 GC prices are modeled as annual scalars, while GC production decisions remain hourly.
     model[:lambda_GC_H] = Dict(y => H2_GC_market["price"][y] for y in Y)
     # Initialize the penalty factor for H2 GC market coupling
     model[:rho_GC_H] = model[:rho]
-    # Initialize reference quantities for H2 GC ADMM tracking
-    model[:GC_H_ref] = Dict(y => zeros(length(T), length(R)) for y in Y)
+    # Initialize annual reference quantities for the H2 GC market (used in the aggregate penalty term)
+    model[:GC_H_ref] = Dict(y => 0.0 for y in Y)
 
 
     # --- 3. BUILD VARIABLES AND OBJECTIVES BASED ON AGENT TYPE ---
@@ -125,9 +126,14 @@ function build_H2_agent!(agent_id::String, model::JuMP.Model, H2_market::Dict, H
         @constraint(model, physics[t=T, r=R, y=Y], e_buy[t,r,y] >= model[:e_H] * h_sell[t,r,y])
 
         # Constraint 3: Green Certification Balance
-        # You cannot sell more Green H2 Certificates than the actual H2 you produce
-        # This ensures that GC sales are physically backed by hydrogen production
-        # gc_h_sell <= h_sell (at most 1 GC per unit of H2)
+        # CRITICAL: GC revenue can only be earned for H2 that is actually delivered to the offtaker
+        # The constraint gc_h_sell <= h_sell ensures GCs don't exceed production
+        # However, in ADMM, h_sell represents what the producer wants to sell, not what's actually bought
+        # The H2 market penalty (rho_H/2 * h_sell^2) should drive h_sell towards market clearing
+        # If there's excess supply (h_sell > h_buy), the H2 price goes negative, making offtaker profitable
+        # This constraint ensures GCs are only sold for H2 that can actually be delivered
+        # gc_h_sell <= h_sell (at most 1 GC per unit of H2 produced)
+        # Note: In equilibrium, h_sell = h_buy (market clearing), so GC revenue is tied to actual sales
         @constraint(model, cert_limit[t=T, r=R, y=Y], gc_h_sell[t,r,y] <= h_sell[t,r,y])
         
         # Constraint 4: Green Backing Constraint (ANNUAL CONSTRAINT from LaTeX formulation)
@@ -142,17 +148,17 @@ function build_H2_agent!(agent_id::String, model::JuMP.Model, H2_market::Dict, H
             model[:e_H] * sum(W[y][r] * gc_h_sell[t,r,y] for t in T, r in R))
 
         # -- OBJECTIVE FUNCTION --
-        # Maximize: Revenue (H2 + H2_GC) - Cost (Elec + Elec_GC + Operations) - ADMM Penalties
+        # Maximize: Revenue (H2 + H2_GC) - Cost (Elec + Elec_GC + Operations) - ADMM Penalties.
         # The objective is weighted by representative day weights (W) to account for
-        # the frequency/probability of each representative day
+        # the frequency/probability of each representative day.
+        # H2 GC revenue is calculated on an annual basis as price × weighted annual GC sales,
+        # consistent with the annual scalar formulation of the H2 GC market balance.
         @expression(model, obj_green,
+            # Hourly terms (H2 sales, costs, penalties)
             sum(W[y][r] * (
                 # (+) Revenue from selling Hydrogen
                 # Price per MWh of hydrogen times quantity sold
-                (model[:lambda_H][y][t,r] * h_sell[t,r,y]) +
-                # (+) Revenue from selling Hydrogen Green Certificates
-                # Price premium for green-certified hydrogen
-                (model[:lambda_GC_H][y][t,r] * gc_h_sell[t,r,y]) -
+                (model[:lambda_H][y][t,r] * h_sell[t,r,y]) -
                 # (-) Cost of buying Electricity
                 # Market price of electricity times quantity purchased
                 (model[:lambda_E][y][t,r] * e_buy[t,r,y]) -
@@ -164,15 +170,22 @@ function build_H2_agent!(agent_id::String, model::JuMP.Model, H2_market::Dict, H
                 # For linear version: C_H(e) = c_{H,0} * e_buy
                 # This represents variable operational and maintenance costs proportional to electricity input
                 (model[:C_H] * e_buy[t,r,y]) - 
-                # (-) ADMM Penalties for all 4 coupled variables (Standard quadratic form)
+                # (-) ADMM Penalties for hourly variables (Standard quadratic form)
                 # These penalties enforce consensus with market clearing conditions
                 # Penalty = (rho/2) * (variable - reference)^2
                 # For Exchange ADMM, references are zero, so penalty = (rho/2) * variable^2
                 (model[:rho_H] / 2 * (h_sell[t,r,y] - model[:H_ref][y][t,r])^2) -
-                (model[:rho_GC_H] / 2 * (gc_h_sell[t,r,y] - model[:GC_H_ref][y][t,r])^2) -
                 (model[:rho_E] / 2 * (e_buy[t,r,y] - model[:E_ref][y][t,r])^2) -
                 (model[:rho_GC_E] / 2 * (gc_e_buy[t,r,y] - model[:GC_E_ref][y][t,r])^2)
-            ) for t in T, r in R, y in Y)
+            ) for t in T, r in R, y in Y) +
+            # Annual H2 GC Revenue and ADMM Penalty (aggregate, consistent with market balance)
+            # Revenue = Annual Price × Weighted Annual GC Sales
+            # Penalty = (rho/2) * (annual_aggregate_sales - annual_reference)^2
+            sum(
+                model[:lambda_GC_H][y] * sum(W[y][r] * gc_h_sell[t,r,y] for t in T, r in R) -
+                (model[:rho_GC_H] / 2) * (sum(W[y][r] * gc_h_sell[t,r,y] for t in T, r in R) - model[:GC_H_ref][y])^2
+                for y in Y
+            )
         )
         # Set the maximization objective for the optimization model
         @objective(model, Max, obj_green)
@@ -233,5 +246,5 @@ function build_H2_agent!(agent_id::String, model::JuMP.Model, H2_market::Dict, H
     end
 
     # Print confirmation message for debugging and progress tracking
-    println("Built Hydrogen Agent: $agent_id")
+    # Agent build message removed to avoid unnecessary console output in large runs
 end

@@ -87,9 +87,28 @@ function define_offtaker_parameters!(agent_id::String, model::JuMP.Model, data::
         # Units: kg_H2 / kg_NH3 (or equivalent in MWh units)
         # Default: 0.18 if not specified (typical value for SMR-based ammonia)
         model[:gamma_NH3] = get(data, "gamma_NH3", 0.18)
+
+    # --- 3. END PRODUCT IMPORTER LOGIC (EP IMPORT) ---
+    # This agent represents an external ammonia import option.
+    # It supplies End Product to the EP market at a high but finite marginal cost,
+    # without consuming hydrogen or H2 GCs. This adds flexibility and caps EP prices.
+    # Check if the agent type is "EPImporter"
+    elseif data["Type"] == "EPImporter"
+        # Store the maximum import capacity (MW_EP)
+        # This represents the maximum amount of ammonia that can be imported.
+        # Units: MW (End Product output)
+        model[:EP_sell_bar] = data["Capacity"]
+
+        # Store the import cost as an effective processing cost
+        # This is the marginal cost of imported ammonia (EUR/MWh_EP).
+        # It should be higher than typical green/grey production costs to act as a price cap.
+        model[:C_proc] = data["ImportCost"]
+
+        # Flag this model as an importer so the build function can select the right structure.
+        model[:is_importer] = true
     end
     
     # Print a confirmation message indicating parameters have been defined for this agent
     # This helps track the initialization progress during setup
-    println("Defined parameters for $agent_id")
+    # Initialization print removed to reduce console noise
 end

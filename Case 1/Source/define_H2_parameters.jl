@@ -114,5 +114,5 @@ function define_H2_parameters!(agent_id::String, model::JuMP.Model, data::Dict, 
 
     # Print a confirmation message indicating parameters have been defined for this agent
     # This helps track the initialization progress during setup
-    println("Defined H2 parameters for agent: $agent_id")
+    # Initialization print removed to reduce console noise
 end

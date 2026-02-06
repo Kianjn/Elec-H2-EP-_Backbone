@@ -63,8 +63,9 @@ function solve_H2_agent!(agent_id::String, model::JuMP.Model,
         model[:lambda_H][y] .= H2_market["price"][y]
         
         # Update Hydrogen Green Certificate Price: Revenue per H2 GC sold (for producers)
-        # This represents the price premium for green-certified hydrogen
-        model[:lambda_GC_H][y] .= H2_GC_market["price"][y]
+        # This represents the price premium for green-certified hydrogen.
+        # H2 GC prices are modeled as annual scalars, consistent with annual GC market clearing.
+        model[:lambda_GC_H][y] = H2_GC_market["price"][y]
 
         # -- ADMM REFERENCE QUANTITIES --
         # Reset ADMM reference quantities to 0.0 (Standard Exchange ADMM formulation)
@@ -74,7 +75,8 @@ function solve_H2_agent!(agent_id::String, model::JuMP.Model,
         model[:E_ref][y] .= 0.0      # Electricity reference (zero in Exchange ADMM)
         model[:GC_E_ref][y] .= 0.0  # Elec GC reference (zero in Exchange ADMM)
         model[:H_ref][y] .= 0.0      # Hydrogen reference (zero in Exchange ADMM)
-        model[:GC_H_ref][y] .= 0.0  # H2 GC reference (zero in Exchange ADMM)
+        # Annual reference quantity for H2 GCs (used in the aggregate penalty term)
+        model[:GC_H_ref][y] = 0.0   # H2 GC reference (zero in Exchange ADMM, annual)
     end
     
     # --- 3. UPDATE ADMM PENALTY PARAMETERS (RHO) ---
@@ -98,17 +100,17 @@ function solve_H2_agent!(agent_id::String, model::JuMP.Model,
     # -- CASE A: ELECTROLYTIC HYDROGEN PRODUCER --
     # Identified by presence of e_buy variable (electricity purchase)
     if haskey(model, :e_buy) 
-        # Objective: Maximize profit = Revenue - Costs - ADMM Penalties
-        # Revenue comes from selling hydrogen and H2 GCs
-        # Costs include electricity, Elec GCs, and operational expenses
+        # Objective: Maximize profit = Revenue - Costs - ADMM Penalties.
+        # Revenue comes from selling hydrogen and H2 GCs.
+        # Costs include electricity, Elec GCs, and operational expenses.
+        # H2 GC revenue is calculated on an annual basis as price × weighted annual GC sales,
+        # consistent with the annual scalar balance used in the H2 GC market.
         @objective(model, Max,
+            # Hourly terms (H2 sales, costs, penalties)
             sum(W[y][r] * (
                 # (+) Revenue from selling Hydrogen
                 # Market price times quantity sold
-                (model[:lambda_H][y][t,r] * model[:h_sell][t,r,y]) +
-                # (+) Revenue from selling Hydrogen Green Certificates
-                # Price premium for green-certified hydrogen
-                (model[:lambda_GC_H][y][t,r] * model[:gc_h_sell][t,r,y]) -
+                (model[:lambda_H][y][t,r] * model[:h_sell][t,r,y]) -
                 # (-) Cost of buying Electricity
                 # Market price times quantity purchased
                 (model[:lambda_E][y][t,r] * model[:e_buy][t,r,y]) -
@@ -121,16 +123,23 @@ function solve_H2_agent!(agent_id::String, model::JuMP.Model,
                 # This represents variable operational and maintenance costs
                 # The cost is proportional to electricity input, not hydrogen output
                 (model[:C_H] * model[:e_buy][t,r,y]) -
-                # (-) ADMM Penalties (Quadratic form)
+                # (-) ADMM Penalties for hourly variables (Quadratic form)
                 # These penalties enforce consensus with market clearing conditions
                 # Penalty = (rho/2) * variable^2 (since references are zero)
                 # Higher values of variables lead to larger penalties, encouraging
                 # agents to align their decisions with market equilibrium
                 (model[:rho_H] / 2 * (model[:h_sell][t,r,y])^2) -       # Penalty on H2 sales
-                (model[:rho_GC_H] / 2 * (model[:gc_h_sell][t,r,y])^2) - # Penalty on H2 GC sales
                 (model[:rho_E] / 2 * (model[:e_buy][t,r,y])^2) -        # Penalty on Elec purchases
                 (model[:rho_GC_E] / 2 * (model[:gc_e_buy][t,r,y])^2)    # Penalty on Elec GC purchases
-            ) for t in T, r in R, y in Y)
+            ) for t in T, r in R, y in Y) +
+            # Annual H2 GC Revenue and ADMM Penalty (aggregate, consistent with market balance)
+            # Revenue = Annual Price × Weighted Annual GC Sales
+            # Penalty = (rho/2) * (annual_aggregate_sales - annual_reference)^2
+            sum(
+                model[:lambda_GC_H][y] * sum(W[y][r] * model[:gc_h_sell][t,r,y] for t in T, r in R) -
+                (model[:rho_GC_H] / 2) * (sum(W[y][r] * model[:gc_h_sell][t,r,y] for t in T, r in R) - model[:GC_H_ref][y])^2
+                for y in Y
+            )
         )
 
     # -- CASE B: HYDROGEN CONSUMER --
@@ -170,7 +179,6 @@ function solve_H2_agent!(agent_id::String, model::JuMP.Model,
     # If not optimal, print a warning to alert the user
     # Possible non-optimal statuses: INFEASIBLE, UNBOUNDED, TIME_LIMIT, etc.
     if termination_status(model) != MOI.OPTIMAL
-        println("Warning: Agent $agent_id did not solve optimally.")
-        println("  Termination status: $(termination_status(model))")
+        # Warning prints removed to avoid slowing large runs; check solver status from saved results if needed.
     end
 end

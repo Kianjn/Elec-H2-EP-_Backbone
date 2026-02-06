@@ -5,12 +5,9 @@ General:
   base_year: 2021
 
 ADMM:
-  rho_initial: 1.0
-  max_iter: 2000
-  epsilon: 0.01    # Convergence tolerance (relaxed from 0.001)
-                   # Note: Annual constraints allow temporal flexibility, which can create
-                   # persistent hourly imbalances. A tolerance of 0.01 MWh is more practical
-                   # for this problem structure while still ensuring reasonable market clearing.
+  rho_initial: 1.0   # Base value; per-market rhos below drive convergence
+  max_iter: 10000    # Increased iterations now that residuals are small
+  epsilon: 0.01      # Convergence tolerance
   theta: 1.0
 
 # --- MARKET / COORDINATION PARAMETERS ---
@@ -20,28 +17,27 @@ ADMM:
 # Lower rho for GC markets reduces their sensitivity, allowing base markets to stabilize first
 elec_market:
   initial_price: 50.0
-  rho_initial: 1.0      # Base penalty parameter for electricity market
+  rho_initial: 1.0      # Moderate penalty; avoid overly stiff dynamics
 elec_GC_market:
   initial_price: 5.0
-  rho_initial: 0.3     # Lower rho for GC market to reduce coupling with electricity market
-                        # Allows electricity market to stabilize first, then GC market follows
+  rho_initial: 0.3      # Softer penalty to keep GC market coupled but not dominating
+                        # Electricity GC market converges alongside electricity
 H2_market:
-  initial_price: 150
-  rho_initial: 1.0     # Base penalty parameter for hydrogen market
+  initial_price: 0.0
+  rho_initial: 0.5      # Gentle penalty so H2 price can move negative without exploding
+                        # Encourages, but does not force, H2 market clearing
 H2_GC_market:
-  initial_price: 10.0
-  rho_initial: 0.05    # Lower rho for H2 GC market to reduce coupling
-                        # Allows hydrogen market to stabilize first, then GC market follows
-                        # Further reduced from 0.1 to 0.05 to break coupling more effectively
-                        # NOTE: This is kept fixed (not updated by adaptive rho) to maintain decoupling
+  initial_price: 50.0
+  rho_initial: 0.3      
+                        # Slightly higher penalty so H2 GC prices adjust faster toward clearing
 
 # End Product (EP) Coordination
 # This acts as the "Fixed Demand" that agents compete to fill.
 EP_market:              
-  initial_price: 500  # Starting guess for the "shadow price"
-  rho_initial: 1.0    # Base penalty parameter for EP market
+  initial_price: 700.0  # High starting shadow price to make EP production attractive
+  rho_initial: 3.0      # Stronger penalty so EP price adjusts faster toward market clearing
   Demand_Column: "LOAD_EP"
-  Total_Demand: 35.0    # MW (Total system demand to be split between Green/Grey)
+  Total_Demand: 70.0    # Slightly higher MW demand to require more EP supply overall
 
 # --- AGENTS ---
 
@@ -68,8 +64,7 @@ Hydrogen:
     Capacity_Electrolyzer: 30.0
     Capacity_H2_Output: 20.0
     SpecificConsumption: 1.5
-    OperationalCost: 5.0
-  # Note: Conventional H2 Producer removed - only Electrolytic Producers exist now
+    OperationalCost: 3.0    # lowered to make green H2 slightly cheaper
 
 Hydrogen_Offtaker:
   # 1. ELECTROLYTIC AMMONIA PRODUCER (Green - buys H2, sells EP)
@@ -78,14 +73,20 @@ Hydrogen_Offtaker:
     Capacity_H2_In: 20.0
     Capacity_EP_Out: 20.0
     Alpha: 1.0
-    ProcessingCost: 10.0
+    ProcessingCost: 7.0     # lowered to make green EP route more competitive
 
   # 2. GREY AMMONIA PRODUCER (Produces EP via SMR, must buy H2 GCs for 42% mandate)
   Offtaker_Grey:
     Type: "GreyOfftaker"
     Capacity: 25.0         # MW_EP
-    MarginalCost: 120.0    # Cost to make EP via grey route
+    MarginalCost: 100.0    # slightly cheaper but still above green fuel+processing
     gamma_NH3: 0.18        # kg H2 per kg NH3 (typical value for SMR-based production)
+
+  # 3. END PRODUCT IMPORTER (High-cost backstop supply for ammonia)
+  Offtaker_Import:
+    Type: "EPImporter"
+    Capacity: 5.0          # further reduced so importer cannot meet total demand
+    ImportCost: 1800.0     # very high cost, but still below fixed EP price (2000)
 
 # Electricity GC Demand Agent
 Electricity_GC_Demand:
@@ -95,3 +96,6 @@ Electricity_GC_Demand:
     Load_Column: "LOAD_E"  # Use same profile as electricity demand
     A_GC: 20.0             # Utility function intercept (typical value)
     B_GC: 0.5              # Utility function slope (typical value)
+
+# Elastic End Product Demand Agent
+EP_Demand: {}  # disabled elastic EP demand; EP demand is now fixed/inelastic via EP_market

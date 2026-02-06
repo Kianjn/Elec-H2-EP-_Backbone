@@ -94,5 +94,5 @@ function define_common_parameters!(agent_id::String, model::JuMP.Model, data::Di
 
     # Print a confirmation message to the console for debugging purposes
     # This helps track which agents have been initialized during the setup phase
-    println("Defined common parameters for agent: $agent_id")
+    # Initialization print removed to reduce console noise
 end

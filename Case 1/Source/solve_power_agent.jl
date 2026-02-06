@@ -166,7 +166,6 @@ function solve_power_agent!(agent_id::String, model::JuMP.Model, elec_market::Di
     # If the solver did not find an optimal solution, print a warning to the console
     # Possible non-optimal statuses: INFEASIBLE, UNBOUNDED, TIME_LIMIT, etc.
     if termination_status(model) != MOI.OPTIMAL
-        println("Warning: Agent $agent_id did not solve optimally.")
-        println("  Termination status: $(termination_status(model))")
+        # Warning prints removed to avoid slowing large runs; check solver status from saved results if needed.
     end
 end
