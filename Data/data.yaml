@@ -1,0 +1,134 @@
+# ==============================================================================
+# data.yaml — Central configuration for all agents, markets, and ADMM settings
+# ==============================================================================
+
+# ---------------------------------------------------------------------------
+# General: Temporal dimensions and reference year
+# ---------------------------------------------------------------------------
+General:
+  nTimesteps: 24       # Hours per representative day (24 = hourly resolution; standard for power-system models)
+  nReprDays: 3         # Number of representative days (3 keeps the model small while capturing seasonal variation; increase for accuracy)
+  nYears: 1            # Number of scenario years (1 = single-year snapshot; >1 enables stochastic / multi-year analysis)
+  base_year: 2021      # Calendar year whose timeseries data is used (2021 chosen as a recent year with complete public data)
+
+# ---------------------------------------------------------------------------
+# ADMM: Alternating Direction Method of Multipliers global settings
+# ---------------------------------------------------------------------------
+ADMM:
+  rho_initial: 1.0     # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
+  max_iter: 10000       # Generous iteration budget; allows ADMM to run long enough even for stiff multi-market coupling (typically converges much sooner)
+  epsilon: 0.1          # Convergence tolerance (L2 norm of primal/dual residuals); 0.1 balances solution accuracy against computation time
+
+# ---------------------------------------------------------------------------
+# Market initial prices and penalty weights
+# Each market has:
+#   initial_price — Scalar seed for the 3D ADMM price array λ[jh,jd,jy].
+#                   Chosen as a reasonable starting guess to help ADMM converge
+#                   faster by starting near equilibrium.
+#   rho_initial   — Per-market ADMM penalty parameter; balances convergence
+#                   speed vs. oscillation. Lower values for markets needing
+#                   gentler convergence (e.g. GC markets with smaller volumes).
+# ---------------------------------------------------------------------------
+elec_market:
+  initial_price: 50.0   # €/MWh — Typical European wholesale electricity price; seeds ADMM near expected equilibrium
+  rho_initial: 1.0      # Penalty weight for electricity; 1.0 matches the global default (largest, most liquid market)
+elec_GC_market:
+  initial_price: 5.0    # €/MWh_GC — Small positive starting price for electricity Guarantees of Origin; GC premiums are modest
+  rho_initial: 0.3      # Lower penalty: GC market has smaller volumes & price ranges; gentler convergence avoids oscillation
+H2_market:
+  initial_price: 0.0    # €/MWh_H2 — Starting at zero because H2 is an internal transfer good; ADMM will discover the shadow price
+  rho_initial: 0.5      # Moderate penalty: H2 market is tightly coupled to electricity through the electrolyzer
+H2_GC_market:
+  initial_price: 50.0   # €/MWh_GC — Higher initial guess reflecting the renewable premium embedded in hydrogen certificates
+  rho_initial: 0.3      # Lower penalty: certificate market is thin; gentle updates prevent price whipsawing
+
+# ---------------------------------------------------------------------------
+# EP (End-Product) market — Coordination market for ammonia / downstream product
+# ---------------------------------------------------------------------------
+EP_market:
+  initial_price: 700.0  # €/t_EP — Reflects approximate ammonia market price level; high because EP is a processed commodity
+  rho_initial: 3.0      # Larger penalty: EP market is stiff (few participants, large price swings) and needs stronger coupling
+  Demand_Column: "LOAD_EP"  # Column in the timeseries CSV that holds the normalized EP demand profile (inelastic)
+  Total_Demand: 70.0        # Annual total EP demand (MWh_EP equivalent); multiplied by the normalized profile to get D_EP[jh,jd,jy]
+
+# ---------------------------------------------------------------------------
+# Power-sector agents
+# ---------------------------------------------------------------------------
+Power:
+  # Variable Renewable Energy Source (solar farm)
+  Gen_VRES_01:
+    Type: "VRES"
+    Capacity: 100.0          # Installed capacity (MW); maximum output under perfect conditions
+    Profile_Column: "SOLAR"  # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
+    MarginalCost: 0.0        # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
+
+  # Dispatchable conventional generator (e.g. gas turbine)
+  Gen_Conv_01:
+    Type: "Conventional"
+    Capacity: 50.0           # Installed capacity (MW); always available (AF = 1)
+    MarginalCost: 60.0       # €/MWh — Fuel + O&M cost; sets the price floor when VRES cannot meet demand
+
+  # Electricity consumer with elastic (quadratic) demand
+  # Quadratic utility: U(d) = A_E·d − ½·B_E·d²  →  inverse demand p(d) = A_E − B_E·d
+  Cons_Elec_01:
+    Type: "Consumer"
+    PeakLoad: 40.0           # Peak demand (MW); scales the normalized load profile to absolute MW values
+    Load_Column: "LOAD_E"    # Column in timeseries CSV with the normalized electricity load profile
+    A_E: 500.0               # €/MWh — Intercept of inverse demand curve; willingness to pay for the first MW (high to ensure demand is met)
+    B_E: 0.5                 # €/MWh² — Slope of inverse demand; controls price sensitivity (low = relatively inelastic demand)
+
+# ---------------------------------------------------------------------------
+# Hydrogen producers (electrolysis)
+# ---------------------------------------------------------------------------
+Hydrogen:
+  Prod_H2_Green:
+    Type: "GreenProducer"
+    Capacity_Electrolyzer: 30.0   # Maximum electricity input to the electrolyzer (MW_elec); physical equipment rating
+    Capacity_H2_Output: 20.0      # Maximum hydrogen output (MW_H2); limited by downstream piping / compression
+    SpecificConsumption: 1.5      # MWh_elec per MWh_H2 produced (i.e. efficiency = 1/1.5 ≈ 67%); typical PEM electrolyzer value
+    OperationalCost: 3.0          # €/MWh_H2 — Variable O&M for water treatment, stack degradation, etc.
+
+# ---------------------------------------------------------------------------
+# Hydrogen offtakers (downstream processors & importers)
+# ---------------------------------------------------------------------------
+Hydrogen_Offtaker:
+  # Green offtaker — converts H2 into end product using only green hydrogen
+  Offtaker_Green:
+    Type: "GreenOfftaker"
+    Capacity_H2_In: 20.0     # Max H2 intake (MW_H2); sized to match electrolyzer output
+    Capacity_EP_Out: 20.0    # Max end-product output (MW_EP equivalent)
+    Alpha: 1.0               # H2-to-EP conversion ratio (MWh_EP per MWh_H2); 1.0 = 1:1 mass/energy balance
+    ProcessingCost: 7.0      # €/MWh_EP — Cost of converting H2 to end product (energy, catalysts, labour)
+
+  # Grey offtaker — uses conventional (grey) hydrogen but must buy H2 GCs for a fraction of output
+  Offtaker_Grey:
+    Type: "GreyOfftaker"
+    Capacity: 25.0            # Max end-product output (MW_EP equivalent)
+    MarginalCost: 100.0       # €/MWh_EP — Higher than green because it includes fossil H2 + carbon costs
+    gamma_NH3: 0.18           # Fraction of EP output that requires H2 as feedstock (18%); rest uses other inputs
+
+  # EP importer — brings end product from outside the modelled system
+  Offtaker_Import:
+    Type: "EPImporter"
+    Capacity: 5.0             # Max import volume (MW_EP equivalent); limited by logistics / contracts
+    ImportCost: 1800.0        # €/MWh_EP — High import cost representing transport + foreign production; acts as price cap
+
+# ---------------------------------------------------------------------------
+# Electricity Guarantees-of-Origin (GC) demand agent
+# Quadratic utility: U(d) = A_GC·d − ½·B_GC·d²  →  inverse demand p(d) = A_GC − B_GC·d
+# (Same functional form as the electricity consumer, applied to GC certificates)
+# ---------------------------------------------------------------------------
+Electricity_GC_Demand:
+  Demand_GC_Elec_01:
+    Type: "GC_Demand"
+    PeakLoad: 10.0           # Peak GC demand (MW_GC equivalent); scales the normalized load profile
+    Load_Column: "LOAD_E"    # Reuses the electricity load profile as a proxy for GC demand timing
+    A_GC: 20.0               # €/MWh_GC — Intercept of inverse demand for GCs; willingness to pay for first certificate
+    B_GC: 0.5                # €/MWh_GC² — Slope; controls price sensitivity of GC demand
+
+# ---------------------------------------------------------------------------
+# EP Demand — Currently empty: EP demand is inelastic and fully defined by
+# EP_market.Total_Demand × normalized profile. This block is a placeholder
+# for future elastic EP demand agents.
+# ---------------------------------------------------------------------------
+EP_Demand: {}

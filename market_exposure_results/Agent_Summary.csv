@@ -1,0 +1,9 @@
+AgentID,Group
+Cons_Elec_01,power
+Gen_Conv_01,power
+Gen_VRES_01,power
+Prod_H2_Green,H2
+Offtaker_Green,offtaker
+Offtaker_Grey,offtaker
+Offtaker_Import,offtaker
+Demand_GC_Elec_01,elec_GC_demand
