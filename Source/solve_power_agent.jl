@@ -42,10 +42,15 @@ function solve_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
         # so both lambda terms appear with negative sign (revenue).
         g  = mod.ext[:variables][:g]
         MC = mod.ext[:parameters][:MarginalCost]
+        # Annualised fixed investment cost per MW-year; capacity is year-specific.
+        F_cap = get(mod.ext[:parameters], :FixedCost_per_MW, 0.0)
+        cap_VRES = mod.ext[:variables][:cap_VRES]
         mod.ext[:objective] = @objective(mod, Min,
             sum(W[jd, jy] * (MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy] - λ_elec_GC[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-            + sum(ρ_elec_GC/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY))
+            + sum(ρ_elec_GC/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+            # Fixed annualised investment cost, summed over model years (no W weighting).
+            + F_cap * sum(cap_VRES[jy] for jy in JY))
     elseif agent_type == "Conventional"
         # Conventional generator objective: same structure as VRES but
         # WITHOUT the green certificate (GC) revenue/penalty terms,

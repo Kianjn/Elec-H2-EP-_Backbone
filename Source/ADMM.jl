@@ -72,6 +72,9 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
             push!(ADMM_state["Imbalances"]["elec_GC"], imb_elec_GC)
 
             imb_H2_GC = sum(results["H2_GC"][m][end] for m in agents[:H2_GC_market]; init=zeros(shp...))
+            # H2_GC is now a proper hourly market (no annual aggregation).
+            # Offtakers have temporal flexibility to buy GCs whenever prices
+            # are low, accumulating toward their annual mandate internally.
             push!(ADMM_state["Imbalances"]["H2_GC"], imb_H2_GC)
 
             # EP is the only market with fixed inelastic demand D_EP;
@@ -183,19 +186,28 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
 
         # ------------------------------------------------------------------
         # Price (dual variable) update: λ_new = λ_old − ρ · imbalance.
-        # This is the standard ADMM dual variable update, i.e. gradient
-        # ascent on the Lagrangian dual with step size ρ.
+        # Standard ADMM dual variable update (gradient ascent on the
+        # Lagrangian dual with step size ρ).
         #   • When supply > demand (positive imbalance) → price decreases.
         #   • When demand > supply (negative imbalance) → price increases.
-        # Applied element-wise over the full 3D (jh, jd, jy) tensor for
-        # every market, including green certificate markets.
+        # NOTE: Over-relaxation (α > 1) was tested and caused divergence
+        # in this tightly-coupled multi-market problem.  Standard update
+        # (α = 1) is used instead.
         # ------------------------------------------------------------------
         @timeit TO "Update prices" begin
-            push!(results["λ"]["elec"],    results["λ"]["elec"][end]    .- ADMM_state["ρ"]["elec"][end]    .* ADMM_state["Imbalances"]["elec"][end])
-            push!(results["λ"]["H2"],      results["λ"]["H2"][end]      .- ADMM_state["ρ"]["H2"][end]      .* ADMM_state["Imbalances"]["H2"][end])
-            push!(results["λ"]["elec_GC"], results["λ"]["elec_GC"][end] .- ADMM_state["ρ"]["elec_GC"][end] .* ADMM_state["Imbalances"]["elec_GC"][end])
-            push!(results["λ"]["H2_GC"],   results["λ"]["H2_GC"][end]   .- ADMM_state["ρ"]["H2_GC"][end]   .* ADMM_state["Imbalances"]["H2_GC"][end])
-            push!(results["λ"]["EP"],      results["λ"]["EP"][end]      .- ADMM_state["ρ"]["EP"][end]      .* ADMM_state["Imbalances"]["EP"][end])
+            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+                push!(results["λ"][mkt],
+                      results["λ"][mkt][end] .- ADMM_state["ρ"][mkt][end] .* ADMM_state["Imbalances"][mkt][end])
+            end
+            # H2_GC price floor: the electrolyzer VOLUNTARILY issues green
+            # certificates — at price < 0 no rational producer would issue,
+            # so supply is identically 0 and the equilibrium price is ≥ 0.
+            # Without this projection, negative prices attract unbounded
+            # demand from offtakers (who profit from buying at negative
+            # prices), creating a persistent limit-cycle oscillation that
+            # ADMM cannot resolve.  Clamping to [0,∞) is the standard
+            # "projected ADMM" technique and preserves convergence theory.
+            results["λ"]["H2_GC"][end] .= max.(results["λ"]["H2_GC"][end], 0.0)
         end
 
         # Store scalar price diagnostics (mean price per market and iteration)
@@ -221,14 +233,22 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         # its tolerance, the algorithm continues iterating. This ensures
         # that every market has simultaneously cleared (primal) and that
         # agent positions have stabilized (dual) before we declare convergence.
+        #
+        # IMPORTANT: skip convergence check for the first min_iter iterations.
+        # In early iterations, residuals can be spuriously small (agents
+        # haven't diverged from initial conditions yet), leading to premature
+        # convergence with prices far from equilibrium.
         # ------------------------------------------------------------------
-        tol = ADMM_state["Tolerance"]
-        if (ADMM_state["Residuals"]["Primal"]["elec"][end] <= tol["elec"] && ADMM_state["Residuals"]["Dual"]["elec"][end] <= tol["elec"] &&
-            ADMM_state["Residuals"]["Primal"]["H2"][end] <= tol["H2"] && ADMM_state["Residuals"]["Dual"]["H2"][end] <= tol["H2"] &&
-            ADMM_state["Residuals"]["Primal"]["elec_GC"][end] <= tol["elec_GC"] && ADMM_state["Residuals"]["Dual"]["elec_GC"][end] <= tol["elec_GC"] &&
-            ADMM_state["Residuals"]["Primal"]["H2_GC"][end] <= tol["H2_GC"] && ADMM_state["Residuals"]["Dual"]["H2_GC"][end] <= tol["H2_GC"] &&
-            ADMM_state["Residuals"]["Primal"]["EP"][end] <= tol["EP"] && ADMM_state["Residuals"]["Dual"]["EP"][end] <= tol["EP"])
-            convergence = 1
+        min_iter = get(data["ADMM"], "min_iter", 500)
+        if iter >= min_iter
+            tol = ADMM_state["Tolerance"]
+            if (ADMM_state["Residuals"]["Primal"]["elec"][end] <= tol["elec"] && ADMM_state["Residuals"]["Dual"]["elec"][end] <= tol["elec"] &&
+                ADMM_state["Residuals"]["Primal"]["H2"][end] <= tol["H2"] && ADMM_state["Residuals"]["Dual"]["H2"][end] <= tol["H2"] &&
+                ADMM_state["Residuals"]["Primal"]["elec_GC"][end] <= tol["elec_GC"] && ADMM_state["Residuals"]["Dual"]["elec_GC"][end] <= tol["elec_GC"] &&
+                ADMM_state["Residuals"]["Primal"]["H2_GC"][end] <= tol["H2_GC"] && ADMM_state["Residuals"]["Dual"]["H2_GC"][end] <= tol["H2_GC"] &&
+                ADMM_state["Residuals"]["Primal"]["EP"][end] <= tol["EP"] && ADMM_state["Residuals"]["Dual"]["EP"][end] <= tol["EP"])
+                convergence = 1
+            end
         end
 
         ADMM_state["n_iter"] = iter

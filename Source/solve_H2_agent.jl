@@ -27,8 +27,7 @@ function solve_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     λ_H2     = mod.ext[:parameters][:λ_H2]
     g_bar_H2  = mod.ext[:parameters][:g_bar_H2]
     ρ_H2      = mod.ext[:parameters][:ρ_H2]
-    # Annual scalar H2-GC price: lambda_H2_GC[jy] is uniform across hours and days
-    # (see ADMM_subroutine.jl for the averaging that produces these scalars).
+    # Hourly H2-GC price (full 3D), like all other markets.
     λ_H2_GC     = mod.ext[:parameters][:λ_H2_GC]
     g_bar_H2_GC = mod.ext[:parameters][:g_bar_H2_GC]
     ρ_H2_GC    = mod.ext[:parameters][:ρ_H2_GC]
@@ -37,6 +36,8 @@ function solve_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     h2_out    = mod.ext[:variables][:h2_out]
     q_elec_gc = mod.ext[:variables][:q_elec_gc]
     q_h2gc    = mod.ext[:variables][:q_h2gc]
+    cap_H2_y   = mod.ext[:variables][:cap_H2_y]
+    F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_Electrolyzer, 0.0)
 
     # Electrolyzer objective breakdown:
     #   + lambda_elec * e_in          electricity cost (buyer pays spot price)
@@ -58,12 +59,14 @@ function solve_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
             + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
             + op_cost * h2_out[jh, jd, jy]
             - λ_H2[jh, jd, jy]       * h2_out[jh, jd, jy]
-            - λ_H2_GC[jy]            * q_h2gc[jh, jd, jy]
+            - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
         ) for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec/2 * W[jd, jy] * ((-e_in[jh, jd, jy])      - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2/2 * W[jd, jy] * (h2_out[jh, jd, jy]         - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-        + sum(ρ_H2_GC/2 * W[jd, jy] * (q_h2gc[jh, jd, jy]      - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY))
+        + sum(ρ_H2_GC/2 * W[jd, jy] * (q_h2gc[jh, jd, jy]      - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+        # Fixed annualised investment cost, summed over model years (no W weighting).
+        + F_cap * sum(cap_H2_y[jy] for jy in JY))
     optimize!(mod)
     return nothing
 end

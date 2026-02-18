@@ -29,7 +29,7 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
     ρ_H2     = mod.ext[:parameters][:ρ_H2]       # penalty weight
 
     # ── ADMM parameters — H₂-GC market ───────────────────────────────────
-    # H₂-GC price is annual (one price per year); penalties remain on full 3D grid.
+    # H₂-GC price is hourly (full 3D), like all other markets.
     λ_H2_GC     = mod.ext[:parameters][:λ_H2_GC]
     g_bar_H2_GC = mod.ext[:parameters][:g_bar_H2_GC]
     ρ_H2_GC  = mod.ext[:parameters][:ρ_H2_GC]
@@ -45,15 +45,35 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
     # ══════════════════════════════════════════════════════════════════════
     if agent_type == "GreenOfftaker"
         cap_h2  = mod.ext[:parameters][:Capacity_H2_In]    # max H2 intake (MW_H2)
-        cap_ep  = mod.ext[:parameters][:Capacity_EP_Out]   # max EP output (MW_EP)
+        cap_ep_initial  = mod.ext[:parameters][:Capacity_EP_Out]   # initial max EP output (MW_EP) in first year
         alpha   = get(mod.ext[:parameters], :Alpha, 1.0)   # H2-to-EP conversion
                                       # ratio: alpha=1 means 1 MWh_H2 -> 1 MWh_EP
         proc_cost = get(mod.ext[:parameters], :ProcessingCost, 0.0)  # processing cost (EUR/MWh_EP)
+        # Annualised fixed investment cost per MW of EP output capacity (€/MW_EP-year).
+        # Read from data.yaml if present; default 0.0 keeps previous behaviour.
+        F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_EP_Out, 0.0)
 
         # Decision variables.
         h2_in  = mod.ext[:variables][:h2_in]  = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "h2_in")
         q_h2gc = mod.ext[:variables][:q_h2gc] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "h2_GC")
         ep     = mod.ext[:variables][:ep]    = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "ep")
+
+        # EP capacity and investment decision variables (per year).
+        # cap_EP_y[jy] = EP output capacity (MW_EP) in year jy.
+        # inv_EP[jy]   = new EP capacity investment (MW_EP) in year jy.
+        cap_EP_y = mod.ext[:variables][:cap_EP_y] = @variable(mod, [jy in JY], lower_bound = 0, base_name = "cap_EP")
+        inv_EP   = mod.ext[:variables][:inv_EP]   = @variable(mod, [jy in JY], lower_bound = 0, base_name = "inv_EP")
+
+        # Capacity evolution over years.
+        JY_vec = collect(JY)
+        first_jy = JY_vec[1]
+        mod.ext[:constraints][:cap_EP_init] = @constraint(mod, cap_EP_y[first_jy] == cap_ep_initial + inv_EP[first_jy])
+        for (k, jy) in enumerate(JY_vec)
+            k == 1 && continue
+            prev_jy = JY_vec[k - 1]
+            cname = Symbol("cap_EP_dyn_", jy)
+            mod.ext[:constraints][cname] = @constraint(mod, cap_EP_y[jy] == cap_EP_y[prev_jy] + inv_EP[jy])
+        end
 
         # Net positions: H2 purchased (negative), H2-GCs purchased (negative),
         # EP sold (positive).
@@ -61,39 +81,48 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         mod.ext[:expressions][:g_net_H2_GC]  = @expression(mod, -q_h2gc)   # buyer on H2-GC market
         mod.ext[:expressions][:g_net_EP]     = @expression(mod, ep)         # seller on EP market
 
-        # Tight stoichiometric link: ep == (1/alpha) * h2_in.  ALL purchased
+        # Tight stoichiometric link: ep == alpha * h2_in.  ALL purchased
         # H₂ must be converted to EP (no H₂ waste).  EP output is exactly
-        # proportional to H₂ input via the conversion ratio alpha.
-        mod.ext[:constraints][:ep_from_h2] = @constraint(mod, [jh in JH, jd in JD, jy in JY], ep[jh, jd, jy] == (1/alpha) * h2_in[jh, jd, jy])
+        # proportional to H₂ input via the conversion ratio alpha
+        # (MWh_EP per MWh_H2).  Matches the planner formulation.
+        mod.ext[:constraints][:ep_from_h2] = @constraint(mod, [jh in JH, jd in JD, jy in JY], ep[jh, jd, jy] == alpha * h2_in[jh, jd, jy])
 
-        # Annual GC mandate: at least gamma_GC (42%) fraction of EP output
-        # must be backed by green H₂ certificates, computed on a weighted
-        # yearly basis (more realistic than hourly matching — allows temporal
-        # flexibility in GC procurement within the year).
+        # Annual GC mandate for green offtaker: at least gamma_GC (42%) of the
+        # H₂ intake must be backed by green H₂ certificates, computed on a
+        # weighted yearly basis (more realistic than hourly matching — allows
+        # temporal flexibility in GC procurement within the year). Since we
+        # observe H₂ purchases explicitly (h2_in), we can impose the mandate
+        # directly on H₂ quantities rather than inferring them from EP output.
         mod.ext[:constraints][:gc_mandate_yearly] = @constraint(mod, [jy in JY],
             sum(W[jd, jy] * q_h2gc[jh, jd, jy] for jh in JH, jd in JD) >=
-            gamma_GC * sum(W[jd, jy] * ep[jh, jd, jy] for jh in JH, jd in JD)
+            gamma_GC * sum(W[jd, jy] * h2_in[jh, jd, jy] for jh in JH, jd in JD)
         )
 
-        # Capacity limits on H₂ intake and EP output.
-        mod.ext[:constraints][:cap_h2]    = @constraint(mod, [jh in JH, jd in JD, jy in JY], h2_in[jh, jd, jy] <= cap_h2)
-        mod.ext[:constraints][:cap_ep]    = @constraint(mod, [jh in JH, jd in JD, jy in JY], ep[jh, jd, jy] <= cap_ep)
+        # Single capacity limit based on EP output; H₂ intake is implied via stoichiometry ep = alpha * h2_in.
+        mod.ext[:constraints][:cap_ep]    = @constraint(mod, [jh in JH, jd in JD, jy in JY], ep[jh, jd, jy] <= cap_EP_y[jy])
+
+        # GC purchase upper bound: cannot buy more green certificates than
+        # the H₂ actually consumed (each certificate certifies 1 MWh_H2).
+        mod.ext[:constraints][:gc_cap]    = @constraint(mod, [jh in JH, jd in JD, jy in JY], q_h2gc[jh, jd, jy] <= h2_in[jh, jd, jy])
 
         # Objective — min(cost - revenue + ADMM penalties):
         #   cost    = H2 purchase (lambda_H2 * h2_in) + GC purchase (lambda_H2GC * gc)
         #             + processing cost
         #   revenue = EP sales (lambda_EP * ep)
         #   penalties use net positions: -h2_in (H2), -gc (H2-GC), +ep (EP)
+        n_years = length(JY)
         mod.ext[:objective] = @objective(mod, Min,
             sum(W[jd, jy] * (
                 λ_H2[jh, jd, jy]        * h2_in[jh, jd, jy]
-                + λ_H2_GC[jy]           * q_h2gc[jh, jd, jy]
+                + λ_H2_GC[jh, jd, jy]  * q_h2gc[jh, jd, jy]
                 + proc_cost * ep[jh, jd, jy]
                 - λ_EP[jh, jd, jy]      * ep[jh, jd, jy]
             ) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_H2/2 * W[jd, jy] * ((-h2_in[jh, jd, jy]) - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+            # Fixed annualised investment cost, summed over model years (no W weighting).
+            + F_cap * sum(cap_EP_y[jy] for jy in JY)
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -113,24 +142,30 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         mod.ext[:expressions][:g_net_H2_GC] = @expression(mod, -q_h2gc)  # buyer on H2-GC market
         mod.ext[:expressions][:g_net_EP]    = @expression(mod, ep)        # seller on EP market
 
-        # Annual GC mandate for grey offtaker.  gamma_NH3 = fraction of EP
-        # output that requires H₂ as feedstock (e.g. 0.18 for ammonia).
-        # The GC mandate applies to the H₂-equivalent portion of EP output:
-        #   gc_h2 >= gamma_GC * gamma_NH3 * ep
-        # i.e., at least 42% of the H₂-using share must be green-certified.
+        # Annual GC mandate for grey offtaker.  gamma_NH3 is the EP-to-H2
+        # conversion ratio (MWh_EP per MWh_H2). We do not model the grey
+        # offtaker's internal H₂ stream explicitly, so we infer its H₂ intake
+        # from observed EP output via H2_intake ≈ ep / gamma_NH3. The GC
+        # mandate applies to this inferred H₂-equivalent portion of EP output:
+        #   gc_h2 >= gamma_GC * (ep / gamma_NH3)
+        # i.e., at least 42% of the implied H₂ usage must be green-certified.
         mod.ext[:constraints][:gc_mandate_yearly] = @constraint(mod, [jy in JY],
             sum(W[jd, jy] * q_h2gc[jh, jd, jy] for jh in JH, jd in JD) >=
-            gamma_GC * mod.ext[:parameters][:gamma_NH3] *
+            gamma_GC * (1 / mod.ext[:parameters][:gamma_NH3]) *
             sum(W[jd, jy] * ep[jh, jd, jy] for jh in JH, jd in JD)
         )
         mod.ext[:constraints][:cap_ep]     = @constraint(mod, [jh in JH, jd in JD, jy in JY], ep[jh, jd, jy] <= cap_ep)
+
+        # GC purchase upper bound: cannot certify more H₂ as green than
+        # the inferred H₂ feedstock used (ep / gamma_NH3).
+        mod.ext[:constraints][:gc_cap]     = @constraint(mod, [jh in JH, jd in JD, jy in JY], q_h2gc[jh, jd, jy] <= (1 / mod.ext[:parameters][:gamma_NH3]) * ep[jh, jd, jy])
 
         # Objective — min(cost - revenue + ADMM penalties):
         #   cost    = production cost (MC * ep) + GC purchase (lambda_H2GC * gc)
         #   revenue = EP sales (lambda_EP * ep)
         #   penalties use net positions: -gc (H2-GC, purchase), +ep (EP, sale)
         mod.ext[:objective] = @objective(mod, Min,
-            sum(W[jd, jy] * (MC * ep[jh, jd, jy] + λ_H2_GC[jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
+            sum(W[jd, jy] * (MC * ep[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         )
@@ -183,51 +218,74 @@ function add_offtaker_agent_to_planner!(planner::Model, id::String, mod::Model,
 
     # ── GreenOfftaker (planner) ──────────────────────────────────────────
     if agent_type == "GreenOfftaker"
-        H_buy_bar = p[:Capacity_H2_In]
-        EP_sell_bar = p[:Capacity_EP_Out]
+        H_buy_bar = p[:Capacity_H2_In]          # legacy H₂ intake rating (not binding once EP capacity is endogenous)
+        EP_sell_bar_initial = p[:Capacity_EP_Out]
         alpha = get(p, :Alpha, 1.0)
         C_proc = get(p, :ProcessingCost, 0.0)
+        # Annualised fixed investment cost per MW of EP output capacity (€/MW_EP-year).
+        F_cap = get(p, :FixedCost_per_MW_EP_Out, 0.0)
 
         h_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="h_buy_$(id)")
         gc_h_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_h_buy_$(id)")
         ep_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="ep_sell_$(id)")
 
-        # Capacity limits.
-        @constraint(planner, [jh in JH, jd in JD, jy in JY], h_buy[jh, jd, jy] <= H_buy_bar)
-        @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] <= EP_sell_bar)
+        # Yearly EP capacity and investment.
+        cap_EP_y = @variable(planner, [jy in JY], lower_bound=0, base_name="cap_EP_$(id)")
+        inv_EP = @variable(planner, [jy in JY], lower_bound=0, base_name="inv_EP_$(id)")
+        JY_vec = collect(JY)
+        first_jy = JY_vec[1]
+        @constraint(planner, cap_EP_y[first_jy] == EP_sell_bar_initial + inv_EP[first_jy])
+        for (k, jy) in enumerate(JY_vec)
+            k == 1 && continue
+            prev_jy = JY_vec[k - 1]
+            @constraint(planner, cap_EP_y[jy] == cap_EP_y[prev_jy] + inv_EP[jy])
+        end
+
+        # Single capacity limit based on EP output; h_buy is limited implicitly via ep_sell = alpha * h_buy.
+        @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] <= cap_EP_y[jy])
         # Stoichiometric link: EP = alpha * H2 (tight, no waste).
         @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] == alpha * h_buy[jh, jd, jy])
+        # GC purchase upper bound: can't buy more certificates than H₂ consumed.
+        @constraint(planner, [jh in JH, jd in JD, jy in JY], gc_h_buy[jh, jd, jy] <= h_buy[jh, jd, jy])
 
-        # Annual GC mandate: gamma_GC share of EP must be green-backed.
+        # Annual GC mandate for green offtaker: gamma_GC share of H₂ intake
+        # must be green-backed. Since the planner observes H₂ purchases h_buy
+        # explicitly, we impose the mandate directly on H₂ quantities rather
+        # than inferring from EP output.
         @constraint(planner, [jy in JY],
             sum(W_dict[jy][jd] * gc_h_buy[jh, jd, jy] for jh in JH, jd in JD) >=
-            gamma_GC * sum(W_dict[jy][jd] * ep_sell[jh, jd, jy] for jh in JH, jd in JD)
+            gamma_GC * sum(W_dict[jy][jd] * h_buy[jh, jd, jy] for jh in JH, jd in JD)
         )
 
         # Welfare = -(processing cost); market transfers cancel in aggregate.
         obj = @expression(planner,
             -sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
+            - F_cap * sum(cap_EP_y[jy] for jy in JY)   # fixed annualised investment cost for green offtaker capacity
         )
         var_dict[:offtaker_h_buy][id] = h_buy
         var_dict[:offtaker_gc_h_buy][id] = gc_h_buy
         var_dict[:offtaker_ep_sell][id] = ep_sell
+        var_dict[:offtaker_cap_EP_green][id] = cap_EP_y
+        var_dict[:offtaker_inv_EP_green][id] = inv_EP
         return obj
 
     # ── GreyOfftaker (planner) ───────────────────────────────────────────
     elseif agent_type == "GreyOfftaker"
         EP_sell_bar = p[:Capacity]
-        gamma_NH3 = p[:gamma_NH3]    # fraction of EP requiring H2 feedstock
+        gamma_NH3 = p[:gamma_NH3]    # EP-to-H2 conversion ratio (MWh_EP per MWh_H2)
         C_proc = p[:MarginalCost]
 
         ep_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="ep_sell_$(id)")
         gc_h_buy_G = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_h_buy_G_$(id)")
 
         @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] <= EP_sell_bar)
+        # GC purchase upper bound: can't certify more than the inferred H₂-feedstock portion (ep / gamma_NH3).
+        @constraint(planner, [jh in JH, jd in JD, jy in JY], gc_h_buy_G[jh, jd, jy] <= (1 / gamma_NH3) * ep_sell[jh, jd, jy])
 
-        # GC mandate on H2-equivalent portion: gc >= gamma_GC * gamma_NH3 * ep.
+        # GC mandate on H₂-equivalent portion: gc >= gamma_GC * (ep / gamma_NH3).
         @constraint(planner, [jy in JY],
             sum(W_dict[jy][jd] * gc_h_buy_G[jh, jd, jy] for jh in JH, jd in JD) >=
-            gamma_GC * gamma_NH3 * sum(W_dict[jy][jd] * ep_sell[jh, jd, jy] for jh in JH, jd in JD)
+            gamma_GC * (1 / gamma_NH3) * sum(W_dict[jy][jd] * ep_sell[jh, jd, jy] for jh in JH, jd in JD)
         )
 
         # Welfare = -(production cost).

@@ -22,9 +22,12 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
 
     # ── Electrolyzer technology parameters ────────────────────────────────
     η  = mod.ext[:parameters][:η_elec_H2]
-    cap_elec = mod.ext[:parameters][:Capacity_Electrolyzer]  # max elec input (MW)
-    cap_h2   = mod.ext[:parameters][:Capacity_H2_Output]     # max H2 output (MW_H2)
+    # Single effective capacity: H₂ output nameplate in first model year (MW_H2).
+    cap_H2_initial = mod.ext[:parameters][:Capacity_H2_Output]
     op_cost  = mod.ext[:parameters][:OperationalCost]        # operating cost (EUR/MWh_H2)
+    # Annualised fixed investment cost per MW of electrolyser capacity (€/MW_elec-year).
+    # Default 0.0 preserves original behaviour if not provided.
+    F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_Electrolyzer, 0.0)
 
     # ── ADMM parameters — electricity market ──────────────────────────────
     λ_elec     = mod.ext[:parameters][:λ_elec]       # Lagrange multiplier (price)
@@ -42,7 +45,7 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     ρ_H2      = mod.ext[:parameters][:ρ_H2]
 
     # ── ADMM parameters — H₂-GC market ───────────────────────────────────
-    # H₂-GC price enters as an annual scalar λ_H2_GC[jy] (one price per year),
+    # H₂-GC price is hourly (full 3D), like all other markets. Agents see
     # while ḡ and the ADMM penalties remain defined on the full 3D grid.
     λ_H2_GC     = mod.ext[:parameters][:λ_H2_GC]
     g_bar_H2_GC = mod.ext[:parameters][:g_bar_H2_GC]
@@ -57,6 +60,23 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     h2_out    = mod.ext[:variables][:h2_out]    = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "h2_out")
     q_elec_gc = mod.ext[:variables][:q_elec_gc] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "elec_GC")
     q_h2gc    = mod.ext[:variables][:q_h2gc]    = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "h2_GC_prod")
+
+    # Capacity and investment decision variables for electrolyzer (per year).
+    # cap_H2_y[jy] = available H₂ output capacity (MW_H2) in year jy.
+    # inv_cap_H2[jy] = new H₂ capacity investment (MW_H2) in year jy.
+    cap_H2_y   = mod.ext[:variables][:cap_H2_y]   = @variable(mod, [jy in JY], lower_bound = 0, base_name = "cap_H2")
+    inv_cap_H2 = mod.ext[:variables][:inv_cap_H2] = @variable(mod, [jy in JY], lower_bound = 0, base_name = "inv_cap_H2")
+
+    # Capacity evolution over years: cumulative investment on top of initial capacity.
+    JY_vec = collect(JY)
+    first_jy = JY_vec[1]
+    mod.ext[:constraints][:cap_H2_init] = @constraint(mod, cap_H2_y[first_jy] == cap_H2_initial + inv_cap_H2[first_jy])
+    for (k, jy) in enumerate(JY_vec)
+        k == 1 && continue
+        prev_jy = JY_vec[k - 1]
+        cname = Symbol("cap_H2_dyn_", jy)
+        mod.ext[:constraints][cname] = @constraint(mod, cap_H2_y[jy] == cap_H2_y[prev_jy] + inv_cap_H2[jy])
+    end
 
     # ── Net market positions ──────────────────────────────────────────────
     # Sign convention: NEGATIVE for purchases, POSITIVE for sales.
@@ -80,9 +100,8 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     # physical H₂ actually produced in that hour (no phantom certificates).
     mod.ext[:constraints][:gc_phys_limit]  = @constraint(mod, [jh in JH, jd in JD, jy in JY], q_h2gc[jh, jd, jy] <= h2_out[jh, jd, jy])
 
-    # Equipment capacity limits on electricity intake and H₂ output.
-    mod.ext[:constraints][:cap_elec]       = @constraint(mod, [jh in JH, jd in JD, jy in JY], e_in[jh, jd, jy] <= cap_elec)
-    mod.ext[:constraints][:cap_h2]         = @constraint(mod, [jh in JH, jd in JD, jy in JY], h2_out[jh, jd, jy] <= cap_h2)
+    # Single equipment capacity limit on H₂ output (implicitly bounds electricity input via stoichiometry).
+    mod.ext[:constraints][:cap_h2]         = @constraint(mod, [jh in JH, jd in JD, jy in JY], h2_out[jh, jd, jy] <= cap_H2_y[jy])
 
     # Annual green-backing constraint: over each year (weighted by
     # representative-day weights W), the electricity GCs purchased must be
@@ -114,18 +133,22 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     #                       net position toward its market consensus target.
     # Penalty net positions use the sign convention: −e_in, −gc_e (purchases),
     # +h2, +gc_h2 (sales) minus the respective consensus targets ḡ.
+    n_years = length(JY)
+
     mod.ext[:objective] = @objective(mod, Min,
         sum(W[jd, jy] * (
             λ_elec[jh, jd, jy]       * e_in[jh, jd, jy]
             + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
             + op_cost * h2_out[jh, jd, jy]
             - λ_H2[jh, jd, jy]       * h2_out[jh, jd, jy]
-            - λ_H2_GC[jy]            * q_h2gc[jh, jd, jy]
+            - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
         ) for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec/2 * W[jd, jy] * ((-e_in[jh, jd, jy])      - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2/2 * W[jd, jy] * (h2_out[jh, jd, jy]         - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2_GC/2 * W[jd, jy] * (q_h2gc[jh, jd, jy]      - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+        # Fixed annualised investment cost across model years (no W weighting).
+        + F_cap * sum(cap_H2_y[jy] for jy in JY)
     )
     return mod
 end
@@ -151,10 +174,12 @@ function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
     # Nested Dict for convenient indexed access in JuMP @expression macros.
     W_dict = Dict(y => Dict(r => W[r, y] for r in JD) for y in JY)
 
-    E_bar = p[:Capacity_Electrolyzer]             # max electricity intake (MW)
-    H_bar = p[:Capacity_H2_Output]                # max H₂ output (MW_H2)
+    E_bar = p[:Capacity_Electrolyzer]             # legacy electricity rating (MW) — not used in new capacity formulation
+    H_bar = p[:Capacity_H2_Output]                # max H₂ output (MW_H2) in first year
     η = 1.0 / p[:SpecificConsumption]             # H₂ output per MWh electricity
     C_H = p[:OperationalCost]                     # operating cost (€/MWh_H2)
+    # Annualised fixed investment cost per MW of electrolyser capacity (€/MW_elec-year).
+    F_cap = get(p, :FixedCost_per_MW_Electrolyzer, 0.0)
 
     # Variables: electricity bought, elec-GCs bought, H₂ sold, H₂-GCs sold.
     e_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="e_buy_$(id)")
@@ -162,9 +187,21 @@ function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
     h_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="h_sell_$(id)")
     gc_h_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_h_sell_$(id)")
 
-    # Equipment capacity limits.
-    @constraint(planner, [jh in JH, jd in JD, jy in JY], e_buy[jh, jd, jy] <= E_bar)
-    @constraint(planner, [jh in JH, jd in JD, jy in JY], h_sell[jh, jd, jy] <= H_bar)
+    # Yearly H₂ output capacity and investment.
+    cap_H2_y = @variable(planner, [jy in JY], lower_bound=0, base_name="cap_H2_$(id)")
+    inv_cap_H2 = @variable(planner, [jy in JY], lower_bound=0, base_name="inv_cap_H2_$(id)")
+
+    JY_vec = collect(JY)
+    first_jy = JY_vec[1]
+    @constraint(planner, cap_H2_y[first_jy] == H_bar + inv_cap_H2[first_jy])
+    for (k, jy) in enumerate(JY_vec)
+        k == 1 && continue
+        prev_jy = JY_vec[k - 1]
+        @constraint(planner, cap_H2_y[jy] == cap_H2_y[prev_jy] + inv_cap_H2[jy])
+    end
+
+    # Equipment capacity limits: single bottleneck on H₂ output.
+    @constraint(planner, [jh in JH, jd in JD, jy in JY], h_sell[jh, jd, jy] <= cap_H2_y[jy])
     # Stoichiometric conversion: H₂ output proportional to electricity input.
     @constraint(planner, [jh in JH, jd in JD, jy in JY], h_sell[jh, jd, jy] == η * e_buy[jh, jd, jy])  # physical conversion
     # GC physical limit: no more H₂-GCs than physical H₂ produced.
@@ -180,6 +217,7 @@ function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
     # transfers and cancel in the planner's aggregate welfare.
     obj = @expression(planner,
         -sum(W_dict[jy][jd] * (C_H * h_sell[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
+        - F_cap * sum(cap_H2_y[jy] for jy in JY)   # fixed annualised investment cost (independent of dispatch)
     )
 
     # Store variables so the caller can build market-clearing constraints.
@@ -187,5 +225,7 @@ function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
     var_dict[:H2_gc_e_buy][id] = gc_e_buy
     var_dict[:H2_h_sell][id] = h_sell
     var_dict[:H2_gc_h_sell][id] = gc_h_sell
+    var_dict[:H2_cap_elec][id] = cap_H2_y      # reuse key name for compatibility; now stores H₂ capacity
+    var_dict[:H2_inv_elec][id] = inv_cap_H2
     return obj
 end

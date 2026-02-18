@@ -19,8 +19,7 @@ function solve_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
     λ_H2     = mod.ext[:parameters][:λ_H2]
     g_bar_H2 = mod.ext[:parameters][:g_bar_H2]
     ρ_H2     = mod.ext[:parameters][:ρ_H2]
-    # Annual scalar H2-GC price lambda_H2_GC[jy] (one per year); g_bar and
-    # ADMM penalty terms remain on the full 3D (jh,jd,jy) grid.
+    # Hourly H2-GC price (full 3D), same as all other markets.
     λ_H2_GC     = mod.ext[:parameters][:λ_H2_GC]
     g_bar_H2_GC = mod.ext[:parameters][:g_bar_H2_GC]
     ρ_H2_GC    = mod.ext[:parameters][:ρ_H2_GC]
@@ -40,12 +39,16 @@ function solve_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         h2_in  = mod.ext[:variables][:h2_in]
         q_h2gc = mod.ext[:variables][:q_h2gc]
         ep     = mod.ext[:variables][:ep]
+        cap_EP_y = mod.ext[:variables][:cap_EP_y]
         proc_cost = get(mod.ext[:parameters], :ProcessingCost, 0.0)
+        F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_EP_Out, 0.0)
         mod.ext[:objective] = @objective(mod, Min,
-            sum(W[jd, jy] * (λ_H2[jh, jd, jy] * h2_in[jh, jd, jy] + λ_H2_GC[jy] * q_h2gc[jh, jd, jy] + proc_cost * ep[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
+            sum(W[jd, jy] * (λ_H2[jh, jd, jy] * h2_in[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] + proc_cost * ep[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_H2/2 * W[jd, jy] * ((-h2_in[jh, jd, jy]) - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-            + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY))
+            + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+            # Fixed annualised investment cost, summed over model years (no W weighting).
+            + F_cap * sum(cap_EP_y[jy] for jy in JY))
     elseif agent_type == "GreyOfftaker"
         # GreyOfftaker objective:
         #   min  sum W * ( MC*ep                        [marginal production cost]
@@ -59,7 +62,7 @@ function solve_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         q_h2gc = mod.ext[:variables][:q_h2gc]
         MC     = mod.ext[:parameters][:MarginalCost]
         mod.ext[:objective] = @objective(mod, Min,
-            sum(W[jd, jy] * (MC * ep[jh, jd, jy] + λ_H2_GC[jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
+            sum(W[jd, jy] * (MC * ep[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY))
     else

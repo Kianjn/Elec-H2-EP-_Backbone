@@ -39,20 +39,21 @@ function define_power_parameters!(m::String, mod::Model, data::Dict, ts::Dict, r
         params[:Capacity]      = data["Capacity"]       # Installed capacity (MW); physical upper bound on output
         params[:Profile_Column] = String(data["Profile_Column"])  # Timeseries column name (e.g. "SOLAR") with hourly capacity factors
         params[:MarginalCost]  = data["MarginalCost"]   # €/MWh; typically 0 for renewables (no fuel cost)
+        # Annualised fixed investment cost per MW of installed VRES capacity (€/MW-year).
+        # Read from data.yaml if present; default 0.0 keeps previous behaviour.
+        params[:FixedCost_per_MW] = get(data, "FixedCost_per_MW", 0.0)
         col = params[:Profile_Column]
 
         # Build 3D availability factor AF[jh, jd, jy] (capacity factor profile, values in 0–1).
         # AF tells build_power_agent! the fraction of Capacity available at each hour.
-        # The row calculation maps a representative-day index to the corresponding
-        # hours in the full-year timeseries: representative day jd corresponds to
-        # period repr_days[yr][:periods][jd] in the original 8760-hour series, so
-        # hour jh of that day sits at row = (period - 1) * n_ts + jh.
+        # The timeseries CSV stores representative-day data sequentially in its first
+        # (nReprDays * nTimesteps) rows: day 1 occupies rows 1–24, day 2 rows 25–48,
+        # etc.  We index directly: row = (jd-1)*n_ts + jh.
         times[:AF] = Array{Float64}(undef, n_ts, n_rd, n_yr)
         for jy in JY
             yr = _years[jy]
             for jd in JD, jh in JH
-                # Map representative-day period index → hour offset in the full-year CSV
-                row = round(Int, (repr_days[yr][!, :periods][jd] - 1) * n_ts + jh)
+                row = (jd - 1) * n_ts + jh
                 times[:AF][jh, jd, jy] = ts[yr][!, Symbol(col)][row]
             end
         end
@@ -79,14 +80,13 @@ function define_power_parameters!(m::String, mod::Model, data::Dict, ts::Dict, r
 
         # Build 3D load profile LOAD_E[jh, jd, jy] (normalized, 0–1).
         # PeakLoad * LOAD_E gives absolute MW demand at each hour.
-        # Row calculation: same pattern as VRES AF — maps representative-day
-        # period index to the corresponding hours in the full-year timeseries.
+        # Row mapping: same direct indexing as VRES AF (see comment above).
         col = params[:Load_Column]
         times[:LOAD_E] = Array{Float64}(undef, n_ts, n_rd, n_yr)
         for jy in JY
             yr = _years[jy]
             for jd in JD, jh in JH
-                row = round(Int, (repr_days[yr][!, :periods][jd] - 1) * n_ts + jh)
+                row = (jd - 1) * n_ts + jh
                 times[:LOAD_E][jh, jd, jy] = ts[yr][!, Symbol(col)][row]
             end
         end

@@ -8,11 +8,11 @@
 #   iteration rho, mean price, and mean imbalance for every market. (3) One
 #   *_Market_History.csv per market (Electricity, Hydrogen, Electricity_GC,
 #   H2_GC, End_Product) with iter, rho, price_mean, imb_mean, primal_res, dual_res.
-#   (4) Agent_Summary.csv — one row per agent with AgentID and Group (power, H2,
-#   offtaker, elec_GC_demand).
+#   (4) Agent_Summary.csv — one row per agent with AgentID, Group, Objective_Value.
+#   (5) Market_Prices.csv — per-timestep ADMM λ equilibrium prices.
 #
 # ARGUMENTS:
-#   mdict — Dict of JuMP models (not used here; could be used to dump variables).
+#   mdict — Dict of JuMP models; used to extract per-agent objective values.
 #   elec_market, H2_market, ... — Market dicts (for reference; most data comes
 #     from ADMM_state and results).
 #   ADMM_state — Contains ρ, PriceHistory, ImbalanceMean, Imbalances, Residuals.
@@ -104,22 +104,26 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     end
 
     # --------------------------------------------------------------------------
-    # Agent_Summary.csv — GROUP MEMBERSHIP
+    # Agent_Summary.csv — GROUP MEMBERSHIP + OBJECTIVE VALUE
     # --------------------------------------------------------------------------
     # One row per agent recording which sector / group it belongs to (power,
-    # H2, offtaker, elec_GC_demand). This is a look-up table so that
-    # downstream analysis can map AgentIDs to their roles without re-parsing
-    # data.yaml.
+    # H2, offtaker, elec_GC_demand) and the agent's objective value from the
+    # last ADMM solve. The objective value is the optimal value of the agent's
+    # individual minimization problem (cost − revenue + ADMM penalty terms).
+    # At ADMM convergence the penalty terms vanish and the objective reflects
+    # the agent's net cost.
     agent_rows = String[]
     agent_types = String[]
+    agent_objs = Float64[]
     for k in (:power, :H2, :offtaker, :elec_GC_demand)
         haskey(agents, k) || continue
         for id in agents[k]
             push!(agent_rows, String(id))
             push!(agent_types, String(k))
+            push!(agent_objs, objective_value(mdict[id]))
         end
     end
-    agents_df = DataFrame(AgentID = agent_rows, Group = agent_types)
+    agents_df = DataFrame(AgentID = agent_rows, Group = agent_types, Objective_Value = agent_objs)
     CSV.write(joinpath(results_dir, "Agent_Summary.csv"), agents_df)
 
     # --------------------------------------------------------------------------
@@ -285,6 +289,124 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
             GC_per_H2     = gc_to_h2,
         )
         CSV.write(joinpath(results_dir, "H2_Producer_Diagnostics.csv"), el_df)
+    end
+
+    # --------------------------------------------------------------------------
+    # Capacity_Investments.csv — YEARLY CAPACITY AND INVESTMENT FOR GREEN AGENTS
+    # --------------------------------------------------------------------------
+    # For VRES, electrolyzer, and green offtaker agents, export per-year capacity
+    # and investment decisions from the final ADMM iteration.
+    cap_rows = Vector{NamedTuple{(:AgentID, :Group, :Type, :YearIndex, :Capacity_MW, :Investment_MW),Tuple{String,String,String,Int,Float64,Float64}}}()
+
+    # Helper to append rows for an agent given the appropriate result keys.
+    function _append_cap_rows!(rows, id::String, group::String, atype::String,
+                               cap_hist::Dict, inv_hist::Dict, mdict::Dict)
+        lst_cap = cap_hist[id]
+        lst_inv = inv_hist[id]
+        isempty(lst_cap) && return
+        cap_vec = lst_cap[end]
+        inv_vec = isempty(lst_inv) ? zeros(length(cap_vec)) : lst_inv[end]
+        # JY index is the model's year index; we report it directly.
+        for (iy, cap_val) in enumerate(cap_vec)
+            inv_val = inv_vec[iy]
+            push!(rows, (AgentID = String(id),
+                         Group = group,
+                         Type = atype,
+                         YearIndex = iy,
+                         Capacity_MW = cap_val,
+                         Investment_MW = inv_val))
+        end
+    end
+
+    # VRES (power agents with Type == "VRES")
+    for id in agents[:power]
+        m = mdict[id]
+        atype = String(get(m.ext[:parameters], :Type, ""))
+        atype == "VRES" || continue
+        _append_cap_rows!(cap_rows, id, "power", atype, results["Cap_VRES"], results["Inv_VRES"], mdict)
+    end
+
+    # Electrolyzer (H2 producers)
+    for id in agents[:H2]
+        m = mdict[id]
+        atype = String(get(m.ext[:parameters], :Type, ""))
+        # Currently only electrolyzers are modeled as H2 agents.
+        _append_cap_rows!(cap_rows, id, "H2", atype, results["Cap_Elec_H2"], results["Inv_Elec_H2"], mdict)
+    end
+
+    # Green offtaker (offtaker agents with Type == "GreenOfftaker")
+    for id in agents[:offtaker]
+        m = mdict[id]
+        atype = String(get(m.ext[:parameters], :Type, ""))
+        atype == "GreenOfftaker" || continue
+        _append_cap_rows!(cap_rows, id, "offtaker", atype, results["Cap_EP_Green"], results["Inv_EP_Green"], mdict)
+    end
+
+    if !isempty(cap_rows)
+        cap_df = DataFrame(cap_rows)
+        CSV.write(joinpath(results_dir, "Capacity_Investments.csv"), cap_df)
+    end
+
+    # --------------------------------------------------------------------------
+    # Market_Prices.csv — Equilibrium prices from ADMM Lagrange multipliers
+    # --------------------------------------------------------------------------
+    # The ADMM λ values are the standard equilibrium price output of the
+    # distributed market-clearing algorithm. At convergence (primal and dual
+    # residuals → 0), they equal the true market-clearing prices. These are
+    # the per-timestep prices that agents respond to, and should converge
+    # toward the social planner dual prices.
+    #
+    # Format matches the social planner Market_Prices.csv for direct comparison.
+
+    λ_elec    = results["λ"]["elec"][end]
+    λ_H2      = results["λ"]["H2"][end]
+    λ_elec_GC = results["λ"]["elec_GC"][end]
+    λ_H2_GC   = results["λ"]["H2_GC"][end]
+    λ_EP      = results["λ"]["EP"][end]
+
+    shp = size(λ_elec)
+    n_ts, n_rd, n_yr = shp[1], shp[2], shp[3]
+
+    prices_rows = []
+    t_index = 1
+    for jy in 1:n_yr, jd in 1:n_rd, jh in 1:n_ts
+        push!(prices_rows, (
+            Time = t_index,
+            Elec_Price = λ_elec[jh, jd, jy],
+            H2_Price = λ_H2[jh, jd, jy],
+            Elec_GC_Price = λ_elec_GC[jh, jd, jy],
+            H2_GC_Price = λ_H2_GC[jh, jd, jy],
+            EP_Price = λ_EP[jh, jd, jy],
+        ))
+        t_index += 1
+    end
+    prices_df = DataFrame(prices_rows)
+    CSV.write(joinpath(results_dir, "Market_Prices.csv"), prices_df)
+
+    # Print equilibrium prices (ADMM λ) to the output log
+    println()
+    println("Equilibrium prices (ADMM λ, saved to Market_Prices.csv):")
+    println("  Electricity     mean = ", round(mean(λ_elec), digits=6))
+    println("  Hydrogen        mean = ", round(mean(λ_H2), digits=6))
+    println("  Electricity_GC  mean = ", round(mean(λ_elec_GC), digits=6))
+    println("  H2_GC           mean = ", round(mean(λ_H2_GC), digits=6))
+    println("  End_Product     mean = ", round(mean(λ_EP), digits=6))
+
+    # --------------------------------------------------------------------------
+    # Comparison with social planner benchmark (if available)
+    # --------------------------------------------------------------------------
+    sp_path = joinpath(@__DIR__, "..", "social_planner_results", "Market_Prices.csv")
+    if isfile(sp_path)
+        sp_df = CSV.read(sp_path, DataFrame)
+        println()
+        println("Comparison with social planner benchmark:")
+        println("  Market          | Social planner |   ADMM λ mean")
+        println("  " * repeat("-", 52))
+        @printf("  %-14s | %14.6f | %14.6f\n", "Electricity",    mean(sp_df.Elec_Price),    mean(λ_elec))
+        @printf("  %-14s | %14.6f | %14.6f\n", "Hydrogen",       mean(sp_df.H2_Price),      mean(λ_H2))
+        @printf("  %-14s | %14.6f | %14.6f\n", "Electricity_GC", mean(sp_df.Elec_GC_Price), mean(λ_elec_GC))
+        @printf("  %-14s | %14.6f | %14.6f\n", "H2_GC",          mean(sp_df.H2_GC_Price),   mean(λ_H2_GC))
+        @printf("  %-14s | %14.6f | %14.6f\n", "End_Product",    mean(sp_df.EP_Price),      mean(λ_EP))
     end
 
     return nothing

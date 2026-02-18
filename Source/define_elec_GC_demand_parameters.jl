@@ -38,16 +38,14 @@ function define_elec_GC_demand_parameters!(m::String, mod::Model, data::Dict, ts
     col = params[:Load_Column]
 
     # Build 3D load profile LOAD_GC[jh, jd, jy] (normalized, 0–1).
-    # Same pattern as power parameters: the row calculation maps the
-    # representative-day period index to the corresponding hours in the
-    # full-year timeseries CSV, so that each (jh, jd, jy) entry pulls the
-    # correct hourly value.
+    # The timeseries CSV stores representative-day data sequentially in its
+    # first (nReprDays * nTimesteps) rows, so we index directly:
+    # row = (jd-1)*n_ts + jh.
     times[:LOAD_GC] = Array{Float64}(undef, n_ts, n_rd, n_yr)
     for jy in JY
         yr = _years[jy]
         for jd in JD, jh in 1:n_ts
-            # Hour offset in the full-year series: (period - 1) * n_ts + jh
-            row = round(Int, (repr_days[yr][!, :periods][jd] - 1) * n_ts + jh)
+            row = (jd - 1) * n_ts + jh
             times[:LOAD_GC][jh, jd, jy] = ts[yr][!, Symbol(col)][row]
         end
     end

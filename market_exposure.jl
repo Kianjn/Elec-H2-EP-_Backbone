@@ -325,7 +325,10 @@ TO = TimerOutput()
 
 # Allocate result buffers (per-agent quantity lists, price history, ADMM ρ,
 # imbalances, residuals, tolerances) and set initial prices.
-define_results!(merge(data["General"], data["ADMM"]), results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market)
+# If the social planner has been run, warm-start ADMM λ from its hourly prices;
+# otherwise fall back to uniform scalar initial_price from data.yaml.
+sp_prices_file = joinpath(home_dir, "social_planner_results", "Market_Prices.csv")
+define_results!(merge(data["General"], data["ADMM"]), results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market; sp_prices_file=sp_prices_file)
 
 # Run the coordination loop: each iteration solves all agents, aggregates
 # imbalances, updates prices and ρ, and checks convergence.

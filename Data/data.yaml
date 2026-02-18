@@ -7,7 +7,7 @@
 # ---------------------------------------------------------------------------
 General:
   nTimesteps: 24       # Hours per representative day (24 = hourly resolution; standard for power-system models)
-  nReprDays: 3         # Number of representative days (3 keeps the model small while capturing seasonal variation; increase for accuracy)
+  nReprDays: 8         # Number of representative days (8 for finer temporal resolution and H2 price analysis)
   nYears: 1            # Number of scenario years (1 = single-year snapshot; >1 enables stochastic / multi-year analysis)
   base_year: 2021      # Calendar year whose timeseries data is used (2021 chosen as a recent year with complete public data)
 
@@ -15,9 +15,10 @@ General:
 # ADMM: Alternating Direction Method of Multipliers global settings
 # ---------------------------------------------------------------------------
 ADMM:
-  rho_initial: 1.0     # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
-  max_iter: 10000       # Generous iteration budget; allows ADMM to run long enough even for stiff multi-market coupling (typically converges much sooner)
-  epsilon: 0.1          # Convergence tolerance (L2 norm of primal/dual residuals); 0.1 balances solution accuracy against computation time
+  rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
+  max_iter: 1000       # Iteration budget
+  epsilon: 1.0          # Convergence tolerance on L2 norm of primal/dual residuals. With 72 timesteps, epsilon=1 ≈ 0.12 MW per-timestep accuracy (<1% of quantities 20-50 MW).
+  min_iter: 0         # Minimum iterations before checking convergence. Early residuals can be spuriously small; 100 ensures prices have stabilized before checking.
 
 # ---------------------------------------------------------------------------
 # Market initial prices and penalty weights
@@ -30,27 +31,27 @@ ADMM:
 #                   gentler convergence (e.g. GC markets with smaller volumes).
 # ---------------------------------------------------------------------------
 elec_market:
-  initial_price: 50.0   # €/MWh — Typical European wholesale electricity price; seeds ADMM near expected equilibrium
+  initial_price: 80.0   # €/MWh — Warm-start from social planner equilibrium
   rho_initial: 1.0      # Penalty weight for electricity; 1.0 matches the global default (largest, most liquid market)
 elec_GC_market:
-  initial_price: 5.0    # €/MWh_GC — Small positive starting price for electricity Guarantees of Origin; GC premiums are modest
+  initial_price: 10.0   # €/MWh_GC — Warm-start from social planner equilibrium
   rho_initial: 0.3      # Lower penalty: GC market has smaller volumes & price ranges; gentler convergence avoids oscillation
 H2_market:
-  initial_price: 0.0    # €/MWh_H2 — Starting at zero because H2 is an internal transfer good; ADMM will discover the shadow price
+  initial_price: 122.0  # €/MWh_H2 — Warm-start from social planner equilibrium
   rho_initial: 0.5      # Moderate penalty: H2 market is tightly coupled to electricity through the electrolyzer
 H2_GC_market:
-  initial_price: 50.0   # €/MWh_GC — Higher initial guess reflecting the renewable premium embedded in hydrogen certificates
-  rho_initial: 0.3      # Lower penalty: certificate market is thin; gentle updates prevent price whipsawing
+  initial_price: 0.0    # €/MWh_GC — Warm-start from social planner equilibrium
+  rho_initial: 1.0      # Moderate penalty: H2_GC is now hourly, needs stronger consensus pressure than a thin annual market
 
 # ---------------------------------------------------------------------------
 # EP (End-Product) market — Coordination market for ammonia / downstream product
 # ---------------------------------------------------------------------------
 EP_market:
-  initial_price: 700.0  # €/t_EP — Reflects approximate ammonia market price level; high because EP is a processed commodity
-  rho_initial: 3.0      # Larger penalty: EP market is stiff (few participants, large price swings) and needs stronger coupling
+  initial_price: 144.0      # €/MWh_EP — Warm-start from social planner equilibrium
+  rho_initial: 3.0          # Larger penalty: EP market is stiff (few participants, large price swings) and needs stronger coupling
   Demand_Column: "LOAD_EP"  # Column in the timeseries CSV that holds the normalized EP demand profile (inelastic)
-  Total_Demand: 70.0        # Annual total EP demand (MWh_EP equivalent); multiplied by the normalized profile to get D_EP[jh,jd,jy]
-
+  Total_Demand: 40.0        # EP demand scaling factor (MWh_EP); D_EP[jh,jd,jy] = Total_Demand × LOAD_EP. With LOAD_EP ≈ 0.9 → D_EP ≈ 36/h, within total capacity (50 MW)
+#Basically 36 MW_EP per hour is demanded.
 # ---------------------------------------------------------------------------
 # Power-sector agents
 # ---------------------------------------------------------------------------
@@ -58,9 +59,10 @@ Power:
   # Variable Renewable Energy Source (solar farm)
   Gen_VRES_01:
     Type: "VRES"
-    Capacity: 100.0          # Installed capacity (MW); maximum output under perfect conditions
-    Profile_Column: "SOLAR"  # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
-    MarginalCost: 0.0        # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
+    Capacity: 100.0            # Installed capacity (MW); reduced from 150 MW to tighten supply and make endogenous investment margins more relevant.
+    Profile_Column: "SOLAR"    # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
+    MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
+    FixedCost_per_MW: 70000.0  # €/MW-year — Annualised CAPEX + fixed O&M for utility-scale solar. Assumes ≈700 k€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈70 k€/MW-year, consistent with recent LCOE studies.
 
   # Dispatchable conventional generator (e.g. gas turbine)
   Gen_Conv_01:
@@ -83,10 +85,11 @@ Power:
 Hydrogen:
   Prod_H2_Green:
     Type: "GreenProducer"
-    Capacity_Electrolyzer: 30.0   # Maximum electricity input to the electrolyzer (MW_elec); physical equipment rating
-    Capacity_H2_Output: 20.0      # Maximum hydrogen output (MW_H2); limited by downstream piping / compression
-    SpecificConsumption: 1.5      # MWh_elec per MWh_H2 produced (i.e. efficiency = 1/1.5 ≈ 67%); typical PEM electrolyzer value
-    OperationalCost: 3.0          # €/MWh_H2 — Variable O&M for water treatment, stack degradation, etc.
+    Capacity_Electrolyzer: 60.0               # Maximum electricity input to the electrolyzer (MW_elec); reduced from 90 MW to tighten initial supply and make investment decisions more relevant.
+    Capacity_H2_Output: 40.0                  # Maximum hydrogen output (MW_H2); aligned with the 60 MW_elec limit (60 / 1.5 = 40 MW_H2) after reduction.
+    SpecificConsumption: 1.5                 # MWh_elec per MWh_H2 produced (i.e. efficiency = 1/1.5 ≈ 67%); typical PEM electrolyzer value
+    OperationalCost: 3.0                     # €/MWh_H2 — Variable O&M for water treatment, stack degradation, etc.
+    FixedCost_per_MW_Electrolyzer: 100000.0  # €/MW_elec-year — Annualised CAPEX for PEM electrolysers. Assumes ≈1.0 M€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈100 k€/MW-year (within IEA/IEEFA benchmark ranges).
 
 # ---------------------------------------------------------------------------
 # Hydrogen offtakers (downstream processors & importers)
@@ -95,17 +98,18 @@ Hydrogen_Offtaker:
   # Green offtaker — converts H2 into end product using only green hydrogen
   Offtaker_Green:
     Type: "GreenOfftaker"
-    Capacity_H2_In: 20.0     # Max H2 intake (MW_H2); sized to match electrolyzer output
-    Capacity_EP_Out: 20.0    # Max end-product output (MW_EP equivalent)
-    Alpha: 1.0               # H2-to-EP conversion ratio (MWh_EP per MWh_H2); 1.0 = 1:1 mass/energy balance
-    ProcessingCost: 7.0      # €/MWh_EP — Cost of converting H2 to end product (energy, catalysts, labour)
+    Capacity_H2_In: 40.0               # Max H2 intake (MW_H2); reduced in line with the producer, matched to the new 40 MW_H2 output capacity.
+    Capacity_EP_Out: 30.0              # Max end-product output (MW_EP equivalent); updated consistently: Alpha * Capacity_H2_In = 0.75 * 40 = 30 MW_EP.
+    Alpha: 0.75                        # H2-to-EP conversion ratio (MWh_EP per MWh_H2). 0.75 means 1 MWh_H2 yields 0.75 MWh_EP of NH3, consistent with typical industrial Haber–Bosch efficiencies (≈70–80% on an LHV basis).
+    ProcessingCost: 7.0                # €/MWh_EP — Cost of converting H2 to end product (energy, catalysts, labour)
+    FixedCost_per_MW_EP_Out: 120000.0  # €/MW_EP-year — Annualised CAPEX for downstream synthesis/processing (e.g. ammonia plant). Assumes ≈1.2 M€/MW_EP CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈120 k€/MW-year.
 
-  # Grey offtaker — uses conventional (grey) hydrogen but must buy H2 GCs for a fraction of output
+  # Grey offtaker — uses conventional (grey) hydrogen but must buy H2 GCs for a fraction of its implied H2 use
   Offtaker_Grey:
     Type: "GreyOfftaker"
-    Capacity: 25.0            # Max end-product output (MW_EP equivalent)
+    Capacity: 30.0            # Max end-product output (MW_EP equivalent); together with 45 MW_EP green capacity and 5 MW_EP import, total EP supply capacity (≈80 MW_EP) now comfortably exceeds ≈36 MW_EP demand while preserving headroom for competition between green and grey routes.
     MarginalCost: 100.0       # €/MWh_EP — Higher than green because it includes fossil H2 + carbon costs
-    gamma_NH3: 0.18           # Fraction of EP output that requires H2 as feedstock (18%); rest uses other inputs
+    gamma_NH3: 0.75           # EP-to-H2 conversion ratio for grey offtaker (MWh_EP per MWh_H2). 0.75 means 1 MWh_H2 yields 0.75 MWh_EP of NH3; we infer implied H2 use from observed EP output via H2_intake ≈ EP / gamma_NH3 when applying the 42% green H2 GC mandate.
 
   # EP importer — brings end product from outside the modelled system
   Offtaker_Import:

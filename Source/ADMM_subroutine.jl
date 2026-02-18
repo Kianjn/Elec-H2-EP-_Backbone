@@ -83,15 +83,12 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
             imb = isempty(ADMM_state["Imbalances"]["H2_GC"]) ? zeros_shp : ADMM_state["Imbalances"]["H2_GC"][end]
             # g_bar_H2_GC = prev_own - (1/(n+1))*imbalance  (consensus target)
             mod.ext[:parameters][:g_bar_H2_GC] = prev .- (1.0 / (n + 1)) .* imb
-            # H2-GC prices are exposed as ANNUAL scalars λ_H2_GC[jy] (one per
-            # year) rather than the full 3D (jh,jd,jy) array. This simplifies
-            # the dual space for the certificate market, where annual clearing
-            # is more economically meaningful than hourly clearing. The g_bar
-            # and ADMM penalty terms remain on the full 3D grid.
-            λ_H2_GC_full = results["λ"]["H2_GC"][end]
-            n_yr = size(λ_H2_GC_full, 3)
-            λ_H2_GC_year = [mean(λ_H2_GC_full[:, :, jy]) for jy in 1:n_yr]
-            mod.ext[:parameters][:λ_H2_GC] = λ_H2_GC_year
+            # H2-GC prices are now HOURLY (full 3D), same as all other markets.
+            # Offtakers have temporal flexibility: they choose WHEN to buy GCs
+            # (buying more when cheap, e.g. solar hours) while satisfying their
+            # annual mandate constraint internally. This makes H2_GC a proper
+            # hourly market that ADMM can clear naturally.
+            mod.ext[:parameters][:λ_H2_GC] = results["λ"]["H2_GC"][end]
             mod.ext[:parameters][:ρ_H2_GC] = ADMM_state["ρ"]["H2_GC"][end]
         end
         if mod.ext[:parameters][:in_EP_market]
@@ -151,6 +148,27 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
         if mod.ext[:parameters][:in_EP_market]
             ep = collect(value.(mod.ext[:expressions][:g_net_EP]))
             push!(results["EP"][m], ep)
+        end
+
+        # Capacity and investment results for green agents (per year, 1D vectors).
+        agent_type = String(get(mod.ext[:parameters], :Type, ""))
+        if agent_type == "VRES" && haskey(mod.ext[:variables], :cap_VRES)
+            cap_vec = collect(value.(mod.ext[:variables][:cap_VRES]))
+            inv_vec = collect(value.(mod.ext[:variables][:inv_VRES]))
+            push!(results["Cap_VRES"][m], cap_vec)
+            push!(results["Inv_VRES"][m], inv_vec)
+        end
+        if (haskey(mod.ext[:variables], :cap_H2_y) && haskey(mod.ext[:variables], :inv_cap_H2))
+            cap_vec = collect(value.(mod.ext[:variables][:cap_H2_y]))
+            inv_vec = collect(value.(mod.ext[:variables][:inv_cap_H2]))
+            push!(results["Cap_Elec_H2"][m], cap_vec)
+            push!(results["Inv_Elec_H2"][m], inv_vec)
+        end
+        if agent_type == "GreenOfftaker" && haskey(mod.ext[:variables], :cap_EP_y)
+            cap_vec = collect(value.(mod.ext[:variables][:cap_EP_y]))
+            inv_vec = collect(value.(mod.ext[:variables][:inv_EP]))
+            push!(results["Cap_EP_Green"][m], cap_vec)
+            push!(results["Inv_EP_Green"][m], inv_vec)
         end
     end
     return nothing

@@ -38,6 +38,12 @@ function define_H2_parameters!(m::String, mod::Model, data::Dict, ts::Dict, repr
     # auxiliaries. Defaults to 0 if not specified.
     params[:OperationalCost]      = get(data, "OperationalCost", 0.0)
 
+    # Annualised fixed investment cost per MW of electrolyser capacity (€/MW_elec-year).
+    # This is kept separate from the variable OperationalCost so that changing the
+    # installed capacity (now or in future investment extensions) automatically
+    # adjusts the capital charge.
+    params[:FixedCost_per_MW_Electrolyzer] = get(data, "FixedCost_per_MW_Electrolyzer", 0.0)
+
     # Conversion efficiency η_elec_H2 = 1 / SpecificConsumption (MWh_H2 per MWh_elec).
     # Used in build_H2_agent! as: h2_out = η_elec_H2 * e_in.
     # Computed here (rather than in build_H2_agent!) to keep parameter definitions

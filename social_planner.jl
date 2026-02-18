@@ -73,6 +73,9 @@ using DataFrames
 using CSV
 # Read/write CSV files (inputs and output CSVs in social_planner_results).
 
+using Statistics
+# mean, etc., used in the summary print of equilibrium prices.
+
 using YAML
 # Parse data.yaml: General, ADMM, market blocks, and agent blocks (Power,
 # Hydrogen, Hydrogen_Offtaker, Electricity_GC_Demand, EP_Demand).
@@ -341,6 +344,6 @@ end
 # ------------------------------------------------------------------------------
 
 # Write Market_Prices.csv (equilibrium prices from dual variables of balance
-# constraints) and Agent_Summary.csv (per-agent total quantity and welfare
-# contribution) to the social_planner_results folder.
-save_social_planner_results!(planner, planner_state, agents, results_folder)
+# constraints) and Agent_Summary.csv (per-agent total quantity and ADMM-style
+# objective value) to the social_planner_results folder.
+save_social_planner_results!(planner, planner_state, agents, mdict, results_folder)

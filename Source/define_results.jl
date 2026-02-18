@@ -22,7 +22,8 @@
 
 function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dict,
                         elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
-                        H2_GC_market::Dict, EP_market::Dict)
+                        H2_GC_market::Dict, EP_market::Dict;
+                        sp_prices_file::String = "")
     n_ts = admm_data["nTimesteps"]
     n_rd = admm_data["nReprDays"]
     n_yr = admm_data["nYears"]
@@ -33,16 +34,49 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     results["markets"] = Dict("elec" => elec_market, "H2" => H2_market, "elec_GC" => elec_GC_market, "H2_GC" => H2_GC_market, "EP" => EP_market)
 
     # results["λ"] — Per-market list of 3D price arrays, one per ADMM iteration.
-    # The list grows by push! in ADMM.jl each iteration. The first element is a
-    # uniform initial price (scalar → 3D via fill) so that iteration-0 prices
-    # are well-defined for the very first agent solves.
-    results["λ"] = Dict(
-        "elec"    => [fill(elec_market["initial_price"], shp...)],
-        "H2"      => [fill(H2_market["initial_price"], shp...)],
-        "elec_GC" => [fill(elec_GC_market["initial_price"], shp...)],
-        "H2_GC"   => [fill(H2_GC_market["initial_price"], shp...)],
-        "EP"      => [fill(EP_market["initial_price"], shp...)],
-    )
+    # The list grows by push! in ADMM.jl each iteration. The first element
+    # seeds iteration-0 prices for the very first agent solves.
+    #
+    # Warm-start strategy:
+    #   If a social-planner Market_Prices.csv exists, load its HOURLY prices
+    #   as the initial λ. This gives each (jh,jd,jy) slot the true equilibrium
+    #   price — dramatically speeding convergence for hours whose prices differ
+    #   from the market-wide mean (e.g. peak hours at 483 vs. off-peak at 3).
+    #   Falls back to uniform scalar fill when the file is missing or incompatible.
+    sp_loaded = false
+    if !isempty(sp_prices_file) && isfile(sp_prices_file)
+        try
+            sp_df = CSV.read(sp_prices_file, DataFrame)
+            n_total = n_ts * n_rd * n_yr
+            if nrow(sp_df) == n_total
+                results["λ"] = Dict(
+                    "elec"    => [reshape(Float64.(sp_df.Elec_Price),    shp)],
+                    "H2"      => [reshape(Float64.(sp_df.H2_Price),     shp)],
+                    "elec_GC" => [reshape(Float64.(sp_df.Elec_GC_Price), shp)],
+                    "H2_GC"   => [max.(reshape(Float64.(sp_df.H2_GC_Price), shp), 0.0)],
+                    "EP"      => [reshape(Float64.(sp_df.EP_Price),     shp)],
+                )
+                sp_loaded = true
+                @info "Warm-started ADMM λ from social planner hourly prices ($sp_prices_file)"
+            else
+                @warn "Social planner prices file has $(nrow(sp_df)) rows, expected $n_total. " *
+                      "Falling back to scalar warm-start."
+            end
+        catch e
+            @warn "Could not read social planner prices ($sp_prices_file): $e. " *
+                  "Falling back to scalar warm-start."
+        end
+    end
+
+    if !sp_loaded
+        results["λ"] = Dict(
+            "elec"    => [fill(elec_market["initial_price"], shp...)],
+            "H2"      => [fill(H2_market["initial_price"], shp...)],
+            "elec_GC" => [fill(elec_GC_market["initial_price"], shp...)],
+            "H2_GC"   => [fill(H2_GC_market["initial_price"], shp...)],
+            "EP"      => [fill(EP_market["initial_price"], shp...)],
+        )
+    end
 
     # Per-agent quantity buffers: empty lists for ALL agents (even non-participants).
     # Only agents that actually participate in a given market will have 3D arrays
@@ -54,6 +88,15 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     results["elec_GC"] = Dict(m => [] for m in agents[:all])   # Electricity GC net position (MW_GC)
     results["H2_GC"]   = Dict(m => [] for m in agents[:all])   # Hydrogen GC net position (MW_GC)
     results["EP"]      = Dict(m => [] for m in agents[:all])   # End-product net position (MW_EP)
+
+    # Per-agent capacity and investment history for green agents (one vector per ADMM iteration).
+    # These are populated only for agents that actually own these variables (VRES, electrolyzer, green offtaker).
+    results["Cap_VRES"]        = Dict(m => [] for m in agents[:all])   # VRES capacity per year (MW)
+    results["Inv_VRES"]        = Dict(m => [] for m in agents[:all])   # VRES investment per year (MW)
+    results["Cap_Elec_H2"]     = Dict(m => [] for m in agents[:all])   # Electrolyzer elec capacity per year (MW)
+    results["Inv_Elec_H2"]     = Dict(m => [] for m in agents[:all])   # Electrolyzer elec investment per year (MW)
+    results["Cap_EP_Green"]    = Dict(m => [] for m in agents[:all])   # Green offtaker EP capacity per year (MW)
+    results["Inv_EP_Green"]    = Dict(m => [] for m in agents[:all])   # Green offtaker EP investment per year (MW)
 
     # ADMM["ρ"] — Per-market list of scalar penalty weights, one entry per ADMM
     # iteration. Updated by update_rho! (which may increase/decrease ρ based on
@@ -108,19 +151,17 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     )
 
     # Per-market convergence tolerances.
-    # Electricity and elec_GC use the base epsilon (from data.yaml ADMM block).
-    # H2, H2_GC, and EP get 10× the base tolerance because these tightly coupled
-    # markets exhibit stiffer numerical behaviour: the electrolyzer links elec↔H2,
-    # and offtakers link H2↔H2_GC↔EP, creating strong cross-market dependencies
-    # that make residuals harder to drive to zero. Looser stopping criteria let
-    # ADMM declare "good enough" without wasting iterations on diminishing returns.
-    base_tol = get(admm_data, "epsilon", 1e-2)
+    # With the H2_GC limit-cycle fix (price floor + physical GC bounds) all
+    # markets converge cleanly, so a uniform tolerance is appropriate.
+    # The previous 10× multiplier for H2/H2_GC/EP let the algorithm declare
+    # convergence while peak and off-peak prices were still far from equilibrium.
+    base_tol = get(admm_data, "epsilon", 1.0)
     ADMM["Tolerance"] = Dict(
-        "elec"    => base_tol,          # Base tolerance for the most liquid market
-        "elec_GC" => base_tol,          # Base tolerance for electricity GCs
-        "EP"      => 10 * base_tol,     # 10× looser: stiff EP market (few participants, large prices)
-        "H2"      => 10 * base_tol,     # 10× looser: tightly coupled to electricity via electrolyzer
-        "H2_GC"   => 10 * base_tol,     # 10× looser: thin certificate market linking H2 producers and offtakers
+        "elec"    => base_tol,
+        "elec_GC" => base_tol,
+        "EP"      => base_tol,
+        "H2"      => base_tol,
+        "H2_GC"   => base_tol,
     )
     ADMM["n_iter"]   = 0     # Iteration counter; incremented each ADMM loop
     ADMM["walltime"] = 0.0   # Cumulative wall-clock time (seconds); measured in ADMM.jl

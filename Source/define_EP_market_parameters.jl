@@ -40,14 +40,16 @@ function define_EP_market_parameters!(market::Dict, data::Dict, ts::Dict, repr_d
     # At each (jh, jd, jy), demand = Total_Demand × normalized timeseries value.
     # This means EP demand is exogenous and does not respond to price; the ADMM
     # imbalance for the EP market is (sum of offtaker supplies) − D_EP.
+    # Row mapping: the timeseries CSV stores representative-day data sequentially
+    # in its first (nReprDays * nTimesteps) rows, so we index directly:
+    # row = (jd-1)*n_ts + jh.
     D_EP = Array{Float64}(undef, n_ts, n_rd, n_yr)
     col  = Symbol(data["Demand_Column"])   # Convert column name to Symbol for DataFrame indexing
     tot  = data["Total_Demand"]            # Scalar annual total (MWh_EP)
     for jy in 1:n_yr
         yr = _years[jy]
         for jd in 1:n_rd, jh in 1:n_ts
-            # Map representative-day period index → hour in the full-year timeseries
-            row = round(Int, (repr_days[yr][!, :periods][jd] - 1) * n_ts + jh)
+            row = (jd - 1) * n_ts + jh
             D_EP[jh, jd, jy] = tot * ts[yr][!, col][row]
         end
     end

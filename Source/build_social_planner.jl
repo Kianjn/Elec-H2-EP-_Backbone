@@ -56,14 +56,20 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
     var_dict = Dict{Symbol, Dict{String, Any}}(
         :power_d_E => Dict{String, Any}(),
         :power_q_E => Dict{String, Any}(),
+        :power_cap_VRES => Dict{String, Any}(),
+        :power_inv_VRES => Dict{String, Any}(),
         :H2_e_buy => Dict{String, Any}(),
         :H2_gc_e_buy => Dict{String, Any}(),
         :H2_h_sell => Dict{String, Any}(),
         :H2_gc_h_sell => Dict{String, Any}(),
+        :H2_cap_elec => Dict{String, Any}(),
+        :H2_inv_elec => Dict{String, Any}(),
         :H2_d_H => Dict{String, Any}(),
         :offtaker_h_buy => Dict{String, Any}(),
         :offtaker_gc_h_buy => Dict{String, Any}(),
         :offtaker_ep_sell => Dict{String, Any}(),
+        :offtaker_cap_EP_green => Dict{String, Any}(),
+        :offtaker_inv_EP_green => Dict{String, Any}(),
         :offtaker_gc_h_buy_G => Dict{String, Any}(),
         :offtaker_ep_sell_import => Dict{String, Any}(),
         :elec_GC_demand_d_GC_E => Dict{String, Any}(),
@@ -193,14 +199,14 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
         sum(haskey(var_dict[:offtaker_h_buy], id) ? var_dict[:offtaker_h_buy][id][jh, jd, jy] : 0.0 for id in agents[:offtaker]) == 0.0
     )
 
-    # H₂ GC balance — *annual* (indexed only by jy, not jh/jd) because H₂
-    # green-certificate trading is settled on a yearly basis, not hourly.
-    # The weighted sum (W_dict[jy][jd] * ...) aggregates hourly GC flows
-    # into a single annual quantity per year.
-    H2_GC_balance = @constraint(planner, [jy in JY],
-        sum(sum(W_dict[jy][jd] * (haskey(var_dict[:H2_gc_h_sell], id) ? var_dict[:H2_gc_h_sell][id][jh, jd, jy] : 0.0) for jh in JH, jd in JD) for id in agents[:H2]) -
-        sum(sum(W_dict[jy][jd] * (haskey(var_dict[:offtaker_gc_h_buy], id) ? var_dict[:offtaker_gc_h_buy][id][jh, jd, jy] : 0.0) for jh in JH, jd in JD) for id in agents[:offtaker]) -
-        sum(sum(W_dict[jy][jd] * (haskey(var_dict[:offtaker_gc_h_buy_G], id) ? var_dict[:offtaker_gc_h_buy_G][id][jh, jd, jy] : 0.0) for jh in JH, jd in JD) for id in agents[:offtaker]) == 0.0
+    # H₂ GC balance — *hourly* (indexed by jy, jh, jd) to match ADMM formulation.
+    # Supply = demand at each timestep. Offtaker green-backing mandates remain
+    # annual (in add_offtaker_agent_to_planner!) so agents satisfy their yearly
+    # γ_GC share internally while the market clears hourly.
+    H2_GC_balance = @constraint(planner, [jy in JY, jh in JH, jd in JD],
+        sum(haskey(var_dict[:H2_gc_h_sell], id) ? var_dict[:H2_gc_h_sell][id][jh, jd, jy] : 0.0 for id in agents[:H2]) -
+        sum(haskey(var_dict[:offtaker_gc_h_buy], id) ? var_dict[:offtaker_gc_h_buy][id][jh, jd, jy] : 0.0 for id in agents[:offtaker]) -
+        sum(haskey(var_dict[:offtaker_gc_h_buy_G], id) ? var_dict[:offtaker_gc_h_buy_G][id][jh, jd, jy] : 0.0 for id in agents[:offtaker]) == 0.0
     )
 
     # End-product balance: offtaker EP supply + EP importer supply
@@ -230,7 +236,10 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
         :var_dict => var_dict,
         :agent_welfare => agent_welfare,
         :elec_balance => elec_balance,
+        :elec_GC_balance => elec_GC_balance,
         :H2_balance => H2_balance,
+        :H2_GC_balance => H2_GC_balance,
+        :EP_balance => EP_balance,
         :power_consumers => power_consumers,
         :power_vres => power_vres,
         :power_conv => power_conv,
@@ -242,6 +251,7 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
         :JH => JH,
         :JD => JD,
         :JY => JY,
+        :W => W,   # Representative-day weights; needed to normalize duals to true prices
     )
 
     return planner, planner_state
