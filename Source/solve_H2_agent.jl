@@ -37,6 +37,8 @@ function solve_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     q_elec_gc = mod.ext[:variables][:q_elec_gc]
     q_h2gc    = mod.ext[:variables][:q_h2gc]
     cap_H2_y   = mod.ext[:variables][:cap_H2_y]
+    beta_H2  = mod.ext[:variables][:beta_H2]
+    gamma = get(mod.ext[:parameters], :γ, 1.0)
     F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_Electrolyzer, 0.0)
 
     # Electrolyzer objective breakdown:
@@ -66,7 +68,9 @@ function solve_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
         + sum(ρ_H2/2 * W[jd, jy] * (h2_out[jh, jd, jy]         - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2_GC/2 * W[jd, jy] * (q_h2gc[jh, jd, jy]      - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         # Fixed annualised investment cost, summed over model years (no W weighting).
-        + F_cap * sum(cap_H2_y[jy] for jy in JY))
+        + F_cap * sum(cap_H2_y[jy] for jy in JY)
+        # CVaR risk term (γ * β); γ = 0 ⇒ risk-neutral.
+        + gamma * beta_H2)
     optimize!(mod)
     return nothing
 end

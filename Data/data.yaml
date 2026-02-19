@@ -63,6 +63,8 @@ Power:
     Profile_Column: "SOLAR"    # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
     MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
     FixedCost_per_MW: 70000.0  # €/MW-year — Annualised CAPEX + fixed O&M for utility-scale solar. Assumes ≈700 k€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈70 k€/MW-year, consistent with recent LCOE studies.
+    gamma: 0.0                 # Risk weight for CVaR (γ=0 ⇒ risk-neutral even though risk terms are present structurally).
+    beta: 0.95                 # CVaR confidence level τ (placeholder; only active when gamma>0).
 
   # Dispatchable conventional generator (e.g. gas turbine)
   Gen_Conv_01:
@@ -90,6 +92,8 @@ Hydrogen:
     SpecificConsumption: 1.5                 # MWh_elec per MWh_H2 produced (i.e. efficiency = 1/1.5 ≈ 67%); typical PEM electrolyzer value
     OperationalCost: 3.0                     # €/MWh_H2 — Variable O&M for water treatment, stack degradation, etc.
     FixedCost_per_MW_Electrolyzer: 100000.0  # €/MW_elec-year — Annualised CAPEX for PEM electrolysers. Assumes ≈1.0 M€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈100 k€/MW-year (within IEA/IEEFA benchmark ranges).
+    gamma: 0.0                 # Risk weight for CVaR (γ=0 ⇒ risk-neutral baseline).
+    beta: 0.95                 # CVaR confidence level τ.
 
 # ---------------------------------------------------------------------------
 # Hydrogen offtakers (downstream processors & importers)
@@ -103,6 +107,8 @@ Hydrogen_Offtaker:
     Alpha: 0.75                        # H2-to-EP conversion ratio (MWh_EP per MWh_H2). 0.75 means 1 MWh_H2 yields 0.75 MWh_EP of NH3, consistent with typical industrial Haber–Bosch efficiencies (≈70–80% on an LHV basis).
     ProcessingCost: 7.0                # €/MWh_EP — Cost of converting H2 to end product (energy, catalysts, labour)
     FixedCost_per_MW_EP_Out: 120000.0  # €/MW_EP-year — Annualised CAPEX for downstream synthesis/processing (e.g. ammonia plant). Assumes ≈1.2 M€/MW_EP CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈120 k€/MW-year.
+    gamma: 0.0                 # Risk weight for CVaR (γ=0 ⇒ risk-neutral baseline).
+    beta: 0.95                 # CVaR confidence level τ.
 
   # Grey offtaker — uses conventional (grey) hydrogen but must buy H2 GCs for a fraction of its implied H2 use
   Offtaker_Grey:

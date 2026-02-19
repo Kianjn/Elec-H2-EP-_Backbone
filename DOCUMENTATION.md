@@ -61,7 +61,7 @@ The **end-product market** is coupled to H2 and H2_GC through the offtakers, who
 
 | Agent | Type | Description |
 |---|---|---|
-| `Gen_VRES_01` | `VRES` | Variable renewable (e.g. solar). Zero marginal cost. Produces both electricity and elec GCs (1:1). Constrained by hourly availability factor × capacity. |
+| `Gen_VRES_01` | `VRES` | Variable renewable (e.g. solar). Zero marginal cost. Produces both electricity and elec GCs (1:1). Constrained by hourly availability factor × **endogenous capacity**. Decides yearly installed capacity and investment (MW), incurring fixed annualised CAPEX `FixedCost_per_MW × capacity`. |
 | `Gen_Conv_01` | `Conventional` | Dispatchable thermal plant. Constant availability (AF = 1). Marginal cost sets price floor. No GC production. |
 | `Cons_Elec_01` | `Consumer` | Elastic electricity demand. Quadratic utility `U(d) = A_E·d − ½B_E·d²` gives inverse demand `p(d) = A_E − B_E·d`. Bounded by `PeakLoad × load_profile`. |
 
@@ -69,13 +69,13 @@ The **end-product market** is coupled to H2 and H2_GC through the offtakers, who
 
 | Agent | Type | Description |
 |---|---|---|
-| `Prod_H2_Green` | `GreenProducer` | PEM electrolyzer. Converts electricity to H₂ with efficiency `η = 1/SpecificConsumption`. Buys elec + elec GCs; sells H₂ + H₂ GCs. Annual green-backing constraint ensures GCs purchased ≥ `(1/η) × GCs issued`. |
+| `Prod_H2_Green` | `GreenProducer` | PEM electrolyzer with **endogenous H₂ output capacity**. Converts electricity to H₂ with efficiency `η = 1/SpecificConsumption`. Buys elec + elec GCs; sells H₂ + H₂ GCs. Annual green-backing constraint ensures GCs purchased ≥ `(1/η) × GCs issued`. Decides yearly H₂ capacity and investment (MW_H₂), incurring fixed annualised CAPEX `FixedCost_per_MW_Electrolyzer × capacity`. |
 
 ### 3.3 Offtaker Agents
 
 | Agent | Type | Description |
 |---|---|---|
-| `Offtaker_Green` | `GreenOfftaker` | Buys green H₂ and converts it 1:1 (via `Alpha`) to end product. Must buy H₂ GCs for ≥ 42% of EP output (annual mandate `gamma_GC = 0.42`). Tight stoichiometric link: `ep = (1/α) × h2_in`. |
+| `Offtaker_Green` | `GreenOfftaker` | Buys green H₂ and converts it 1:1 (via `Alpha`) to end product. Must buy H₂ GCs for ≥ 42% of EP output (annual mandate `gamma_GC = 0.42`). Tight stoichiometric link: `ep = (1/α) × h2_in`. Has **endogenous EP output capacity** `cap_EP_y[jy]` with investment `inv_EP[jy]` and fixed annualised CAPEX `FixedCost_per_MW_EP_Out × cap_EP_y`. |
 | `Offtaker_Grey` | `GreyOfftaker` | Produces EP from conventional (grey) feedstock at `MarginalCost`. Must buy H₂ GCs for ≥ `gamma_GC × gamma_NH3 × ep` (only the H₂-feedstock fraction). |
 | `Offtaker_Import` | `EPImporter` | Imports EP from outside the system at `ImportCost`. No H₂ or GC involvement. Acts as a price cap on the EP market. |
 
@@ -95,11 +95,12 @@ Currently empty (`EP_Demand: {}`). EP demand is inelastic and fully defined by `
 
 ### 4.1 Agent Objectives (ADMM)
 
-Each agent minimises its **augmented Lagrangian**:
+Each agent minimises its **augmented Lagrangian** (possibly risk-averse for some agents):
 
 ```
 min  Σ_{h,d,y} W[d,y] × ( cost_i − revenue_i )
    + Σ_k  (ρ_k / 2) × Σ_{h,d,y} W[d,y] × ( g_i^k − ḡ_i^k )²
+   + γ_i · CVaR_i(loss_i)
 ```
 
 where:
@@ -108,12 +109,18 @@ where:
 - `ḡ_i^k` is the consensus target for agent `i` in market `k`.
 - `ρ_k` is the penalty weight for market `k`.
 - `W[d,y]` scales representative days to a full year.
+- `γ_i` is a **per-agent risk weight** (non-zero only for VRES, electrolyzer, and green offtaker when risk aversion is enabled).
+- `CVaR_i(loss_i)` is an agent-specific Conditional Value-at-Risk term constructed with auxiliary variables `(α_i, β_i, u_i[jy])` over yearly scenarios `jy ∈ JY`.
 
 #### Specific objective terms by agent type
 
-**VRES generator:**
+**VRES generator (with endogenous capacity and optional CVaR):**
 ```
-min Σ W × ( MC×g − λ_elec×g − λ_GC×g )  +  (ρ_elec/2)×Σ W×(g − ḡ_elec)²  +  (ρ_GC/2)×Σ W×(g − ḡ_GC)²
+min Σ W × ( MC×g − λ_elec×g − λ_GC×g )
+  + (ρ_elec/2)×Σ W×(g − ḡ_elec)²
+  + (ρ_GC/2)×Σ W×(g − ḡ_GC)²
+  + FixedCost_per_MW × Σ_y cap_VRES[y]
+  + γ_VRES · CVaR_VRES(loss_VRES)
 ```
 
 **Conventional generator:**
@@ -127,13 +134,15 @@ min Σ W × ( λ_elec×d − U(d) )  +  (ρ_elec/2)×Σ W×(−d − ḡ_elec)²
 where U(d) = A_E×d − (B_E/2)×d²
 ```
 
-**Electrolyzer:**
+**Electrolyzer (with endogenous H₂ capacity and optional CVaR):**
 ```
 min Σ W × ( λ_elec×e_in + λ_GC×gc_e + op_cost×h2 − λ_H2×h2 − λ_H2GC×gc_h2 )
   + (ρ_elec/2)×Σ W×(−e_in − ḡ_elec)²
   + (ρ_GC/2)×Σ W×(−gc_e − ḡ_GC)²
   + (ρ_H2/2)×Σ W×(h2 − ḡ_H2)²
   + (ρ_H2GC/2)×Σ W×(gc_h2 − ḡ_H2GC)²
+  + FixedCost_per_MW_Electrolyzer × Σ_y cap_H2[y]
+  + γ_H2 · CVaR_H2(loss_H2)
 ```
 
 ### 4.2 Key Constraints
@@ -160,11 +169,12 @@ max Σ_i  welfare_i
 
 where `welfare_i` is:
 - **Consumers**: `U(d) = A×d − (B/2)×d²` (utility)
-- **Generators**: `−MC × g` (negative production cost)
-- **Electrolyzer**: `−op_cost × h2_out` (negative operational cost)
-- **Offtakers**: `−processing_cost × ep` (negative processing/import cost)
+- **Generators**: `−MC × g` (negative production cost) minus fixed CAPEX on endogenous capacity for VRES
+- **Electrolyzer**: `−op_cost × h2_out` minus fixed CAPEX on endogenous H₂ capacity
+- **Green offtaker**: `−processing_cost × ep` minus fixed CAPEX on endogenous EP capacity
+- **Other offtakers/importer**: `−processing_cost × ep` or `−import_cost × ep`
 
-Revenue/expenditure terms cancel out in the aggregate (they are transfers between agents). Market-clearing constraints enforce supply = demand.
+Optionally, the planner can include **risk penalties** for the same three green agents via CVaR terms in welfare (see `build_power_agent.jl`, `build_H2_agent.jl`, `build_offtaker_agent.jl`). Revenue/expenditure terms cancel out in the aggregate (they are transfers between agents). Market-clearing constraints enforce supply = demand.
 
 ---
 
@@ -189,10 +199,10 @@ Each ADMM iteration `k` proceeds as follows:
 
 4. **Update prices**: `λ^{k+1} = λ^k − ρ × imbalance^k` (gradient ascent on the dual).
 
-5. **Update ρ** (Boyd rule): For each market independently:
-   - If `primal > 2 × dual` → increase `ρ` (under-penalised).
-   - If `dual > 2 × primal` → decrease `ρ` (over-penalised).
-   - Otherwise → keep `ρ` unchanged.
+5. **Update ρ** (Boyd rule with three regimes): For each market independently:
+   - **Regime 1 (imbalance rp vs rd)**: If `primal > 2 × dual` → increase `ρ` (under-penalised). If `dual > 2 × primal` → decrease `ρ` (over-penalised).
+   - **Regime 2 (far from tolerance, rp ≈ rd)**: If both residuals are much larger than the market tolerance but comparable, apply a **gentle multiplicative increase** to ρ to avoid stalling with large residuals.
+   - **Regime 3 (near-convergence stability)**: If both residuals are within a modest multiple of tolerance and comparable, **freeze ρ** (keep it fixed) to prevent small oscillations near the optimum from being amplified by further ρ changes.
 
 6. **Convergence check**: All five markets must have both primal and dual residuals below their tolerance.
 
@@ -208,17 +218,20 @@ The `(n+1)` denominator comes from the sharing ADMM formulation, which introduce
 
 ### 5.3 Adaptive Penalty (ρ)
 
-| Market | Increase factor | Decrease factor | ρ_max | Rationale |
+Per-market parameters (see `update_rho.jl`):
+
+| Market | Increase factor | Decrease factor | ρ_max | Notes |
 |---|---|---|---|---|
-| `elec`, `elec_GC` | 1.10 | 1/1.10 | 100,000 | Loosely coupled; aggressive adaptation is safe |
-| `H2`, `H2_GC`, `EP` | 1.01 | 1/1.01 | 1.0 | Tightly coupled hydrogen chain; gentle updates prevent oscillation |
+| `elec`, `elec_GC` | 1.10 | 1/1.10 | 100,000 | Loosely coupled electricity/GC markets; faster adaptation is safe. |
+| `H2` | 1.01 | 1/1.01 | 100 | Tightly coupled to electricity and EP; gentle updates reduce oscillation. |
+| `H2_GC` | 1.05 | 1/1.05 | 100 | Hourly GC market but thin volumes; moderate adaptation. |
+| `EP` | 1.01 | 1/1.01 | 100 | Stiff EP market; slow adaptation avoids limit cycles when capacities/investments bind. |
+
+Near convergence, ρ can become **fixed per market** (Regime 3) so ADMM behaves like fixed-ρ ADMM around the solution.
 
 ### 5.4 Convergence Tolerances
 
-| Market | Tolerance | Rationale |
-|---|---|---|
-| `elec`, `elec_GC` | `epsilon` (base) | Electricity markets are large and liquid |
-| `H2`, `H2_GC`, `EP` | `10 × epsilon` | Stiffer numerical behaviour; looser tolerance prevents chasing extremely small residuals |
+All markets currently use the same base tolerance `epsilon` from `data.yaml` (initialised in `define_results.jl`). Residuals are L2 norms over all time slots; when interpreting them, divide by √(nTimesteps × nReprDays × nYears) to get an approximate per-slot scale.
 
 ### 5.5 Sign Convention
 
@@ -383,9 +396,9 @@ Now/
 │   ├── define_results.jl             # Initialize result & ADMM state dictionaries
 │   ├── ADMM.jl                       # Main ADMM coordination loop
 │   ├── ADMM_subroutine.jl            # Per-agent step: update params, solve, record
-│   ├── update_rho.jl                 # Adaptive penalty update (Boyd rule)
-│   ├── save_results.jl               # Write market-exposure CSV outputs
-│   └── save_social_planner_results.jl # Write social-planner CSV outputs
+│   ├── update_rho.jl                 # Adaptive penalty update (Boyd rule with 3 regimes: balance, gentle push, fixed-ρ near convergence)
+│   ├── save_results.jl               # Write market-exposure CSV outputs (including capacity & investment summaries)
+│   └── save_social_planner_results.jl # Write social-planner CSV outputs (including capacity & investment summaries)
 │
 ├── market_exposure_results/          # Output from market_exposure.jl
 │   ├── ADMM_Convergence.csv          # Primal & dual residuals per iteration
@@ -395,15 +408,17 @@ Now/
 │   ├── Electricity_GC_Market_History.csv
 │   ├── H2_GC_Market_History.csv
 │   ├── End_Product_Market_History.csv
-│   ├── Agent_Summary.csv             # Agent group membership
+│   ├── Agent_Summary.csv             # Agent group membership and ADMM objective value
 │   ├── Agent_Quantities_Final.csv    # Final-iteration net quantities per agent
 │   ├── Offtaker_GC_Diagnostics.csv   # GC compliance per offtaker
 │   ├── H2_Producer_Diagnostics.csv   # H₂ GC-to-production ratio
+│   ├── Capacity_Investments.csv      # VRES/electrolyzer/green offtaker yearly capacity & investment (ADMM)
 │   └── TimerOutput.yaml              # Profiling data
 │
 └── social_planner_results/           # Output from social_planner.jl
     ├── Market_Prices.csv             # Equilibrium prices (duals of balance constraints)
-    └── Agent_Summary.csv             # Per-agent quantity & welfare contribution
+    ├── Agent_Summary.csv             # Per-agent quantity & ADMM-style objective value
+    └── Capacity_Investments_Planner.csv  # VRES/electrolyzer/green offtaker yearly capacity & investment (planner)
 ```
 
 ---
@@ -434,9 +449,9 @@ Now/
 
 | File | ADMM Function | Planner Function |
 |---|---|---|
-| `build_power_agent.jl` | `build_power_agent!()` — variables, constraints, objective with λ/ρ/ḡ | `add_power_agent_to_planner!()` — same constraints, welfare expression (no ADMM terms) |
-| `build_H2_agent.jl` | `build_H2_agent!()` — electrolyzer with 4-market ADMM terms | `add_H2_agent_to_planner!()` — same constraints, welfare = −op_cost |
-| `build_offtaker_agent.jl` | `build_offtaker_agent!()` — green/grey/importer with ADMM terms | `add_offtaker_agent_to_planner!()` — same constraints, welfare = −processing_cost |
+| `build_power_agent.jl` | `build_power_agent!()` — power agents (VRES with capacity & optional CVaR, conventional, consumer) | `add_power_agent_to_planner!()` — same constraints, welfare expression (including VRES capacity & optional CVaR) |
+| `build_H2_agent.jl` | `build_H2_agent!()` — electrolyzer with 4-market ADMM terms, endogenous capacity & optional CVaR | `add_H2_agent_to_planner!()` — same constraints, welfare = −op_cost − fixed CAPEX − optional CVaR |
+| `build_offtaker_agent.jl` | `build_offtaker_agent!()` — green/grey/importer (green with EP capacity & optional CVaR) | `add_offtaker_agent_to_planner!()` — same constraints, welfare = −processing/import cost − fixed CAPEX − optional CVaR |
 | `build_elec_GC_demand_agent.jl` | `build_elec_GC_demand_agent!()` — GC demand with ADMM | `add_elec_GC_demand_agent_to_planner!()` — utility expression |
 | `build_EP_demand_agent.jl` | `build_EP_demand_agent!()` — placeholder | `add_EP_demand_agent_to_planner!()` — placeholder |
 | `build_social_planner.jl` | — | `build_social_planner!()` — orchestrates all add_*_to_planner!, adds balance constraints, sets Max(welfare) |
@@ -445,8 +460,8 @@ Now/
 
 | File | Role |
 |---|---|
-| `solve_power_agent.jl` | Rebuilds objective with current λ, ḡ, ρ for VRES/Conventional/Consumer; calls `optimize!`. |
-| `solve_H2_agent.jl` | Rebuilds 5-term economic objective + 4 ADMM penalties; calls `optimize!`. |
+| `solve_power_agent.jl` | Rebuilds objective with current λ, ḡ, ρ (plus VRES capacity cost and optional CVaR term); calls `optimize!`. |
+| `solve_H2_agent.jl` | Rebuilds economic + ADMM objective, including H₂ capacity cost and optional CVaR term; calls `optimize!`. |
 | `solve_offtaker_agent.jl` | Rebuilds objective for green/grey/importer; calls `optimize!`. |
 | `solve_elec_GC_demand_agent.jl` | Rebuilds utility − expenditure + ADMM penalty; calls `optimize!`. |
 | `solve_EP_demand_agent.jl` | Placeholder; just calls `optimize!`. |

@@ -3,13 +3,16 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   One agent type: electrolyzer. Variables: e_in (electricity), h2_out (H₂),
-#   q_elec_gc (electricity GCs bought) and q_h2gc (H₂ GCs issued). Constraints:
-#   h2_out = η * e_in, q_h2gc <= h2_out, and q_h2gc <= η * q_elec_gc so that only
-#   the share of H₂ that can be backed by certified electricity is green. Net
-#   positions: elec -e_in, elec_GC -q_elec_gc, H2 +h2_out, H2_GC +q_h2gc.
-#   Objective: cost (elec, elec_GC, op) - revenue (H2, H2_GC) + ADMM penalties.
-#   solve_H2_agent! re-sets objective and optimizes.
+#   One agent type: electrolyzer. ADMM build creates variables for electricity
+#   intake e_in, hydrogen output h2_out, electricity GCs q_elec_gc, hydrogen
+#   GCs q_h2gc, and YEARLY H₂ output capacity cap_H2_y with investment inv_cap_H2.
+#   Constraints: h2_out = η * e_in, q_h2gc <= h2_out, and annual green-backing
+#   so that only the share of H₂ that can be backed by certified electricity is
+#   green. Net positions: elec -e_in, elec_GC -q_elec_gc, H2 +h2_out, H2_GC
+#   +q_h2gc. The objective is cost (elec, elec_GC, op) − revenue (H2, H2_GC)
+#   plus ADMM penalties, fixed annualised CAPEX on cap_H2_y, and an optional
+#   CVaR-based risk term (γ·β_H2). solve_H2_agent! re-sets the objective with
+#   current λ/ρ/g_bar and calls optimize!.
 #
 # ==============================================================================
 
@@ -28,6 +31,10 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     # Annualised fixed investment cost per MW of electrolyser capacity (€/MW_elec-year).
     # Default 0.0 preserves original behaviour if not provided.
     F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_Electrolyzer, 0.0)
+    # Risk parameters (CVaR skeleton; γ = 0 ⇒ risk-neutral by default).
+    gamma = get(mod.ext[:parameters], :γ, 1.0)
+    beta_cvar = get(mod.ext[:parameters], :β, 0.95)   # confidence level τ
+    P = mod.ext[:parameters][:P]
 
     # ── ADMM parameters — electricity market ──────────────────────────────
     λ_elec     = mod.ext[:parameters][:λ_elec]       # Lagrange multiplier (price)
@@ -116,6 +123,37 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
         (1 / η) * sum(W[jd, jy] * q_h2gc[jh, jd, jy] for jh in JH, jd in JD)
     )
 
+    # ── Risk variables (agent-level CVaR) ───────────────────────────────────
+    alpha_H2 = mod.ext[:variables][:alpha_H2] = @variable(mod, lower_bound = 0, base_name = "alpha_H2_$(m)")
+    beta_H2  = mod.ext[:variables][:beta_H2]  = @variable(mod, lower_bound = 0, base_name = "beta_H2_$(m)")
+    u_H2     = mod.ext[:variables][:u_H2]     = @variable(mod, [jy in JY], lower_bound = 0, base_name = "u_H2_$(m)")
+
+    # Per-year economic loss (cost − revenue) excluding ADMM penalties.
+    loss_H2 = Dict{Int,JuMP.AffExpr}()
+    for jy in JY
+        loss_H2[jy] = @expression(mod,
+            sum(W[jd, jy] * (
+                λ_elec[jh, jd, jy]       * e_in[jh, jd, jy]
+                + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
+                + op_cost * h2_out[jh, jd, jy]
+                - λ_H2[jh, jd, jy]       * h2_out[jh, jd, jy]
+                - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
+            ) for jh in JH, jd in JD)
+        )
+    end
+    mod.ext[:expressions][:loss_H2] = loss_H2
+
+    # Shortfall constraints: u_H2[jy] ≥ loss_H2[jy] − α_H2.
+    mod.ext[:constraints][:CVaR_H2_shortfall] = @constraint(mod, [jy in JY],
+        u_H2[jy] >= loss_H2[jy] - alpha_H2
+    )
+
+    # CVaR definition: β_H2 ≥ α_H2 + (1/(1−τ)) * Σ P[jy]*u_H2[jy].
+    one_minus_tau = max(1e-6, 1.0 - beta_cvar)
+    mod.ext[:constraints][:CVaR_H2_link] = @constraint(mod,
+        beta_H2 >= alpha_H2 + (1 / one_minus_tau) * sum(P[jy] * u_H2[jy] for jy in JY)
+    )
+
     # ── Objective ──────────────────────────────────────────────────────────
     # min  Σ W·( λ_elec·e_in            ← electricity purchase cost
     #          + λ_GC·gc_e              ← elec-GC purchase cost
@@ -180,6 +218,9 @@ function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
     C_H = p[:OperationalCost]                     # operating cost (€/MWh_H2)
     # Annualised fixed investment cost per MW of electrolyser capacity (€/MW_elec-year).
     F_cap = get(p, :FixedCost_per_MW_Electrolyzer, 0.0)
+    gamma = get(p, :γ, 1.0)
+    beta_cvar = get(p, :β, 0.95)
+    P = p[:P]
 
     # Variables: electricity bought, elec-GCs bought, H₂ sold, H₂-GCs sold.
     e_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="e_buy_$(id)")
@@ -213,11 +254,30 @@ function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
         (1/η) * sum(W_dict[jy][jd] * gc_h_sell[jh, jd, jy] for jh in JH, jd in JD)
     )
 
-    # Welfare = −(operational cost).  Revenue/expenditure on markets are
-    # transfers and cancel in the planner's aggregate welfare.
+    # Risk variables for planner CVaR (cost-based).
+    alpha_H2 = @variable(planner, lower_bound=0, base_name="alpha_H2_$(id)")
+    beta_H2  = @variable(planner, lower_bound=0, base_name="beta_H2_$(id)")
+    u_H2     = @variable(planner, [jy in JY], lower_bound=0, base_name="u_H2_$(id)")
+
+    loss_H2 = Dict{Int,JuMP.AffExpr}()
+    for jy in JY
+        loss_H2[jy] = @expression(planner,
+            sum(W_dict[jy][jd] * (C_H * h_sell[jh, jd, jy]) for jh in JH, jd in JD)
+            + F_cap * cap_H2_y[jy]
+        )
+    end
+    @constraint(planner, [jy in JY], u_H2[jy] >= loss_H2[jy] - alpha_H2)
+    one_minus_tau = max(1e-6, 1.0 - beta_cvar)
+    @constraint(planner,
+        beta_H2 >= alpha_H2 + (1 / one_minus_tau) * sum(P[iy] * u_H2[jy] for (iy, jy) in enumerate(JY))
+    )
+
+    # Welfare = −(operational cost) − risk penalty. Revenue/expenditure on markets
+    # are transfers and cancel in the planner's aggregate welfare.
     obj = @expression(planner,
         -sum(W_dict[jy][jd] * (C_H * h_sell[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
         - F_cap * sum(cap_H2_y[jy] for jy in JY)   # fixed annualised investment cost (independent of dispatch)
+        - gamma * beta_H2
     )
 
     # Store variables so the caller can build market-clearing constraints.

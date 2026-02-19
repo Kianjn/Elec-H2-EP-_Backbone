@@ -40,6 +40,8 @@ function solve_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         q_h2gc = mod.ext[:variables][:q_h2gc]
         ep     = mod.ext[:variables][:ep]
         cap_EP_y = mod.ext[:variables][:cap_EP_y]
+        beta_G  = mod.ext[:variables][:beta_GreenOfftaker]
+        gamma_G = get(mod.ext[:parameters], :γ, 1.0)
         proc_cost = get(mod.ext[:parameters], :ProcessingCost, 0.0)
         F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_EP_Out, 0.0)
         mod.ext[:objective] = @objective(mod, Min,
@@ -48,7 +50,9 @@ function solve_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
             + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             # Fixed annualised investment cost, summed over model years (no W weighting).
-            + F_cap * sum(cap_EP_y[jy] for jy in JY))
+            + F_cap * sum(cap_EP_y[jy] for jy in JY)
+            # CVaR risk term (γ * β); γ = 0 ⇒ risk-neutral.
+            + gamma_G * beta_G)
     elseif agent_type == "GreyOfftaker"
         # GreyOfftaker objective:
         #   min  sum W * ( MC*ep                        [marginal production cost]

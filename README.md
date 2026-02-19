@@ -38,13 +38,15 @@ Both the ADMM and social planner use the **same problem definition** from the `S
 
 - **Five coupled markets**: Electricity, Electricity Guarantees of Origin (GC), Hydrogen, Hydrogen GC, End Product
 - **Seven agent types**: VRES generator, conventional generator, elastic consumer, electrolyzer, green offtaker, grey offtaker, EP importer
+- **Endogenous capacity investment**: VRES, electrolyzer, and green offtaker decide yearly capacity and investment (MW), with fixed annualised CAPEX proportional to installed capacity.
+- **Optional risk aversion (CVaR)**: Those three "green" agents can include a CVaR risk term in their objectives via per-agent `gamma` (risk weight) and `beta` (confidence level); default `gamma = 0.0` keeps them risk-neutral.
 - **Distributed ADMM**: Per-agent QP subproblems coordinated by iterative price updates
-- **Adaptive penalty (Boyd rule)**: Market-specific ρ adaptation with separate tuning for tightly-coupled hydrogen markets
-- **Centralised benchmark**: Social planner with dual-variable price recovery
+- **Three-stage adaptive penalty (Boyd rule)**: Market-specific ρ adaptation with (1) normal rp/rd balancing, (2) a gentle push far from tolerance, and (3) a fixed-ρ stability zone near convergence.
+- **Centralised benchmark**: Social planner with dual-variable price recovery and the same physical/investment structure as ADMM
 - **Green certificate mandate**: 42% H₂ GC requirement for offtakers (configurable)
 - **Representative days**: Temporal reduction from 8760 hours to a small set of representative days with weights
 - **Quadratic demand**: Elastic electricity and GC demand with inverse-demand parameterisation
-- **Comprehensive diagnostics**: Convergence plots, market histories, GC compliance, per-agent quantities
+- **Comprehensive diagnostics**: Convergence plots, market histories, GC compliance, per-agent quantities, and capacity-investment summaries
 
 ---
 
@@ -190,7 +192,7 @@ ADMM:
 
 ### Changing Tolerances
 
-The convergence tolerance `epsilon` in the ADMM block controls the base L2 residual threshold. Electricity and elec-GC markets use `epsilon` directly; H₂, H₂-GC, and EP markets use `10 × epsilon` (configured in `define_results.jl`).
+The convergence tolerance `epsilon` in the ADMM block controls the base L2 residual threshold for **all five markets** (see `define_results.jl`). Residual norms are L2 over all time slots (hours × representative days × years), so "per-slot" imbalances are smaller than the raw norms might suggest.
 
 ---
 
@@ -242,10 +244,11 @@ After running both scripts, compare `market_exposure_results/Agent_Quantities_Fi
 | `Electricity_GC_Market_History.csv` | Per-iteration history for the elec-GC market |
 | `H2_GC_Market_History.csv` | Per-iteration history for the H₂-GC market |
 | `End_Product_Market_History.csv` | Per-iteration history for the EP market |
-| `Agent_Summary.csv` | Agent group membership |
-| `Agent_Quantities_Final.csv` | Final-iteration net quantities per agent per market |
+| `Agent_Summary.csv` | Agent group membership and per-agent objective value at the final iteration |
+| `Agent_Quantities_Final.csv` | Final-iteration net quantities per agent per market (sums over all (h,d,y)) |
 | `Offtaker_GC_Diagnostics.csv` | Green-certificate compliance per offtaker |
 | `H2_Producer_Diagnostics.csv` | GC-to-production ratio for electrolyzers |
+| `Capacity_Investments.csv` | For VRES, electrolyzer, and green offtaker: per-year installed capacity and investment (MW) at the final ADMM iteration |
 | `TimerOutput.yaml` | Profiling data (time per ADMM section) |
 
 ### Social Planner (`social_planner_results/`)
@@ -253,7 +256,8 @@ After running both scripts, compare `market_exposure_results/Agent_Quantities_Fi
 | File | Description |
 |---|---|
 | `Market_Prices.csv` | Equilibrium prices (duals of balance constraints) |
-| `Agent_Summary.csv` | Per-agent total quantity and welfare contribution |
+| `Agent_Summary.csv` | Per-agent total quantity and ADMM-style objective value (cost − revenue) evaluated at planner prices |
+| `Capacity_Investments_Planner.csv` | For VRES, electrolyzer, and green offtaker: per-year installed capacity and investment (MW) in the planner solution |
 
 ---
 

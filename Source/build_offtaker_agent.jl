@@ -3,10 +3,27 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   GreenOfftaker: h2_in, q_h2gc, ep; ep == (1/α)*h2_in (no H₂ waste); q_h2gc >= 0.42*ep.
-#   GreyOfftaker: ep, q_h2gc >= 0.42*ep; no H₂ purchase. EPImporter: ep <= cap, import cost.
-#   All report g_net_EP = ep; green reports g_net_H2 = -h2_in, g_net_H2_GC = -q_h2gc;
-#   grey reports g_net_H2_GC = -q_h2gc. Objectives: cost - revenue + ADMM penalties.
+#   Builds JuMP models for offtakers (green, grey, importer) for both ADMM and
+#   social planner formulations.
+#
+#   - GreenOfftaker: decision variables h2_in (H₂ purchases), q_h2gc (H₂ GCs),
+#     ep (end-product output), yearly EP capacity cap_EP_y[jy] and investment
+#     inv_EP[jy], and optional CVaR risk variables (α, β, u[jy]). Tight
+#     stoichiometry ep = α_H2→EP * h2_in (no H₂ waste). Must satisfy an annual
+#     GC mandate (γ_GC share of H₂ intake backed by H₂ GCs). Net positions:
+#     g_net_H2 = −h2_in, g_net_H2_GC = −q_h2gc, g_net_EP = ep. ADMM objective:
+#     cost (H₂, H₂ GCs, processing) − EP revenue + ADMM penalties + fixed
+#     CAPEX on cap_EP_y + optional CVaR term (γ·β_G).
+#
+#   - GreyOfftaker: decision variables ep (EP output) and q_h2gc (H₂ GCs).
+#     Does not buy physical H₂ on the market. GC mandate/compliance is imposed
+#     on an inferred H₂-stream derived from EP output via gamma_NH3. Net
+#     positions: g_net_H2_GC = −q_h2gc, g_net_EP = ep. Objective: production
+#     cost + GC purchase − EP revenue + ADMM penalties.
+#
+#   - EPImporter: decision variable ep (EP imports) with a simple capacity
+#     constraint and import cost. Net position: g_net_EP = ep. Objective:
+#     import cost − EP revenue + ADMM penalties.
 #
 # ==============================================================================
 
@@ -52,6 +69,10 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         # Annualised fixed investment cost per MW of EP output capacity (€/MW_EP-year).
         # Read from data.yaml if present; default 0.0 keeps previous behaviour.
         F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_EP_Out, 0.0)
+        # Risk parameters (CVaR skeleton; γ = 0 ⇒ risk-neutral by default).
+        gamma = get(mod.ext[:parameters], :γ, 1.0)
+        beta_cvar = get(mod.ext[:parameters], :β, 0.95)   # confidence level τ
+        P = mod.ext[:parameters][:P]
 
         # Decision variables.
         h2_in  = mod.ext[:variables][:h2_in]  = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "h2_in")
@@ -80,6 +101,36 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         mod.ext[:expressions][:g_net_H2]    = @expression(mod, -h2_in)     # buyer on H2 market
         mod.ext[:expressions][:g_net_H2_GC]  = @expression(mod, -q_h2gc)   # buyer on H2-GC market
         mod.ext[:expressions][:g_net_EP]     = @expression(mod, ep)         # seller on EP market
+
+        # ── Risk variables (agent-level CVaR) ───────────────────────────────
+        alpha_G = mod.ext[:variables][:alpha_GreenOfftaker] = @variable(mod, lower_bound = 0, base_name = "alpha_GreenOfftaker_$(m)")
+        beta_G  = mod.ext[:variables][:beta_GreenOfftaker]  = @variable(mod, lower_bound = 0, base_name = "beta_GreenOfftaker_$(m)")
+        u_G     = mod.ext[:variables][:u_GreenOfftaker]     = @variable(mod, [jy in JY], lower_bound = 0, base_name = "u_GreenOfftaker_$(m)")
+
+        # Per-year economic loss (cost − revenue) excluding ADMM penalties.
+        loss_G = Dict{Int,JuMP.AffExpr}()
+        for jy in JY
+            loss_G[jy] = @expression(mod,
+                sum(W[jd, jy] * (
+                    λ_H2[jh, jd, jy]        * h2_in[jh, jd, jy]
+                    + λ_H2_GC[jh, jd, jy]  * q_h2gc[jh, jd, jy]
+                    + proc_cost * ep[jh, jd, jy]
+                    - λ_EP[jh, jd, jy]      * ep[jh, jd, jy]
+                ) for jh in JH, jd in JD)
+            )
+        end
+        mod.ext[:expressions][:loss_GreenOfftaker] = loss_G
+
+        # Shortfall constraints: u_G[jy] ≥ loss_G[jy] − α_G.
+        mod.ext[:constraints][:CVaR_Green_shortfall] = @constraint(mod, [jy in JY],
+            u_G[jy] >= loss_G[jy] - alpha_G
+        )
+
+        # CVaR definition: β_G ≥ α_G + (1/(1−τ)) * Σ P[jy]*u_G[jy].
+        one_minus_tau = max(1e-6, 1.0 - beta_cvar)
+        mod.ext[:constraints][:CVaR_Green_link] = @constraint(mod,
+            beta_G >= alpha_G + (1 / one_minus_tau) * sum(P[jy] * u_G[jy] for jy in JY)
+        )
 
         # Tight stoichiometric link: ep == alpha * h2_in.  ALL purchased
         # H₂ must be converted to EP (no H₂ waste).  EP output is exactly
@@ -224,6 +275,9 @@ function add_offtaker_agent_to_planner!(planner::Model, id::String, mod::Model,
         C_proc = get(p, :ProcessingCost, 0.0)
         # Annualised fixed investment cost per MW of EP output capacity (€/MW_EP-year).
         F_cap = get(p, :FixedCost_per_MW_EP_Out, 0.0)
+        gamma = get(p, :γ, 1.0)
+        beta_cvar = get(p, :β, 0.95)
+        P = p[:P]
 
         h_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="h_buy_$(id)")
         gc_h_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_h_buy_$(id)")
@@ -257,10 +311,29 @@ function add_offtaker_agent_to_planner!(planner::Model, id::String, mod::Model,
             gamma_GC * sum(W_dict[jy][jd] * h_buy[jh, jd, jy] for jh in JH, jd in JD)
         )
 
-        # Welfare = -(processing cost); market transfers cancel in aggregate.
+        # Risk variables for planner CVaR (cost-based).
+        alpha_G = @variable(planner, lower_bound=0, base_name="alpha_GreenOfftaker_$(id)")
+        beta_G  = @variable(planner, lower_bound=0, base_name="beta_GreenOfftaker_$(id)")
+        u_G     = @variable(planner, [jy in JY], lower_bound=0, base_name="u_GreenOfftaker_$(id)")
+
+        loss_G = Dict{Int,JuMP.AffExpr}()
+        for jy in JY
+            loss_G[jy] = @expression(planner,
+                sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD)
+                + F_cap * cap_EP_y[jy]
+            )
+        end
+        @constraint(planner, [jy in JY], u_G[jy] >= loss_G[jy] - alpha_G)
+        one_minus_tau = max(1e-6, 1.0 - beta_cvar)
+        @constraint(planner,
+            beta_G >= alpha_G + (1 / one_minus_tau) * sum(P[iy] * u_G[jy] for (iy, jy) in enumerate(JY))
+        )
+
+        # Welfare = -(processing cost) − risk penalty; market transfers cancel.
         obj = @expression(planner,
             -sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             - F_cap * sum(cap_EP_y[jy] for jy in JY)   # fixed annualised investment cost for green offtaker capacity
+            - gamma * beta_G
         )
         var_dict[:offtaker_h_buy][id] = h_buy
         var_dict[:offtaker_gc_h_buy][id] = gc_h_buy

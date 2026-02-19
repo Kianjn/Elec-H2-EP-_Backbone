@@ -79,14 +79,17 @@ function define_common_parameters!(m::String, mod::Model, data::Dict, ts::Dict, 
 
     # --- Scenario probabilities and risk parameters ---
     # P[jy] = probability of year-scenario jy occurring. With nYears=1, P=[1.0].
-    # For multi-scenario runs (nYears>1), uniform unless overridden in data.yaml.
+    # For multi-scenario runs (nYears>1), we assume a uniform prior unless
+    # overridden in data.yaml and use P in CVaR risk terms for green agents.
     P = ones(n_years) ./ n_years
     mod.ext[:parameters][:P] = P
-    # γ (gamma): weight on expected profit in the objective. γ=1 means pure
-    #   expected-value maximisation; γ<1 would blend in a CVaR risk measure.
-    # β (beta): CVaR confidence level (e.g. 0.95 = worst 5% of scenarios).
-    # Both are placeholders for a potential CVaR extension; currently γ=1 so
-    # the risk term is inactive.
+    # γ (gamma): per-agent risk weight in the objective. γ=0 gives a strictly
+    #   risk-neutral agent; γ>0 scales the CVaR(loss) term for agents that
+    #   implement risk aversion (currently only VRES, electrolyzer, and
+    #   GreenOfftaker read and use γ explicitly).
+    # β (beta): CVaR confidence level τ (e.g. 0.95 = worst 5% of scenarios).
+    # All agents receive γ, β here for convenience; build_* files decide
+    # whether to actually use them in the objective.
     mod.ext[:parameters][:γ] = get(data, "gamma", 1.0)
     mod.ext[:parameters][:β] = get(data, "beta", 0.95)
 

@@ -4,12 +4,25 @@
 #
 # PURPOSE:
 #   Constructs variables, constraints, and objective for one power-sector agent
-#   (VRES, Conventional, or Consumer). Net positions: generators supply positive
-#   electricity (and VRES supplies elec_GC 1:1); consumer supplies negative
-#   (demand). Objectives are cost minus revenue plus ADMM quadratic penalties;
-#   consumer objective is (price * d - utility(d)) plus penalty so that demand
-#   is elastic (inverse demand). No solve is performed here; solve_power_agent!
-#   re-sets the objective with current λ/ρ/g_bar and calls optimize!.
+#   (VRES, Conventional, or Consumer) in the ADMM formulation, and adds the
+#   corresponding block to the social planner model.
+#
+#   - VRES: variable renewable generator with endogenous yearly capacity
+#     cap_VRES[jy] and investment inv_VRES[jy]. Supplies electricity and
+#     electricity GCs 1:1. Net positions: g_net_elec = +g, g_net_elec_GC = +g.
+#     ADMM objective = generation cost − elec revenue − GC revenue
+#     + ADMM penalties + fixed annualised CAPEX on cap_VRES + optional CVaR
+#     term (γ·β_VRES). Capacity constraint: g ≤ AF × cap_VRES[jy].
+#
+#   - Conventional: dispatchable generator with fixed Capacity and marginal
+#     cost. Net position: g_net_elec = +g. ADMM objective = generation cost −
+#     elec revenue + ADMM penalties.
+#
+#   - Consumer: elastic electricity demand with quadratic utility. Net position:
+#     g_net_elec = −d. ADMM objective = expenditure − utility + ADMM penalty.
+#
+#   No solve is performed here; solve_power_agent! re-sets the objective with
+#   current λ/ρ/g_bar (and risk variables) and calls optimize!.
 #
 # ARGUMENTS:
 #   m — Agent ID.
@@ -59,6 +72,10 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
         # Annualised fixed investment cost per MW of installed capacity (€/MW-year).
         # Default 0.0 preserves original behaviour if not provided.
         F_cap = get(mod.ext[:parameters], :FixedCost_per_MW, 0.0)
+        # Risk parameters (CVaR skeleton; γ = 0 ⇒ risk-neutral by default).
+        gamma = get(mod.ext[:parameters], :γ, 1.0)
+        beta_cvar = get(mod.ext[:parameters], :β, 0.95)   # confidence level τ
+        P = mod.ext[:parameters][:P]
         n_years = length(JY)   # apply the annualised charge once per model year
 
         # ── Capacity and investment decision variables (per year) ──────────────
@@ -89,6 +106,35 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
         # automatically generates one green certificate).
         mod.ext[:expressions][:g_net_elec]    = @expression(mod, g)   # g_net_elec    = +g
         mod.ext[:expressions][:g_net_elec_GC] = @expression(mod, g)   # g_net_elec_GC = +g
+
+        # ── Risk variables (agent-level CVaR) ───────────────────────────────
+        # α_VRES: VaR proxy; β_VRES: CVaR; u_VRES[jy]: shortfall per scenario year.
+        alpha_VRES = mod.ext[:variables][:alpha_VRES] = @variable(mod, lower_bound = 0, base_name = "alpha_VRES_$(m)")
+        beta_VRES  = mod.ext[:variables][:beta_VRES]  = @variable(mod, lower_bound = 0, base_name = "beta_VRES_$(m)")
+        u_VRES     = mod.ext[:variables][:u_VRES]     = @variable(mod, [jy in JY], lower_bound = 0, base_name = "u_VRES_$(m)")
+
+        # Per-year economic loss (cost − revenue) excluding ADMM penalties; prices
+        # λ are updated each ADMM iteration via mod.ext[:parameters][:λ_*].
+        loss_VRES = Dict{Int,JuMP.AffExpr}()
+        for jy in JY
+            loss_VRES[jy] = @expression(mod,
+                sum(W[jd, jy] * (MC * g[jh, jd, jy]
+                    - λ_elec[jh, jd, jy] * g[jh, jd, jy]
+                    - λ_elec_GC[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD)
+            )
+        end
+        mod.ext[:expressions][:loss_VRES] = loss_VRES
+
+        # CVaR shortfall constraints: u_VRES[jy] ≥ loss_VRES[jy] − α.
+        mod.ext[:constraints][:CVaR_VRES_shortfall] = @constraint(mod, [jy in JY],
+            u_VRES[jy] >= loss_VRES[jy] - alpha_VRES
+        )
+
+        # CVaR definition: β_VRES ≥ α_VRES + (1/(1−τ)) * Σ P[jy]*u_VRES[jy].
+        one_minus_tau = max(1e-6, 1.0 - beta_cvar)
+        mod.ext[:constraints][:CVaR_VRES_link] = @constraint(mod,
+            beta_VRES >= alpha_VRES + (1 / one_minus_tau) * sum(P[jy] * u_VRES[jy] for jy in JY)
+        )
 
         # Objective:
         #   min  Σ_{h,d,y} W[d,y]·( MC·g − λ_elec·g − λ_GC·g )       ← (1)
@@ -229,6 +275,9 @@ function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
         # Availability factors and costs.
         AF = _ts(mod, :AF)
         C = _p(mod, :MarginalCost)
+        gamma = get(mod.ext[:parameters], :γ, 1.0)
+        beta_cvar = get(mod.ext[:parameters], :β, 0.95)
+        P = mod.ext[:parameters][:P]
         # Annualised fixed investment cost per MW of installed VRES capacity (€/MW-year).
         F_cap = get(mod.ext[:parameters], :FixedCost_per_MW, 0.0)
         cap_initial = _p(mod, :Capacity)
@@ -250,12 +299,35 @@ function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
         q_E = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="q_E_$(id)")
         @constraint(planner, [jh in JH, jd in JD, jy in JY], q_E[jh, jd, jy] <= AF[jh, jd, jy] * cap_VRES[jy])
 
+        # Risk variables for planner CVaR (cost-based, no prices in planner objective).
+        alpha_VRES = @variable(planner, lower_bound=0, base_name="alpha_VRES_$(id)")
+        beta_VRES  = @variable(planner, lower_bound=0, base_name="beta_VRES_$(id)")
+        u_VRES     = @variable(planner, [jy in JY], lower_bound=0, base_name="u_VRES_$(id)")
+
+        # Per-year cost (positive) = production cost + fixed capacity cost in that year.
+        loss_VRES = Dict{Int,JuMP.AffExpr}()
+        for jy in JY
+            loss_VRES[jy] = @expression(planner,
+                sum(W_dict[jy][jd] * (C * q_E[jh, jd, jy]) for jh in JH, jd in JD)
+                + F_cap * cap_VRES[jy]
+            )
+        end
+
+        # Shortfall constraints and CVaR link.
+        @constraint(planner, [jy in JY], u_VRES[jy] >= loss_VRES[jy] - alpha_VRES)
+        one_minus_tau = max(1e-6, 1.0 - beta_cvar)
+        @constraint(planner,
+            beta_VRES >= alpha_VRES + (1 / one_minus_tau) * sum(P[iy] * u_VRES[jy] for (iy, jy) in enumerate(JY))
+        )
+
         # Welfare contribution = −(production cost).  Negative because cost
         # reduces total welfare; revenue cancels out in the planner's
         # aggregate (it is a transfer between agents).
         obj = @expression(planner,
             -sum(W_dict[jy][jd] * (C * q_E[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             - F_cap * sum(cap_VRES[jy] for jy in JY)   # fixed annualised investment cost (capacity-only term)
+            # CVaR risk penalty; γ = 0 ⇒ risk-neutral.
+            - gamma * beta_VRES
         )
         var_dict[:power_q_E][id] = q_E
         var_dict[:power_cap_VRES][id] = cap_VRES

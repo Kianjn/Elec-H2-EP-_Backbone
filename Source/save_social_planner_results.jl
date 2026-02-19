@@ -319,5 +319,89 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     end
 
     CSV.write(joinpath(results_folder, "Agent_Summary.csv"), summary)
+
+    # --------------------------------------------------------------------------
+    # Capacity_Investments_Planner.csv — YEARLY CAPACITY & INVESTMENT (PLANNER)
+    # --------------------------------------------------------------------------
+    # Mirror of the ADMM Capacity_Investments.csv but for the centralized
+    # social planner solution. Uses the planner's cap/investment variables in
+    # var_dict built by build_social_planner!.
+    cap_rows = Vector{NamedTuple{(:AgentID, :Group, :Type, :YearIndex, :Capacity_MW, :Investment_MW),Tuple{String,String,String,Int,Float64,Float64}}}()
+
+    # Helper: append one row per year for a given agent, if the capacity
+    # and investment variables exist in var_dict under the provided keys.
+    function _append_cap_rows_planner!(rows,
+                                       id::String,
+                                       group::String,
+                                       atype::String,
+                                       cap_dict::Union{Dict{String,Any},Nothing},
+                                       inv_dict::Union{Dict{String,Any},Nothing},
+                                       JY)
+        cap_dict === nothing && return
+        !haskey(cap_dict, id) && return
+        cap_var = cap_dict[id]
+        inv_vec = Float64[]
+        if inv_dict !== nothing && haskey(inv_dict, id)
+            inv_var = inv_dict[id]
+            for jy in JY
+                push!(inv_vec, value(inv_var[jy]))
+            end
+        else
+            for _ in JY
+                push!(inv_vec, 0.0)
+            end
+        end
+        iy = 0
+        for jy in JY
+            iy += 1
+            cap_val = value(cap_var[jy])
+            inv_val = inv_vec[iy]
+            push!(rows, (AgentID = String(id),
+                         Group = group,
+                         Type = atype,
+                         YearIndex = iy,
+                         Capacity_MW = cap_val,
+                         Investment_MW = inv_val))
+        end
+    end
+
+    # VRES capacities (power_vres agents).
+    for id in power_vres
+        _append_cap_rows_planner!(cap_rows,
+                                  id,
+                                  "power",
+                                  "VRES",
+                                  get(var_dict, :power_cap_VRES, nothing),
+                                  get(var_dict, :power_inv_VRES, nothing),
+                                  JY)
+    end
+
+    # H₂ producer capacities (H2_producers).
+    for id in H2_producers
+        _append_cap_rows_planner!(cap_rows,
+                                  id,
+                                  "H2",
+                                  "H2Prod",
+                                  get(var_dict, :H2_cap_elec, nothing),   # stores H2 capacity in the current formulation
+                                  get(var_dict, :H2_inv_elec, nothing),
+                                  JY)
+    end
+
+    # Green offtaker EP capacities.
+    for id in offtaker_green
+        _append_cap_rows_planner!(cap_rows,
+                                  id,
+                                  "offtaker",
+                                  "GreenOfftaker",
+                                  get(var_dict, :offtaker_cap_EP_green, nothing),
+                                  get(var_dict, :offtaker_inv_EP_green, nothing),
+                                  JY)
+    end
+
+    if !isempty(cap_rows)
+        cap_df = DataFrame(cap_rows)
+        CSV.write(joinpath(results_folder, "Capacity_Investments_Planner.csv"), cap_df)
+    end
+
     return nothing
 end
