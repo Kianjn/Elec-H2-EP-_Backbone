@@ -98,9 +98,9 @@ Currently empty (`EP_Demand: {}`). EP demand is inelastic and fully defined by `
 Each agent minimises its **augmented Lagrangian** (possibly risk-averse for some agents):
 
 ```
-min  Σ_{h,d,y} W[d,y] × ( cost_i − revenue_i )
+min  γ_i × [ Σ_{h,d,y} W[d,y] × ( cost_i − revenue_i ) + FixedCAPEX_i ]
+   + (1 − γ_i) × CVaR_i(loss_i)
    + Σ_k  (ρ_k / 2) × Σ_{h,d,y} W[d,y] × ( g_i^k − ḡ_i^k )²
-   + γ_i · CVaR_i(loss_i)
 ```
 
 where:
@@ -109,18 +109,34 @@ where:
 - `ḡ_i^k` is the consensus target for agent `i` in market `k`.
 - `ρ_k` is the penalty weight for market `k`.
 - `W[d,y]` scales representative days to a full year.
-- `γ_i` is a **per-agent risk weight** (non-zero only for VRES, electrolyzer, and green offtaker when risk aversion is enabled).
-- `CVaR_i(loss_i)` is an agent-specific Conditional Value-at-Risk term constructed with auxiliary variables `(α_i, β_i, u_i[jy])` over yearly scenarios `jy ∈ JY`.
+- `γ_i` is a **per-agent risk weight** (`γ=1` → risk-neutral, `γ<1` → risk-averse). Non-trivial CVaR is used only for VRES, electrolyzer, and green offtaker.
+- `CVaR_i(loss_i)` is an agent-specific Conditional Value-at-Risk term constructed with auxiliary variables `(α_i, u_i[jy])` over yearly scenarios `jy ∈ JY`, at confidence level `β`.
+
+#### CVaR formulation (per agent)
+
+For each risk-averse agent (VRES, electrolyzer, green offtaker), CVaR is linearised via:
+- `α_i` — VaR proxy (free variable, `≥ 0`)
+- `u_i[jy]` — shortfall per scenario year (`≥ 0`)
+- `cvar_i` — CVaR value (`≥ 0`)
+
+Constraints:
+```
+u_i[jy] ≥ loss_i[jy] − α_i                          ∀ jy ∈ JY
+cvar_i  ≥ α_i + (1/(1−β)) × Σ_y P[jy] × u_i[jy]
+```
+
+**Dynamic constraint updates**: In ADMM, the loss expressions `loss_i[jy]` depend on current market prices `λ` (which change every iteration). Because JuMP expressions bake in coefficient values at creation time, the CVaR shortfall and linking constraints must be **deleted and re-added** in every ADMM iteration with the freshly recomputed loss expressions. This happens in the `solve_*_agent!` functions.
 
 #### Specific objective terms by agent type
 
-**VRES generator (with endogenous capacity and optional CVaR):**
+**VRES generator (with endogenous capacity and CVaR):**
 ```
-min Σ W × ( MC×g − λ_elec×g − λ_GC×g )
-  + (ρ_elec/2)×Σ W×(g − ḡ_elec)²
-  + (ρ_GC/2)×Σ W×(g − ḡ_GC)²
-  + FixedCost_per_MW × Σ_y cap_VRES[y]
-  + γ_VRES · CVaR_VRES(loss_VRES)
+min  γ × [ Σ_y loss_VRES[y] + F_cap × Σ_y cap_VRES[y] ]
+   + (1−γ) × CVaR_VRES
+   + (ρ_elec/2)×Σ W×(g − ḡ_elec)²
+   + (ρ_GC/2)×Σ W×(g − ḡ_GC)²
+
+where loss_VRES[y] = Σ_{h,d} W × ( MC×g − λ_elec×g − λ_GC×g )
 ```
 
 **Conventional generator:**
@@ -134,15 +150,27 @@ min Σ W × ( λ_elec×d − U(d) )  +  (ρ_elec/2)×Σ W×(−d − ḡ_elec)²
 where U(d) = A_E×d − (B_E/2)×d²
 ```
 
-**Electrolyzer (with endogenous H₂ capacity and optional CVaR):**
+**Electrolyzer (with endogenous H₂ capacity and CVaR):**
 ```
-min Σ W × ( λ_elec×e_in + λ_GC×gc_e + op_cost×h2 − λ_H2×h2 − λ_H2GC×gc_h2 )
-  + (ρ_elec/2)×Σ W×(−e_in − ḡ_elec)²
-  + (ρ_GC/2)×Σ W×(−gc_e − ḡ_GC)²
-  + (ρ_H2/2)×Σ W×(h2 − ḡ_H2)²
-  + (ρ_H2GC/2)×Σ W×(gc_h2 − ḡ_H2GC)²
-  + FixedCost_per_MW_Electrolyzer × Σ_y cap_H2[y]
-  + γ_H2 · CVaR_H2(loss_H2)
+min  γ × [ Σ_y loss_H2[y] + F_cap × Σ_y cap_H2[y] ]
+   + (1−γ) × CVaR_H2
+   + (ρ_elec/2)×Σ W×(−e_in − ḡ_elec)²
+   + (ρ_GC/2)×Σ W×(−gc_e − ḡ_GC)²
+   + (ρ_H2/2)×Σ W×(h2 − ḡ_H2)²
+   + (ρ_H2GC/2)×Σ W×(gc_h2 − ḡ_H2GC)²
+
+where loss_H2[y] = Σ_{h,d} W × ( λ_elec×e_in + λ_GC×gc_e + op×h2 − λ_H2×h2 − λ_H2GC×gc_h2 )
+```
+
+**Green offtaker (with endogenous EP capacity and CVaR):**
+```
+min  γ × [ Σ_y loss_G[y] + F_cap × Σ_y cap_EP[y] ]
+   + (1−γ) × CVaR_G
+   + (ρ_H2/2)×Σ W×(−h2_in − ḡ_H2)²
+   + (ρ_H2GC/2)×Σ W×(−gc_h2 − ḡ_H2GC)²
+   + (ρ_EP/2)×Σ W×(ep − ḡ_EP)²
+
+where loss_G[y] = Σ_{h,d} W × ( λ_H2×h2_in + λ_H2GC×gc_h2 + proc×ep − λ_EP×ep )
 ```
 
 ### 4.2 Key Constraints
@@ -161,20 +189,31 @@ min Σ W × ( λ_elec×e_in + λ_GC×gc_e + op_cost×h2 − λ_H2×h2 − λ_H2G
 
 ### 4.3 Social Planner Objective
 
-The social planner maximises total welfare:
+The social planner maximises **risk-adjusted social welfare** with a **single** social CVaR:
 
 ```
-max Σ_i  welfare_i
+max  γ × Σ_y sw_aux[y]  −  (1−γ) × CVaR_social
 ```
 
-where `welfare_i` is:
-- **Consumers**: `U(d) = A×d − (B/2)×d²` (utility)
+where `sw_aux[y]` is an epigraph proxy for aggregate social welfare per year (see §6.4 for why), and `CVaR_social` penalises tail risk across scenario years. When `γ=1` (risk-neutral), the CVaR term vanishes and the planner reduces to standard welfare maximisation.
+
+#### Per-agent welfare contributions
+
+Each `add_*_to_planner!` function returns a `Dict{Int, Any}` of per-year welfare expressions (no per-agent CVaR — CVaR is applied once to the aggregate). Revenue/expenditure terms cancel out in the aggregate (they are transfers between agents). The per-agent welfare terms are:
+
+- **Consumers**: `U(d) = A×d − (B/2)×d²` (quadratic utility)
 - **Generators**: `−MC × g` (negative production cost) minus fixed CAPEX on endogenous capacity for VRES
 - **Electrolyzer**: `−op_cost × h2_out` minus fixed CAPEX on endogenous H₂ capacity
 - **Green offtaker**: `−processing_cost × ep` minus fixed CAPEX on endogenous EP capacity
 - **Other offtakers/importer**: `−processing_cost × ep` or `−import_cost × ep`
 
-Optionally, the planner can include **risk penalties** for the same three green agents via CVaR terms in welfare (see `build_power_agent.jl`, `build_H2_agent.jl`, `build_offtaker_agent.jl`). Revenue/expenditure terms cancel out in the aggregate (they are transfers between agents). Market-clearing constraints enforce supply = demand.
+#### Social welfare aggregation
+
+```
+social_welfare[y] = Σ_i  welfare_per_year_i[y]      (includes quadratic consumer utility)
+```
+
+Market-clearing constraints enforce supply = demand. The single social CVaR applies to the full aggregate welfare (including consumer utility), ensuring the risk-averse planner accounts for all welfare components when assessing tail risk.
 
 ---
 
@@ -188,8 +227,9 @@ Each ADMM iteration `k` proceeds as follows:
    a. Update consensus target: `ḡ_i = q_i^{k-1} − (1/(n+1)) × imbalance^{k-1}`
    b. Update prices `λ`, penalty `ρ` from the global ADMM state.
    c. Rebuild objective with updated parameters.
-   d. Solve the agent's QP.
-   e. Record the solution quantities.
+   d. For CVaR agents (VRES, electrolyzer, green offtaker): recompute loss expressions with current `λ`, then delete and re-add CVaR shortfall and linking constraints with the fresh losses.
+   e. Solve the agent's QP.
+   f. Record the solution quantities.
 
 2. **Compute market imbalances**: For each market, sum all agents' net positions. For EP, subtract fixed demand `D_EP`.
 
@@ -246,7 +286,7 @@ Market imbalance = Σ (net positions). Positive imbalance = excess supply → pr
 
 ## 6. Social Planner Benchmark
 
-The social planner (`social_planner.jl`) solves a single centralised QP that maximises total welfare subject to all individual agent constraints plus market-clearing balance constraints. It serves as the theoretical first-best benchmark.
+The social planner (`social_planner.jl`) solves a single centralised convex QCP (quadratically constrained program) that maximises risk-adjusted social welfare subject to all individual agent constraints plus market-clearing balance constraints. It serves as the theoretical first-best benchmark. When `γ=1` (risk-neutral), the CVaR term vanishes and the planner reduces to a standard QP, matching the ADMM risk-neutral equilibrium.
 
 ### 6.1 Market-Clearing Constraints
 
@@ -255,21 +295,66 @@ The social planner (`social_planner.jl`) solves a single centralised QP that max
 | Electricity balance | `Σ generation − Σ demand − Σ electrolyzer_elec_buy = 0` (per h,d,y) |
 | Elec GC balance | `Σ VRES_generation − Σ electrolyzer_GC_buy − Σ GC_demand = 0` (per h,d,y) |
 | H₂ balance | `Σ H₂_production − Σ H₂_consumption − Σ offtaker_H₂_buy = 0` (per h,d,y) |
-| H₂ GC balance | `Σ W×H₂_GC_supply − Σ W×H₂_GC_demand = 0` (per year, annual) |
+| H₂ GC balance | `Σ H₂_GC_supply − Σ H₂_GC_demand = 0` (per h,d,y — hourly, same as other markets) |
 | EP balance | `Σ offtaker_EP_supply − D_EP − Σ EP_demand = 0` (per h,d,y) |
 
-### 6.2 Price Recovery
+### 6.2 Price Recovery (Two-Step QCP Dual Recovery)
 
-Equilibrium prices are extracted as **dual variables** (shadow prices) of the market-clearing constraints. By LP/QP duality, the dual of a balance constraint equals the equilibrium price at that timestep.
+Equilibrium prices are the **dual variables** (shadow prices) of the market-clearing constraints. However, the epigraph formulation (§6.4) makes the model a QCP, and **Gurobi does not provide dual variables for QCP models**.
+
+The solution is a **two-step dual recovery** procedure:
+
+1. **Step 1 — QCP solve**: Solve the full QCP to obtain optimal primal values (quantities, capacities, CVaR variables). Accept both `OPTIMAL` and `LOCALLY_SOLVED` (for convex QCPs, local = global optimum).
+
+2. **Step 2 — Convert QCP → LP**: Fix the demand variables (`d_E`, `d_GC_E`, `d_EP`) at their QCP-optimal values. Delete the quadratic epigraph constraints and re-add them as linear constraints (with demand welfare evaluated as a constant). This converts the model to a pure LP.
+
+3. **Step 3 — LP solve**: Re-solve the LP. Gurobi provides full dual variables for LPs solved to `OPTIMAL`.
+
+4. **Step 4 — Save results**: Extract duals (prices) and variable values.
+
+5. **Step 5 — Cleanup**: Unfix demand variables, delete linear epigraph constraints, restore original quadratic epigraph constraints (model back to QCP form for potential re-use).
+
+This approach is **exact**: the LP has the same feasible allocation as the QCP (demand fixed at optimal values), so the duals represent the correct marginal prices at the risk-averse optimal allocation.
+
+**Why fixing demand variables works**: The only quadratic constraints are the epigraph constraints `sw_aux[y] ≤ social_welfare[y]`, where `social_welfare[y]` contains `−B/2 × d²` terms from elastic demand agents. Fixing `d` makes `d²` a constant, so the constraints become linear. The replacement constraints use numerically evaluated demand welfare (constant) plus the still-variable supply-side welfare (linear), producing purely linear constraints.
 
 ### 6.3 Code Architecture
 
 All problem definition lives in `Source/build_*.jl` files. Each file contains:
 
-- `build_*_agent!()` — Builds the ADMM version (with `λ`, `ρ`, `ḡ` penalty terms).
-- `add_*_agent_to_planner!()` — Adds the same variables/constraints to the planner model **without** ADMM terms. Returns the agent's welfare contribution.
+- `build_*_agent!()` — Builds the ADMM version (with `λ`, `ρ`, `ḡ` penalty terms and per-agent CVaR for risk-averse agents).
+- `add_*_agent_to_planner!()` — Adds the same variables/constraints to the planner model **without** ADMM terms and **without** per-agent CVaR. Returns a `Dict{Int, Any}` of per-year welfare expressions.
 
-`build_social_planner.jl` orchestrates the calls to all `add_*_to_planner!` functions, adds market-clearing constraints, and sets the Max(total welfare) objective.
+`build_social_planner.jl` orchestrates the calls to all `add_*_to_planner!` functions, adds market-clearing constraints, aggregates per-year welfare into `social_welfare`, adds the epigraph formulation and single social CVaR, and sets the risk-adjusted objective.
+
+### 6.4 Epigraph Formulation for Social CVaR
+
+The social planner applies **one single CVaR** to the aggregate social welfare (not per-agent CVaR). This ensures risk aversion considers all welfare components (consumer utility, production costs, investment costs) holistically.
+
+**Problem**: `social_welfare[y]` includes quadratic consumer utility terms (`A·d − B/2·d²`). Putting `−social_welfare[y]` inside the CVaR shortfall constraint would create a quadratic constraint (QC), turning the model into a QCP. Gurobi cannot provide duals for QCPs.
+
+**Solution — epigraph reformulation**: Introduce auxiliary variables `sw_aux[y]` with epigraph constraints:
+
+```
+sw_aux[y] ≤ social_welfare[y]     (quadratic constraint, standard convex form)
+```
+
+The CVaR constraints then reference `sw_aux` instead of the quadratic `social_welfare`, making them purely linear:
+
+```
+u_social[y]  ≥ −sw_aux[y] − α_social                          ∀ y ∈ JY
+cvar_social  ≥ α_social + (1/(1−β)) × Σ_y P[y] × u_social[y]
+```
+
+The objective is also linear:
+
+```
+max  γ × Σ_y sw_aux[y]  −  (1−γ) × cvar_social
+```
+
+Since the objective maximises `sw_aux`, the epigraph constraint binds at optimality (`sw_aux[y] = social_welfare[y]`), making the formulation mathematically equivalent to applying CVaR directly to `social_welfare`.
+
+The epigraph constraints are the **only** quadratic constraints in the model. They are in Gurobi's standard convex QC form (PSD Q-matrix on the `≤` side). All other constraints (CVaR, market-clearing, capacity bounds) are purely linear. The dual recovery procedure (§6.2) handles the QCP→LP conversion for price extraction.
 
 ---
 
@@ -385,7 +470,7 @@ Now/
 │   ├── build_offtaker_agent.jl       # JuMP model: offtakers (ADMM + planner)
 │   ├── build_elec_GC_demand_agent.jl # JuMP model: GC demand (ADMM + planner)
 │   ├── build_EP_demand_agent.jl      # JuMP model: EP demand placeholder (ADMM + planner)
-│   ├── build_social_planner.jl       # Orchestrate planner: call add_*_to_planner!, add balance constraints, set objective
+│   ├── build_social_planner.jl       # Orchestrate planner: call add_*_to_planner!, add balance constraints, epigraph + social CVaR, set risk-adjusted objective
 │   │
 │   ├── solve_power_agent.jl          # Re-set objective & optimize (power)
 │   ├── solve_H2_agent.jl             # Re-set objective & optimize (electrolyzer)
@@ -430,7 +515,7 @@ Now/
 | File | Purpose |
 |---|---|
 | `market_exposure.jl` | Entry point for distributed ADMM. Sections 1–13: env, packages, dirs, source loading, data loading, results folder, agent init, market params, agent params, build models, run ADMM, save results. |
-| `social_planner.jl` | Entry point for centralised benchmark. Sections 1–12: same structure as market_exposure but builds a single planner model instead of per-agent models + ADMM loop. |
+| `social_planner.jl` | Entry point for centralised benchmark. Sections 1–12: same structure as market_exposure but builds a single planner model instead of per-agent models + ADMM loop. Section 11 implements the two-step QCP dual recovery (QCP solve → fix demand vars + replace QC → LP solve → extract duals). |
 
 ### 10.2 Parameter Definition Files
 
@@ -449,20 +534,20 @@ Now/
 
 | File | ADMM Function | Planner Function |
 |---|---|---|
-| `build_power_agent.jl` | `build_power_agent!()` — power agents (VRES with capacity & optional CVaR, conventional, consumer) | `add_power_agent_to_planner!()` — same constraints, welfare expression (including VRES capacity & optional CVaR) |
-| `build_H2_agent.jl` | `build_H2_agent!()` — electrolyzer with 4-market ADMM terms, endogenous capacity & optional CVaR | `add_H2_agent_to_planner!()` — same constraints, welfare = −op_cost − fixed CAPEX − optional CVaR |
-| `build_offtaker_agent.jl` | `build_offtaker_agent!()` — green/grey/importer (green with EP capacity & optional CVaR) | `add_offtaker_agent_to_planner!()` — same constraints, welfare = −processing/import cost − fixed CAPEX − optional CVaR |
-| `build_elec_GC_demand_agent.jl` | `build_elec_GC_demand_agent!()` — GC demand with ADMM | `add_elec_GC_demand_agent_to_planner!()` — utility expression |
-| `build_EP_demand_agent.jl` | `build_EP_demand_agent!()` — placeholder | `add_EP_demand_agent_to_planner!()` — placeholder |
-| `build_social_planner.jl` | — | `build_social_planner!()` — orchestrates all add_*_to_planner!, adds balance constraints, sets Max(welfare) |
+| `build_power_agent.jl` | `build_power_agent!()` — power agents (VRES with capacity & CVaR, conventional, consumer) | `add_power_agent_to_planner!()` — same constraints, returns `Dict{Int, Any}` of per-year welfare (no per-agent CVaR) |
+| `build_H2_agent.jl` | `build_H2_agent!()` — electrolyzer with 4-market ADMM terms, endogenous capacity & CVaR | `add_H2_agent_to_planner!()` — same constraints, returns per-year welfare = −op_cost − fixed CAPEX (no per-agent CVaR) |
+| `build_offtaker_agent.jl` | `build_offtaker_agent!()` — green/grey/importer (green with EP capacity & CVaR) | `add_offtaker_agent_to_planner!()` — same constraints, returns per-year welfare = −processing/import cost − fixed CAPEX (no per-agent CVaR) |
+| `build_elec_GC_demand_agent.jl` | `build_elec_GC_demand_agent!()` — GC demand with ADMM | `add_elec_GC_demand_agent_to_planner!()` — returns per-year utility expression |
+| `build_EP_demand_agent.jl` | `build_EP_demand_agent!()` — placeholder | `add_EP_demand_agent_to_planner!()` — returns per-year utility expression |
+| `build_social_planner.jl` | — | `build_social_planner!()` — orchestrates all add_*_to_planner!, adds balance constraints, aggregates welfare, adds epigraph + single social CVaR, sets risk-adjusted objective |
 
 ### 10.4 Solve Files
 
 | File | Role |
 |---|---|
-| `solve_power_agent.jl` | Rebuilds objective with current λ, ḡ, ρ (plus VRES capacity cost and optional CVaR term); calls `optimize!`. |
-| `solve_H2_agent.jl` | Rebuilds economic + ADMM objective, including H₂ capacity cost and optional CVaR term; calls `optimize!`. |
-| `solve_offtaker_agent.jl` | Rebuilds objective for green/grey/importer; calls `optimize!`. |
+| `solve_power_agent.jl` | Rebuilds objective with current λ, ḡ, ρ. For VRES: recomputes loss expressions with current λ, deletes and re-adds CVaR shortfall/linking constraints. Calls `optimize!`. |
+| `solve_H2_agent.jl` | Rebuilds objective with current λ, ḡ, ρ. Recomputes loss expressions with current λ (4-market), deletes and re-adds CVaR shortfall/linking constraints. Calls `optimize!`. |
+| `solve_offtaker_agent.jl` | Rebuilds objective for green/grey/importer. For GreenOfftaker: recomputes loss expressions with current λ, deletes and re-adds CVaR shortfall/linking constraints. Calls `optimize!`. |
 | `solve_elec_GC_demand_agent.jl` | Rebuilds utility − expenditure + ADMM penalty; calls `optimize!`. |
 | `solve_EP_demand_agent.jl` | Placeholder; just calls `optimize!`. |
 
@@ -479,7 +564,7 @@ Now/
 | File | Role |
 |---|---|
 | `save_results.jl` | Writes: ADMM_Convergence.csv, ADMM_Diagnostics.csv, per-market history CSVs, Agent_Summary.csv, Agent_Quantities_Final.csv, Offtaker_GC_Diagnostics.csv, H2_Producer_Diagnostics.csv. |
-| `save_social_planner_results.jl` | Writes: Market_Prices.csv (duals), Agent_Summary.csv (quantities + welfare). |
+| `save_social_planner_results.jl` | Called after two-step dual recovery (LP re-solve). Writes: Market_Prices.csv (duals of balance constraints), Agent_Summary.csv (quantities + welfare), Capacity_Investments_Planner.csv. |
 
 ---
 
@@ -502,8 +587,9 @@ Now/
 
 | File | Contents |
 |---|---|
-| `Market_Prices.csv` | Columns: `Time`, `Elec_Price`, `H2_Price`. One row per (jy, jd, jh) timestep. Prices = duals of balance constraints. |
+| `Market_Prices.csv` | Columns: `Time`, `Elec_Price`, `H2_Price`, `Elec_GC_Price`, `H2_GC_Price`, `EP_Price`. One row per (jy, jd, jh) timestep. Prices = duals of balance constraints, obtained via the two-step QCP dual recovery (§6.2). Raw duals are divided by representative-day weights `W[jd,jy]` to recover the true per-MWh price. |
 | `Agent_Summary.csv` | Columns: `Agent`, `Type`, `Total_Quantity`, `Welfare_Contribution`. |
+| `Capacity_Investments_Planner.csv` | Per-agent yearly capacity and investment for VRES, electrolyzer, and green offtaker. |
 
 ---
 

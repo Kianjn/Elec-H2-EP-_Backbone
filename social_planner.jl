@@ -10,11 +10,22 @@
 #   planner model from Source/build_* functions, solves it, and writes results
 #   to the "social_planner_results" folder.
 #
-#   The social planner maximizes total welfare (sum of consumer surplus minus
-#   producer costs) across all agents simultaneously, subject to market-clearing
-#   constraints. Equilibrium prices emerge as dual variables (shadow prices) of
-#   those market-clearing constraints. This serves as the theoretical benchmark
-#   that the distributed ADMM market-exposure solution should converge toward.
+#   The social planner maximizes risk-adjusted social welfare:
+#     max  γ · Σ_y sw_aux[y]  −  (1−γ) · CVaR_social
+#   where sw_aux[y] is an epigraph proxy for aggregate social welfare
+#   (including quadratic consumer utility), and CVaR_social is the
+#   Conditional Value-at-Risk of the social loss across scenario years.
+#   When γ=1 (risk-neutral), the CVaR term vanishes and the planner
+#   reduces to standard welfare maximization — matching the ADMM
+#   risk-neutral equilibrium by the first welfare theorem.
+#
+#   DUAL RECOVERY: The epigraph formulation creates a convex QCP
+#   (quadratically constrained program). Gurobi solves convex QCPs to
+#   global optimality but does not provide dual variables (prices).
+#   A two-step solve is used: (1) solve QCP for optimal quantities,
+#   (2) fix demand variables and replace QC constraints with linear
+#   equivalents, then re-solve the resulting LP to obtain duals.
+#   The duals of market-clearing constraints are equilibrium prices.
 #
 #   All problem definition (objectives, constraints, variables) lives in Source/.
 #   Changes to build_* files propagate automatically to both market_exposure
@@ -25,9 +36,10 @@
 #
 # RESULTS:
 #   Written to "social_planner_results/":
-#     - Market_Prices.csv   — Equilibrium prices from dual variables of balance
-#                             constraints (electricity and hydrogen).
-#     - Agent_Summary.csv   — Per-agent total quantity and welfare contribution.
+#     - Market_Prices.csv                 — Equilibrium prices from dual variables of balance
+#                                           constraints (electricity and hydrogen).
+#     - Agent_Summary.csv                 — Per-agent total quantity and welfare contribution.
+#     - Capacity_Investments_Planner.csv  — Per-agent total capacity installed during the run.
 #
 # FLOW:
 #   1. Environment and packages
@@ -39,8 +51,10 @@
 #   6. Define market parameter dicts (initial prices, rho, EP demand profile)
 #   7. Define agent parameters (common + type-specific) via define_*_parameters!
 #   8. Build centralized planner model via build_social_planner!
-#   9. Solve the planner (single QP); check optimality
-#  10. Save results (prices + agent summary) via save_social_planner_results!
+#   9. Solve the planner (convex QCP — epigraph formulation); check optimality
+#  10. Dual recovery: fix demand variables at optimal values → LP re-solve
+#  11. Save results (prices + agent summary) via save_social_planner_results!
+#  12. Unfix demand variables (cleanup)
 #
 # ==============================================================================
 
@@ -306,44 +320,190 @@ end
 # ------------------------------------------------------------------------------
 
 # build_social_planner! orchestrates the construction of the single centralized
-# QP model:
+# convex QCP model (epigraph formulation for full-welfare CVaR):
 #   1. For each agent, calls the corresponding add_*_to_planner! function from
 #      the build_* files. Each function adds the agent's decision variables,
-#      physical constraints, and welfare expression (utility or negative cost)
-#      to the shared planner model — with NO ADMM penalty terms.
+#      physical constraints, and per-year welfare expression (utility or
+#      negative cost) to the shared planner model — with NO ADMM penalty terms
+#      and NO per-agent CVaR (CVaR is applied once to aggregate social welfare).
 #   2. Adds market-clearing balance constraints (electricity, elec-GC, H₂,
 #      H₂-GC, end-product) that enforce supply = demand in every market.
-#   3. Sets the objective to Max Σ(agent welfare contributions).
+#   3. Aggregates per-year social welfare and adds epigraph variables (sw_aux),
+#      quadratic epigraph constraints, linear CVaR constraints, and a linear
+#      risk-adjusted objective: max γ·Σ sw_aux − (1−γ)·CVaR_social.
 #
 # Returns:
-#   planner       — JuMP model ready to optimize.
+#   planner       — JuMP model (convex QCP) ready to optimize.
 #   planner_state — Dict collecting variable dicts, welfare expressions,
-#                   balance constraints, agent classification lists, and index
-#                   sets needed by save_social_planner_results!.
+#                   balance constraints, agent classification lists, index
+#                   sets, risk parameters, demand_var_keys, and sw_aux
+#                   needed by the two-step solve and save_social_planner_results!.
 planner, planner_state = build_social_planner!(mdict, agents, elec_market, H2_market,
                                               elec_GC_market, H2_GC_market, EP_market,
                                               GUROBI_ENV)
 
 # ------------------------------------------------------------------------------
-# SECTION 11: SOLVE
+# SECTION 11: TWO-STEP SOLVE WITH DUAL RECOVERY
+# ------------------------------------------------------------------------------
+#
+# The epigraph formulation (sw_aux[jy] ≤ social_welfare[jy]) makes the model
+# a convex QCP: the epigraph constraints are quadratic (consumer utility terms
+# contain −B/2·d²). Gurobi solves convex QCPs to global optimality but does
+# NOT provide dual variables (Pi attribute) for QCP models.
+#
+# DUAL RECOVERY STRATEGY:
+#   Step 1 — Solve the QCP to obtain optimal primal values (quantities).
+#            Accept LOCALLY_SOLVED because for a convex QCP, local = global.
+#   Step 2 — Fix the demand variables (d_E, d_GC_E, d_EP) at their optimal
+#            values. With d² replaced by constants, the epigraph QC constraints
+#            become linear → the entire model reduces to an LP.
+#   Step 3 — Re-solve the LP. Gurobi provides full dual variables for LPs.
+#            The duals of the market-clearing constraints are the equilibrium
+#            prices at the risk-averse optimal allocation.
+#   Step 4 — Save results (primals from step 1, duals from step 3).
+#   Step 5 — Unfix demand variables (cleanup / restore original model).
+#
+# This approach is exact: the LP has the same optimal allocation as the QCP
+# (demand variables are fixed at QCP-optimal values), so the duals are the
+# correct shadow prices at that allocation.
 # ------------------------------------------------------------------------------
 
-# Solve the centralized welfare-maximization problem (single QP).
+# ── Step 1: Solve QCP for optimal primal values ─────────────────────────
+set_optimizer_attribute(planner, "NumericFocus", 1)
 optimize!(planner)
 
-# Termination status check: warn if the solver did not find an optimal
-# solution (e.g. infeasible model, numerical difficulties, time limit).
-# WHY: an unexpected status means duals (prices) and variable values may be
-# unreliable, so downstream results should be treated with caution.
-if termination_status(planner) != MOI.OPTIMAL
-    @warn("Social planner solved with status $(termination_status(planner))")
+qcp_status = termination_status(planner)
+if qcp_status != MOI.OPTIMAL && qcp_status != MOI.LOCALLY_SOLVED
+    @error("QCP solve failed with status $qcp_status. Cannot proceed with dual recovery.")
+    error("Social planner QCP solve failed (status: $qcp_status)")
 end
+@info "Step 1 complete: QCP solved with status $qcp_status — primal values available."
+
+# ── Step 2: Convert QCP → LP (fix demand vars + replace QC constraints) ──
+# demand_var_keys lists the var_dict keys for elastic demand agents whose
+# utility functions contain quadratic terms (A·d − B/2·d²). Fixing these
+# variables turns the quadratic terms into constants. However, Gurobi still
+# classifies the epigraph constraints as QC based on their structural form,
+# so the model remains a QCP in Gurobi's view and Pi is still unavailable.
+#
+# Full conversion to LP requires TWO modifications:
+#   (a) Fix demand variables at QCP-optimal values.
+#   (b) Delete the quadratic epigraph constraints and re-add them as LINEAR
+#       constraints. The supply-side welfare terms are already linear; we
+#       replace the demand-side quadratic welfare with its evaluated constant.
+# After both modifications the model is a true LP — Gurobi provides duals.
+var_dict        = planner_state[:var_dict]
+demand_var_keys = planner_state[:demand_var_keys]
+JY              = planner_state[:JY]
+sw_aux          = planner_state[:sw_aux]
+agent_welfare_per_year = planner_state[:agent_welfare_per_year]
+
+# Identify demand agent IDs (quadratic utility) vs supply agent IDs (linear).
+demand_agent_ids = Set{String}()
+union!(demand_agent_ids, planner_state[:power_consumers])
+union!(demand_agent_ids, agents[:elec_GC_demand])
+union!(demand_agent_ids, agents[:EP_demand])
+all_welfare_ids   = collect(keys(agent_welfare_per_year))
+supply_agent_ids  = filter(id -> !(id in demand_agent_ids), all_welfare_ids)
+
+# ── Phase A: Query ALL optimal values BEFORE any model modification ──────
+# The first fix() call invalidates JuMP's solution cache, so every value()
+# query must happen here.
+
+# (a) Demand variable optimal values.
+demand_vars_and_vals = Tuple{JuMP.VariableRef, Float64}[]
+for key in demand_var_keys
+    if haskey(var_dict, key)
+        vars = var_dict[key]
+        for v in values(vars)
+            if v isa JuMP.VariableRef
+                push!(demand_vars_and_vals, (v, value(v)))
+            elseif v isa AbstractArray
+                for vi in v
+                    push!(demand_vars_and_vals, (vi, value(vi)))
+                end
+            end
+        end
+    end
+end
+
+# (b) Per-year demand welfare evaluated at optimal demand quantities.
+#     These become constants in the replacement linear epigraph constraints.
+demand_welfare_const = Dict{Int, Float64}()
+for jy in JY
+    demand_welfare_const[jy] = sum(
+        value(agent_welfare_per_year[id][jy]) for id in demand_agent_ids;
+        init = 0.0
+    )
+end
+
+# ── Phase B: Modify the model ────────────────────────────────────────────
+
+# (b1) Fix demand variables at QCP-optimal values.
+fixed_vars = JuMP.VariableRef[]
+for (v, val) in demand_vars_and_vals
+    fix(v, val; force = true)
+    push!(fixed_vars, v)
+end
+
+# (b2) Delete quadratic epigraph constraints (the ONLY QC in the model).
+epigraph_refs = planner[:social_welfare_epigraph]
+for jy in JY
+    delete(planner, epigraph_refs[jy])
+end
+unregister(planner, :social_welfare_epigraph)
+
+# (b3) Re-add epigraph as purely LINEAR constraints:
+#   sw_aux[jy] ≤ Σ(supply welfare)[jy] + demand_welfare_const[jy]
+# Supply agents have only linear cost/revenue terms (AffExpr), so the sum
+# is linear. Adding the Float64 constant keeps the constraint linear.
+# Gurobi now classifies the model as a pure LP.
+@constraint(planner, social_welfare_epigraph_lp[jy in JY],
+    sw_aux[jy] <= sum(agent_welfare_per_year[id][jy] for id in supply_agent_ids)
+                + demand_welfare_const[jy]
+)
+
+@info "Step 2 complete: Fixed $(length(fixed_vars)) demand variables, " *
+      "replaced QC epigraph with linear constraints — model is now LP."
+
+# ── Step 3: Re-solve as LP for dual variables ────────────────────────────
+optimize!(planner)
+
+lp_status = termination_status(planner)
+if lp_status != MOI.OPTIMAL
+    @warn("LP re-solve returned status $lp_status (expected OPTIMAL). Duals may be unavailable.")
+end
+@info "Step 3 complete: LP solved with status $lp_status — dual variables available."
 
 # ------------------------------------------------------------------------------
 # SECTION 12: SAVE RESULTS
 # ------------------------------------------------------------------------------
 
 # Write Market_Prices.csv (equilibrium prices from dual variables of balance
-# constraints) and Agent_Summary.csv (per-agent total quantity and ADMM-style
-# objective value) to the social_planner_results folder.
+# constraints) and Agent_Summary.csv (per-agent total quantity and welfare
+# contribution) to the social_planner_results folder.
 save_social_planner_results!(planner, planner_state, agents, mdict, results_folder)
+
+# ── Step 5: Restore original QCP model (cleanup) ─────────────────────────
+# Restore the model to its original QCP form so it can be re-used (e.g.
+# with different gamma values) without rebuilding from scratch.
+
+# (a) Unfix demand variables.
+for v in fixed_vars
+    unfix(v)
+end
+
+# (b) Delete the linear epigraph constraints and restore the original
+#     quadratic epigraph constraints (sw_aux[jy] ≤ social_welfare[jy]).
+lp_epigraph = planner[:social_welfare_epigraph_lp]
+for jy in JY
+    delete(planner, lp_epigraph[jy])
+end
+unregister(planner, :social_welfare_epigraph_lp)
+
+social_welfare = planner_state[:social_welfare]
+@constraint(planner, social_welfare_epigraph[jy in JY],
+    sw_aux[jy] <= social_welfare[jy]
+)
+
+@info "Step 5 complete: Demand variables unfixed, QC epigraph restored — model back to QCP form."

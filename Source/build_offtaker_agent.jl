@@ -71,7 +71,7 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_EP_Out, 0.0)
         # Risk parameters (CVaR skeleton; γ = 0 ⇒ risk-neutral by default).
         gamma = get(mod.ext[:parameters], :γ, 1.0)
-        beta_cvar = get(mod.ext[:parameters], :β, 0.95)   # confidence level τ
+        beta_conf = get(mod.ext[:parameters], :β, 0.95)   # confidence level β
         P = mod.ext[:parameters][:P]
 
         # Decision variables.
@@ -103,8 +103,10 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         mod.ext[:expressions][:g_net_EP]     = @expression(mod, ep)         # seller on EP market
 
         # ── Risk variables (agent-level CVaR) ───────────────────────────────
+        # α_G: VaR proxy; CVaR_G: Conditional Value-at-Risk of loss;
+        # u_G[jy]: shortfall per scenario year.
         alpha_G = mod.ext[:variables][:alpha_GreenOfftaker] = @variable(mod, lower_bound = 0, base_name = "alpha_GreenOfftaker_$(m)")
-        beta_G  = mod.ext[:variables][:beta_GreenOfftaker]  = @variable(mod, lower_bound = 0, base_name = "beta_GreenOfftaker_$(m)")
+        cvar_G  = mod.ext[:variables][:CVaR_GreenOfftaker]  = @variable(mod, lower_bound = 0, base_name = "CVaR_GreenOfftaker_$(m)")
         u_G     = mod.ext[:variables][:u_GreenOfftaker]     = @variable(mod, [jy in JY], lower_bound = 0, base_name = "u_GreenOfftaker_$(m)")
 
         # Per-year economic loss (cost − revenue) excluding ADMM penalties.
@@ -126,10 +128,10 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
             u_G[jy] >= loss_G[jy] - alpha_G
         )
 
-        # CVaR definition: β_G ≥ α_G + (1/(1−τ)) * Σ P[jy]*u_G[jy].
-        one_minus_tau = max(1e-6, 1.0 - beta_cvar)
+        # CVaR definition: CVaR_G ≥ α_G + (1/(1−β)) * Σ P[jy]*u_G[jy].
+        one_minus_beta = max(1e-6, 1.0 - beta_conf)
         mod.ext[:constraints][:CVaR_Green_link] = @constraint(mod,
-            beta_G >= alpha_G + (1 / one_minus_tau) * sum(P[jy] * u_G[jy] for jy in JY)
+            cvar_G >= alpha_G + (1 / one_minus_beta) * sum(P[jy] * u_G[jy] for jy in JY)
         )
 
         # Tight stoichiometric link: ep == alpha * h2_in.  ALL purchased
@@ -257,33 +259,26 @@ end
 # ------------------------------------------------------------------------------
 
 function add_offtaker_agent_to_planner!(planner::Model, id::String, mod::Model,
-                                        var_dict::Dict, W::AbstractArray)::JuMP.AbstractJuMPScalar
+                                        var_dict::Dict, W::AbstractArray)
     JH = mod.ext[:sets][:JH]
     JD = mod.ext[:sets][:JD]
     JY = mod.ext[:sets][:JY]
     p = mod.ext[:parameters]
-    gamma_GC = get(p, :gamma_GC, 0.42)   # 42% green certificate mandate
+    gamma_GC = get(p, :gamma_GC, 0.42)
     agent_type = String(get(p, :Type, ""))
-    # Nested Dict for convenient indexed access in JuMP @expression macros.
     W_dict = Dict(y => Dict(r => W[r, y] for r in JD) for y in JY)
 
     # ── GreenOfftaker (planner) ──────────────────────────────────────────
     if agent_type == "GreenOfftaker"
-        H_buy_bar = p[:Capacity_H2_In]          # legacy H₂ intake rating (not binding once EP capacity is endogenous)
         EP_sell_bar_initial = p[:Capacity_EP_Out]
         alpha = get(p, :Alpha, 1.0)
         C_proc = get(p, :ProcessingCost, 0.0)
-        # Annualised fixed investment cost per MW of EP output capacity (€/MW_EP-year).
         F_cap = get(p, :FixedCost_per_MW_EP_Out, 0.0)
-        gamma = get(p, :γ, 1.0)
-        beta_cvar = get(p, :β, 0.95)
-        P = p[:P]
 
         h_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="h_buy_$(id)")
         gc_h_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_h_buy_$(id)")
         ep_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="ep_sell_$(id)")
 
-        # Yearly EP capacity and investment.
         cap_EP_y = @variable(planner, [jy in JY], lower_bound=0, base_name="cap_EP_$(id)")
         inv_EP = @variable(planner, [jy in JY], lower_bound=0, base_name="inv_EP_$(id)")
         JY_vec = collect(JY)
@@ -295,94 +290,78 @@ function add_offtaker_agent_to_planner!(planner::Model, id::String, mod::Model,
             @constraint(planner, cap_EP_y[jy] == cap_EP_y[prev_jy] + inv_EP[jy])
         end
 
-        # Single capacity limit based on EP output; h_buy is limited implicitly via ep_sell = alpha * h_buy.
         @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] <= cap_EP_y[jy])
-        # Stoichiometric link: EP = alpha * H2 (tight, no waste).
         @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] == alpha * h_buy[jh, jd, jy])
-        # GC purchase upper bound: can't buy more certificates than H₂ consumed.
         @constraint(planner, [jh in JH, jd in JD, jy in JY], gc_h_buy[jh, jd, jy] <= h_buy[jh, jd, jy])
 
-        # Annual GC mandate for green offtaker: gamma_GC share of H₂ intake
-        # must be green-backed. Since the planner observes H₂ purchases h_buy
-        # explicitly, we impose the mandate directly on H₂ quantities rather
-        # than inferring from EP output.
         @constraint(planner, [jy in JY],
             sum(W_dict[jy][jd] * gc_h_buy[jh, jd, jy] for jh in JH, jd in JD) >=
             gamma_GC * sum(W_dict[jy][jd] * h_buy[jh, jd, jy] for jh in JH, jd in JD)
         )
 
-        # Risk variables for planner CVaR (cost-based).
-        alpha_G = @variable(planner, lower_bound=0, base_name="alpha_GreenOfftaker_$(id)")
-        beta_G  = @variable(planner, lower_bound=0, base_name="beta_GreenOfftaker_$(id)")
-        u_G     = @variable(planner, [jy in JY], lower_bound=0, base_name="u_GreenOfftaker_$(id)")
-
-        loss_G = Dict{Int,JuMP.AffExpr}()
+        # Per-year welfare = −(processing cost + fixed capacity cost).
+        # No per-agent CVaR: a single social CVaR is applied in
+        # build_social_planner! to the aggregate social welfare.
+        welfare_per_year = Dict{Int, Any}()
         for jy in JY
-            loss_G[jy] = @expression(planner,
-                sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD)
-                + F_cap * cap_EP_y[jy]
+            welfare_per_year[jy] = @expression(planner,
+                -(sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD)
+                  + F_cap * cap_EP_y[jy])
             )
         end
-        @constraint(planner, [jy in JY], u_G[jy] >= loss_G[jy] - alpha_G)
-        one_minus_tau = max(1e-6, 1.0 - beta_cvar)
-        @constraint(planner,
-            beta_G >= alpha_G + (1 / one_minus_tau) * sum(P[iy] * u_G[jy] for (iy, jy) in enumerate(JY))
-        )
-
-        # Welfare = -(processing cost) − risk penalty; market transfers cancel.
-        obj = @expression(planner,
-            -sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
-            - F_cap * sum(cap_EP_y[jy] for jy in JY)   # fixed annualised investment cost for green offtaker capacity
-            - gamma * beta_G
-        )
         var_dict[:offtaker_h_buy][id] = h_buy
         var_dict[:offtaker_gc_h_buy][id] = gc_h_buy
         var_dict[:offtaker_ep_sell][id] = ep_sell
         var_dict[:offtaker_cap_EP_green][id] = cap_EP_y
         var_dict[:offtaker_inv_EP_green][id] = inv_EP
-        return obj
+        return welfare_per_year
 
     # ── GreyOfftaker (planner) ───────────────────────────────────────────
     elseif agent_type == "GreyOfftaker"
         EP_sell_bar = p[:Capacity]
-        gamma_NH3 = p[:gamma_NH3]    # EP-to-H2 conversion ratio (MWh_EP per MWh_H2)
+        gamma_NH3 = p[:gamma_NH3]
         C_proc = p[:MarginalCost]
 
         ep_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="ep_sell_$(id)")
         gc_h_buy_G = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_h_buy_G_$(id)")
 
         @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] <= EP_sell_bar)
-        # GC purchase upper bound: can't certify more than the inferred H₂-feedstock portion (ep / gamma_NH3).
         @constraint(planner, [jh in JH, jd in JD, jy in JY], gc_h_buy_G[jh, jd, jy] <= (1 / gamma_NH3) * ep_sell[jh, jd, jy])
 
-        # GC mandate on H₂-equivalent portion: gc >= gamma_GC * (ep / gamma_NH3).
         @constraint(planner, [jy in JY],
             sum(W_dict[jy][jd] * gc_h_buy_G[jh, jd, jy] for jh in JH, jd in JD) >=
             gamma_GC * (1 / gamma_NH3) * sum(W_dict[jy][jd] * ep_sell[jh, jd, jy] for jh in JH, jd in JD)
         )
 
-        # Welfare = -(production cost).
-        obj = @expression(planner,
-            -sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
-        )
+        # Per-year welfare = −(production cost). EP revenue and GC
+        # expenditures are transfers that cancel in the planner aggregate.
+        welfare_per_year = Dict{Int, Any}()
+        for jy in JY
+            welfare_per_year[jy] = @expression(planner,
+                -sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD)
+            )
+        end
         var_dict[:offtaker_ep_sell][id] = ep_sell
         var_dict[:offtaker_gc_h_buy_G][id] = gc_h_buy_G
-        return obj
+        return welfare_per_year
 
     # ── EPImporter (planner) ─────────────────────────────────────────────
-    # Simple price-taking EP supplier; no H2 or GC involvement.
     else  # EPImporter
         EP_sell_bar = p[:Capacity]
-        C_proc = p[:ImportCost]       # import cost (EUR/MWh_EP)
+        C_proc = p[:ImportCost]
 
         ep_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="ep_import_$(id)")
         @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] <= EP_sell_bar)
 
-        # Welfare = -(import cost).
-        obj = @expression(planner,
-            -sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
-        )
+        # Per-year welfare = −(import cost). EP revenue is a transfer
+        # that cancels in the aggregate planner objective.
+        welfare_per_year = Dict{Int, Any}()
+        for jy in JY
+            welfare_per_year[jy] = @expression(planner,
+                -sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD)
+            )
+        end
         var_dict[:offtaker_ep_sell_import][id] = ep_sell
-        return obj
+        return welfare_per_year
     end
 end

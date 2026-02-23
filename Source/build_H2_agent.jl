@@ -33,7 +33,7 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_Electrolyzer, 0.0)
     # Risk parameters (CVaR skeleton; γ = 0 ⇒ risk-neutral by default).
     gamma = get(mod.ext[:parameters], :γ, 1.0)
-    beta_cvar = get(mod.ext[:parameters], :β, 0.95)   # confidence level τ
+    beta_conf = get(mod.ext[:parameters], :β, 0.95)   # confidence level β
     P = mod.ext[:parameters][:P]
 
     # ── ADMM parameters — electricity market ──────────────────────────────
@@ -124,8 +124,10 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     )
 
     # ── Risk variables (agent-level CVaR) ───────────────────────────────────
+    # α_H2: VaR proxy; CVaR_H2: Conditional Value-at-Risk of loss;
+    # u_H2[jy]: shortfall per scenario year.
     alpha_H2 = mod.ext[:variables][:alpha_H2] = @variable(mod, lower_bound = 0, base_name = "alpha_H2_$(m)")
-    beta_H2  = mod.ext[:variables][:beta_H2]  = @variable(mod, lower_bound = 0, base_name = "beta_H2_$(m)")
+    cvar_H2  = mod.ext[:variables][:CVaR_H2]  = @variable(mod, lower_bound = 0, base_name = "CVaR_H2_$(m)")
     u_H2     = mod.ext[:variables][:u_H2]     = @variable(mod, [jy in JY], lower_bound = 0, base_name = "u_H2_$(m)")
 
     # Per-year economic loss (cost − revenue) excluding ADMM penalties.
@@ -148,10 +150,10 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
         u_H2[jy] >= loss_H2[jy] - alpha_H2
     )
 
-    # CVaR definition: β_H2 ≥ α_H2 + (1/(1−τ)) * Σ P[jy]*u_H2[jy].
-    one_minus_tau = max(1e-6, 1.0 - beta_cvar)
+    # CVaR definition: CVaR_H2 ≥ α_H2 + (1/(1−β)) * Σ P[jy]*u_H2[jy].
+    one_minus_beta = max(1e-6, 1.0 - beta_conf)
     mod.ext[:constraints][:CVaR_H2_link] = @constraint(mod,
-        beta_H2 >= alpha_H2 + (1 / one_minus_tau) * sum(P[jy] * u_H2[jy] for jy in JY)
+        cvar_H2 >= alpha_H2 + (1 / one_minus_beta) * sum(P[jy] * u_H2[jy] for jy in JY)
     )
 
     # ── Objective ──────────────────────────────────────────────────────────
@@ -204,31 +206,23 @@ end
 # ------------------------------------------------------------------------------
 
 function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
-                                  var_dict::Dict, W::AbstractArray)::JuMP.AbstractJuMPScalar
+                                  var_dict::Dict, W::AbstractArray)
     JH = mod.ext[:sets][:JH]
     JD = mod.ext[:sets][:JD]
     JY = mod.ext[:sets][:JY]
     p = mod.ext[:parameters]
-    # Nested Dict for convenient indexed access in JuMP @expression macros.
     W_dict = Dict(y => Dict(r => W[r, y] for r in JD) for y in JY)
 
-    E_bar = p[:Capacity_Electrolyzer]             # legacy electricity rating (MW) — not used in new capacity formulation
-    H_bar = p[:Capacity_H2_Output]                # max H₂ output (MW_H2) in first year
-    η = 1.0 / p[:SpecificConsumption]             # H₂ output per MWh electricity
-    C_H = p[:OperationalCost]                     # operating cost (€/MWh_H2)
-    # Annualised fixed investment cost per MW of electrolyser capacity (€/MW_elec-year).
+    H_bar = p[:Capacity_H2_Output]
+    η = 1.0 / p[:SpecificConsumption]
+    C_H = p[:OperationalCost]
     F_cap = get(p, :FixedCost_per_MW_Electrolyzer, 0.0)
-    gamma = get(p, :γ, 1.0)
-    beta_cvar = get(p, :β, 0.95)
-    P = p[:P]
 
-    # Variables: electricity bought, elec-GCs bought, H₂ sold, H₂-GCs sold.
     e_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="e_buy_$(id)")
     gc_e_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_e_buy_$(id)")
     h_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="h_sell_$(id)")
     gc_h_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_h_sell_$(id)")
 
-    # Yearly H₂ output capacity and investment.
     cap_H2_y = @variable(planner, [jy in JY], lower_bound=0, base_name="cap_H2_$(id)")
     inv_cap_H2 = @variable(planner, [jy in JY], lower_bound=0, base_name="inv_cap_H2_$(id)")
 
@@ -241,51 +235,31 @@ function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
         @constraint(planner, cap_H2_y[jy] == cap_H2_y[prev_jy] + inv_cap_H2[jy])
     end
 
-    # Equipment capacity limits: single bottleneck on H₂ output.
     @constraint(planner, [jh in JH, jd in JD, jy in JY], h_sell[jh, jd, jy] <= cap_H2_y[jy])
-    # Stoichiometric conversion: H₂ output proportional to electricity input.
-    @constraint(planner, [jh in JH, jd in JD, jy in JY], h_sell[jh, jd, jy] == η * e_buy[jh, jd, jy])  # physical conversion
-    # GC physical limit: no more H₂-GCs than physical H₂ produced.
+    @constraint(planner, [jh in JH, jd in JD, jy in JY], h_sell[jh, jd, jy] == η * e_buy[jh, jd, jy])
     @constraint(planner, [jh in JH, jd in JD, jy in JY], gc_h_sell[jh, jd, jy] <= h_sell[jh, jd, jy])
 
-    # Annual green-backing: elec-GCs ≥ (1/η)·H₂-GCs on a yearly basis.
     @constraint(planner, [jy in JY],
         sum(W_dict[jy][jd] * gc_e_buy[jh, jd, jy] for jh in JH, jd in JD) >=
         (1/η) * sum(W_dict[jy][jd] * gc_h_sell[jh, jd, jy] for jh in JH, jd in JD)
     )
 
-    # Risk variables for planner CVaR (cost-based).
-    alpha_H2 = @variable(planner, lower_bound=0, base_name="alpha_H2_$(id)")
-    beta_H2  = @variable(planner, lower_bound=0, base_name="beta_H2_$(id)")
-    u_H2     = @variable(planner, [jy in JY], lower_bound=0, base_name="u_H2_$(id)")
-
-    loss_H2 = Dict{Int,JuMP.AffExpr}()
+    # Per-year welfare = −(operational cost + fixed capacity cost).
+    # No per-agent CVaR: a single social CVaR is applied in
+    # build_social_planner! to the aggregate social welfare.
+    welfare_per_year = Dict{Int, Any}()
     for jy in JY
-        loss_H2[jy] = @expression(planner,
-            sum(W_dict[jy][jd] * (C_H * h_sell[jh, jd, jy]) for jh in JH, jd in JD)
-            + F_cap * cap_H2_y[jy]
+        welfare_per_year[jy] = @expression(planner,
+            -(sum(W_dict[jy][jd] * (C_H * h_sell[jh, jd, jy]) for jh in JH, jd in JD)
+              + F_cap * cap_H2_y[jy])
         )
     end
-    @constraint(planner, [jy in JY], u_H2[jy] >= loss_H2[jy] - alpha_H2)
-    one_minus_tau = max(1e-6, 1.0 - beta_cvar)
-    @constraint(planner,
-        beta_H2 >= alpha_H2 + (1 / one_minus_tau) * sum(P[iy] * u_H2[jy] for (iy, jy) in enumerate(JY))
-    )
 
-    # Welfare = −(operational cost) − risk penalty. Revenue/expenditure on markets
-    # are transfers and cancel in the planner's aggregate welfare.
-    obj = @expression(planner,
-        -sum(W_dict[jy][jd] * (C_H * h_sell[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
-        - F_cap * sum(cap_H2_y[jy] for jy in JY)   # fixed annualised investment cost (independent of dispatch)
-        - gamma * beta_H2
-    )
-
-    # Store variables so the caller can build market-clearing constraints.
     var_dict[:H2_e_buy][id] = e_buy
     var_dict[:H2_gc_e_buy][id] = gc_e_buy
     var_dict[:H2_h_sell][id] = h_sell
     var_dict[:H2_gc_h_sell][id] = gc_h_sell
-    var_dict[:H2_cap_elec][id] = cap_H2_y      # reuse key name for compatibility; now stores H₂ capacity
+    var_dict[:H2_cap_elec][id] = cap_H2_y
     var_dict[:H2_inv_elec][id] = inv_cap_H2
-    return obj
+    return welfare_per_year
 end

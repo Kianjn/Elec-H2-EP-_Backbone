@@ -151,10 +151,6 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     )
 
     # Per-market convergence tolerances.
-    # With the H2_GC limit-cycle fix (price floor + physical GC bounds) all
-    # markets converge cleanly, so a uniform tolerance is appropriate.
-    # The previous 10× multiplier for H2/H2_GC/EP let the algorithm declare
-    # convergence while peak and off-peak prices were still far from equilibrium.
     base_tol = get(admm_data, "epsilon", 1.0)
     ADMM["Tolerance"] = Dict(
         "elec"    => base_tol,

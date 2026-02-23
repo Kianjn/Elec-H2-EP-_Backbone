@@ -57,7 +57,7 @@ function update_rho!(ADMM_state::Dict, iter::Int)
             dec_factor = 1.0 / 1.10
             ρ_max = 100_000.0
         elseif key == "H2_GC"
-            # H2_GC is now hourly but still a thin certificate market.
+            # H2_GC is hourly but still a thin certificate market.
             # Moderate adaptation avoids destabilizing the tightly-coupled
             # electrolyzer (which also participates in elec, elec_GC, H2).
             inc_factor = 1.05

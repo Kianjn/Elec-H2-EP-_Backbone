@@ -72,7 +72,7 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
             push!(ADMM_state["Imbalances"]["elec_GC"], imb_elec_GC)
 
             imb_H2_GC = sum(results["H2_GC"][m][end] for m in agents[:H2_GC_market]; init=zeros(shp...))
-            # H2_GC is now a proper hourly market (no annual aggregation).
+            # H2_GC is a proper hourly market (no annual aggregation).
             # Offtakers have temporal flexibility to buy GCs whenever prices
             # are low, accumulating toward their annual mandate internally.
             push!(ADMM_state["Imbalances"]["H2_GC"], imb_H2_GC)

@@ -6,6 +6,11 @@
 #   Saves Market_Prices.csv (dual of balance constraints) and Agent_Summary.csv
 #   from the solved social planner model.
 #
+#   CONTEXT: This function is called after the two-step dual recovery solve in
+#   social_planner.jl. At the point of this call, the model has been re-solved
+#   as an LP (demand variables fixed, QC epigraph constraints replaced by linear
+#   equivalents), so Gurobi provides full dual variables (Pi attribute).
+#
 #   POST-PROCESSING: The social planner maximizes welfare (no prices in objective);
 #   prices emerge as dual variables. To match the ADMM Agent_Summary format
 #   (which reports cost − revenue per agent), we post-process: after extracting
@@ -14,11 +19,13 @@
 #   prices. This ensures direct comparability with market_exposure_results.
 #
 # ARGUMENTS:
-#   planner — Solved JuMP model.
+#   planner — Solved JuMP model (LP after dual recovery; duals available).
 #   planner_state — Dict from build_social_planner! (:var_dict, :agent_welfare,
-#     :elec_balance, :H2_balance, :power_consumers, :power_vres, :power_conv,
-#     :H2_producers, :H2_consumers, :offtaker_green, :offtaker_grey, :offtaker_import,
-#     :JH, :JD, :JY).
+#     :agent_welfare_per_year, :social_welfare, :sw_aux, :demand_var_keys,
+#     :elec_balance, :elec_GC_balance, :H2_balance, :H2_GC_balance, :EP_balance,
+#     :power_consumers, :power_vres, :power_conv, :H2_producers, :H2_consumers,
+#     :offtaker_green, :offtaker_grey, :offtaker_import, :JH, :JD, :JY, :W,
+#     :gamma, :beta).
 #   agents — Dict of agent lists.
 #   mdict — Dict of parameter-container models (one per agent); needed to read
 #     cost/utility parameters for ADMM-style objective computation.
@@ -51,6 +58,11 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
 
     # ── Check solver status before extracting results ─────────────────
     status = termination_status(planner)
+    # This function is called after the two-step dual recovery solve in
+    # social_planner.jl: (1) QCP solve for primals, (2) LP re-solve with
+    # demand variables fixed for duals. At the point of this call the model
+    # has been re-solved as an LP, so the status should be OPTIMAL.
+    # LOCALLY_SOLVED is accepted as a fallback for convex models.
     if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
         @warn "Social planner did NOT solve to optimality (status: $status). " *
               "Cannot extract duals or variable values."

@@ -13,19 +13,12 @@
 #   ADMM_subroutine can overwrite them each iteration without reallocating.
 #
 # ARGUMENTS:
-#   m       — Agent ID (string).
-#   mod     — The JuMP model for this agent (we write into mod.ext).
-#   data    — Merged dict: General + ADMM + agent-specific block from data.yaml.
-#   ts      — Dict keyed by year; values are DataFrames of hourly time series.
+#   m         — Agent ID (string).
+#   mod       — The JuMP model for this agent (we write into mod.ext).
+#   data      — Merged dict: General + ADMM + agent-specific block from data.yaml.
+#   ts        — Dict keyed by year; values are DataFrames of hourly time series.
 #   repr_days — Dict keyed by year; values are DataFrames with :periods, :weights.
-#   agents  — Dict of agent lists; we push! m into the relevant market lists.
-#
-# SIDE EFFECTS:
-#   - mod.ext[:sets], [:parameters], [:timeseries], [:variables], [:constraints],
-#     [:expressions] are created or assumed to exist; parameters and sets are
-#     filled. Variables/constraints/expressions are left for build_*_agent!.
-#   - agents[:elec_market], [:H2_market], [:elec_GC_market], [:H2_GC_market],
-#     [:EP_market] may get m appended.
+#   agents    — Dict of agent lists; we push! m into the relevant market lists.
 #
 # ==============================================================================
 
@@ -44,7 +37,7 @@ function define_common_parameters!(m::String, mod::Model, data::Dict, ts::Dict, 
     mod.ext[:parameters]  = Dict{Symbol,Any}()
     mod.ext[:timeseries]  = Dict{Symbol,Any}()
     mod.ext[:variables]   = Dict{Symbol,Any}()
-    mod.ext[:constraints]  = Dict{Symbol,Any}()
+    mod.ext[:constraints] = Dict{Symbol,Any}()
     mod.ext[:expressions] = Dict{Symbol,Any}()
 
     # --- Dimensions from config ---

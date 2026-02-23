@@ -16,16 +16,17 @@ General:
 # ---------------------------------------------------------------------------
 ADMM:
   rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
-  max_iter: 1000       # Iteration budget
+  max_iter: 1000        # Iteration budget
   epsilon: 1.0          # Convergence tolerance on L2 norm of primal/dual residuals. With 72 timesteps, epsilon=1 ≈ 0.12 MW per-timestep accuracy (<1% of quantities 20-50 MW).
-  min_iter: 0         # Minimum iterations before checking convergence. Early residuals can be spuriously small; 100 ensures prices have stabilized before checking.
+  min_iter: 0           # Minimum iterations before checking convergence. Early residuals can be spuriously small; 100 ensures prices have stabilized before checking.
 
 # ---------------------------------------------------------------------------
 # Market initial prices and penalty weights
 # Each market has:
 #   initial_price — Scalar seed for the 3D ADMM price array λ[jh,jd,jy].
 #                   Chosen as a reasonable starting guess to help ADMM converge
-#                   faster by starting near equilibrium.
+#                   faster by starting near equilibrium. If social planner results
+#                   are available, the mean prices will be used to ensure warm-start.
 #   rho_initial   — Per-market ADMM penalty parameter; balances convergence
 #                   speed vs. oscillation. Lower values for markets needing
 #                   gentler convergence (e.g. GC markets with smaller volumes).
@@ -37,21 +38,21 @@ elec_GC_market:
   initial_price: 10.0   # €/MWh_GC — Warm-start from social planner equilibrium
   rho_initial: 0.3      # Lower penalty: GC market has smaller volumes & price ranges; gentler convergence avoids oscillation
 H2_market:
-  initial_price: 122.0  # €/MWh_H2 — Warm-start from social planner equilibrium
+  initial_price: 50.0   # €/MWh_H2 — Warm-start from social planner equilibrium
   rho_initial: 0.5      # Moderate penalty: H2 market is tightly coupled to electricity through the electrolyzer
 H2_GC_market:
-  initial_price: 0.0    # €/MWh_GC — Warm-start from social planner equilibrium
-  rho_initial: 1.0      # Moderate penalty: H2_GC is now hourly, needs stronger consensus pressure than a thin annual market
+  initial_price: 30.0    # €/MWh_GC — Warm-start from social planner equilibrium
+  rho_initial: 1.0       # Moderate penalty: needs stronger consensus pressure than a thin annual market
 
 # ---------------------------------------------------------------------------
 # EP (End-Product) market — Coordination market for ammonia / downstream product
 # ---------------------------------------------------------------------------
 EP_market:
-  initial_price: 144.0      # €/MWh_EP — Warm-start from social planner equilibrium
+  initial_price: 150.0      # €/MWh_EP — Warm-start from social planner equilibrium
   rho_initial: 3.0          # Larger penalty: EP market is stiff (few participants, large price swings) and needs stronger coupling
   Demand_Column: "LOAD_EP"  # Column in the timeseries CSV that holds the normalized EP demand profile (inelastic)
   Total_Demand: 40.0        # EP demand scaling factor (MWh_EP); D_EP[jh,jd,jy] = Total_Demand × LOAD_EP. With LOAD_EP ≈ 0.9 → D_EP ≈ 36/h, within total capacity (50 MW)
-#Basically 36 MW_EP per hour is demanded.
+# Basically 36 MW_EP per hour is demanded.
 # ---------------------------------------------------------------------------
 # Power-sector agents
 # ---------------------------------------------------------------------------
@@ -59,11 +60,11 @@ Power:
   # Variable Renewable Energy Source (solar farm)
   Gen_VRES_01:
     Type: "VRES"
-    Capacity: 100.0            # Installed capacity (MW); reduced from 150 MW to tighten supply and make endogenous investment margins more relevant.
+    Capacity: 100.0            # Installed capacity (MW)
     Profile_Column: "SOLAR"    # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
     MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
     FixedCost_per_MW: 70000.0  # €/MW-year — Annualised CAPEX + fixed O&M for utility-scale solar. Assumes ≈700 k€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈70 k€/MW-year, consistent with recent LCOE studies.
-    gamma: 0.0                 # Risk weight for CVaR (γ=0 ⇒ risk-neutral even though risk terms are present structurally).
+    gamma: 1.0                 # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
     beta: 0.95                 # CVaR confidence level τ (placeholder; only active when gamma>0).
 
   # Dispatchable conventional generator (e.g. gas turbine)
@@ -88,12 +89,12 @@ Hydrogen:
   Prod_H2_Green:
     Type: "GreenProducer"
     Capacity_Electrolyzer: 60.0               # Maximum electricity input to the electrolyzer (MW_elec); reduced from 90 MW to tighten initial supply and make investment decisions more relevant.
-    Capacity_H2_Output: 40.0                  # Maximum hydrogen output (MW_H2); aligned with the 60 MW_elec limit (60 / 1.5 = 40 MW_H2) after reduction.
-    SpecificConsumption: 1.5                 # MWh_elec per MWh_H2 produced (i.e. efficiency = 1/1.5 ≈ 67%); typical PEM electrolyzer value
-    OperationalCost: 3.0                     # €/MWh_H2 — Variable O&M for water treatment, stack degradation, etc.
-    FixedCost_per_MW_Electrolyzer: 100000.0  # €/MW_elec-year — Annualised CAPEX for PEM electrolysers. Assumes ≈1.0 M€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈100 k€/MW-year (within IEA/IEEFA benchmark ranges).
-    gamma: 0.0                 # Risk weight for CVaR (γ=0 ⇒ risk-neutral baseline).
-    beta: 0.95                 # CVaR confidence level τ.
+    Capacity_H2_Output: 40.0                  # Maximum hydrogen output (MW_H2); aligned with the 60 MW_elec limit (60 / 1.5 = 40 MW_H2) after reduction. (???)
+    SpecificConsumption: 1.5                  # MWh_elec per MWh_H2 produced (i.e. efficiency = 1/1.5 ≈ 67%); typical PEM electrolyzer value
+    OperationalCost: 3.0                      # €/MWh_H2 — Variable O&M for water treatment, stack degradation, etc.
+    FixedCost_per_MW_Electrolyzer: 100000.0   # €/MW_elec-year — Annualised CAPEX for PEM electrolysers. Assumes ≈1.0 M€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈100 k€/MW-year (within IEA/IEEFA benchmark ranges).
+    gamma: 1.0                                # Risk weight for CVaR (γ=0 ⇒ risk-neutral baseline).
+    beta: 0.95                                # CVaR confidence level τ.
 
 # ---------------------------------------------------------------------------
 # Hydrogen offtakers (downstream processors & importers)
@@ -103,12 +104,12 @@ Hydrogen_Offtaker:
   Offtaker_Green:
     Type: "GreenOfftaker"
     Capacity_H2_In: 40.0               # Max H2 intake (MW_H2); reduced in line with the producer, matched to the new 40 MW_H2 output capacity.
-    Capacity_EP_Out: 30.0              # Max end-product output (MW_EP equivalent); updated consistently: Alpha * Capacity_H2_In = 0.75 * 40 = 30 MW_EP.
+    Capacity_EP_Out: 30.0              # Max end-product output (MW_EP equivalent); updated consistently: Alpha * Capacity_H2_In = 0.75 * 40 = 30 MW_EP. (???)
     Alpha: 0.75                        # H2-to-EP conversion ratio (MWh_EP per MWh_H2). 0.75 means 1 MWh_H2 yields 0.75 MWh_EP of NH3, consistent with typical industrial Haber–Bosch efficiencies (≈70–80% on an LHV basis).
     ProcessingCost: 7.0                # €/MWh_EP — Cost of converting H2 to end product (energy, catalysts, labour)
     FixedCost_per_MW_EP_Out: 120000.0  # €/MW_EP-year — Annualised CAPEX for downstream synthesis/processing (e.g. ammonia plant). Assumes ≈1.2 M€/MW_EP CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈120 k€/MW-year.
-    gamma: 0.0                 # Risk weight for CVaR (γ=0 ⇒ risk-neutral baseline).
-    beta: 0.95                 # CVaR confidence level τ.
+    gamma: 1.0                         # Risk weight for CVaR (γ=0 ⇒ risk-neutral baseline).
+    beta: 0.95                         # CVaR confidence level τ.
 
   # Grey offtaker — uses conventional (grey) hydrogen but must buy H2 GCs for a fraction of its implied H2 use
   Offtaker_Grey:
@@ -139,6 +140,6 @@ Electricity_GC_Demand:
 # ---------------------------------------------------------------------------
 # EP Demand — Currently empty: EP demand is inelastic and fully defined by
 # EP_market.Total_Demand × normalized profile. This block is a placeholder
-# for future elastic EP demand agents.
+# for future elastic (if any) EP demand agents.
 # ---------------------------------------------------------------------------
 EP_Demand: {}

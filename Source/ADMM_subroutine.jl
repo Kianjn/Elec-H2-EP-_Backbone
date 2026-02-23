@@ -83,7 +83,7 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
             imb = isempty(ADMM_state["Imbalances"]["H2_GC"]) ? zeros_shp : ADMM_state["Imbalances"]["H2_GC"][end]
             # g_bar_H2_GC = prev_own - (1/(n+1))*imbalance  (consensus target)
             mod.ext[:parameters][:g_bar_H2_GC] = prev .- (1.0 / (n + 1)) .* imb
-            # H2-GC prices are now HOURLY (full 3D), same as all other markets.
+            # H2-GC prices are HOURLY (full 3D), same as all other markets.
             # Offtakers have temporal flexibility: they choose WHEN to buy GCs
             # (buying more when cheap, e.g. solar hours) while satisfying their
             # annual mandate constraint internally. This makes H2_GC a proper

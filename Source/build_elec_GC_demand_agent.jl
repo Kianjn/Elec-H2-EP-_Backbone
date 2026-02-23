@@ -65,27 +65,31 @@ end
 # ------------------------------------------------------------------------------
 
 function add_elec_GC_demand_agent_to_planner!(planner::Model, id::String, mod::Model,
-                                              var_dict::Dict, W::AbstractArray)::JuMP.AbstractJuMPScalar
+                                              var_dict::Dict, W::AbstractArray)
     JH = mod.ext[:sets][:JH]
     JD = mod.ext[:sets][:JD]
     JY = mod.ext[:sets][:JY]
     p = mod.ext[:parameters]
     ts = mod.ext[:timeseries]
-    # D_GC_E_bar = peak × load_profile: physical upper bound on GC consumption.
     D_GC_E_bar = p[:PeakLoad] .* ts[:LOAD_GC]
     A_GC = p[:A_GC]
     B_GC = p[:B_GC]
-    # Nested Dict for convenient indexed access in JuMP @expression macros.
     W_dict = Dict(y => Dict(r => W[r, y] for r in JD) for y in JY)
 
     d_GC_E = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="d_GC_E_$(id)")
     @constraint(planner, [jh in JH, jd in JD, jy in JY], d_GC_E[jh, jd, jy] <= D_GC_E_bar[jh, jd, jy])
 
-    # Welfare contribution = quadratic utility U(d) = A_GC·d - (B_GC/2)·d².
-    obj = @expression(planner,
-        sum(W_dict[jy][jd] * (A_GC * d_GC_E[jh, jd, jy] - 0.5 * B_GC * d_GC_E[jh, jd, jy]^2)
-            for jh in JH, jd in JD, jy in JY)
-    )
+    # Per-year welfare = GC consumer utility U(d) = A_GC·d − (B_GC/2)·d².
+    # No expenditure term: GC payments are transfers that cancel in the
+    # aggregate planner objective. No per-agent CVaR: a single social CVaR
+    # is applied in build_social_planner! to the aggregate social welfare.
+    welfare_per_year = Dict{Int, Any}()
+    for jy in JY
+        welfare_per_year[jy] = @expression(planner,
+            sum(W_dict[jy][jd] * (A_GC * d_GC_E[jh, jd, jy] - 0.5 * B_GC * d_GC_E[jh, jd, jy]^2)
+                for jh in JH, jd in JD)
+        )
+    end
     var_dict[:elec_GC_demand_d_GC_E][id] = d_GC_E
-    return obj
+    return welfare_per_year
 end

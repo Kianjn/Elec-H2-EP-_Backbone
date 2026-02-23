@@ -55,12 +55,12 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
                                       # sub-problems)
 
     # ── ADMM parameters for the ELECTRICITY-GC market ─────────────────────
-    λ_elec_GC     = mod.ext[:parameters][:λ_elec_GC]       # λ_GC = Lagrange
-                                      # multiplier for the elec-GC market
+    λ_elec_GC     = mod.ext[:parameters][:λ_elec_GC]        # λ_GC = Lagrange
+                                          # multiplier for the elec-GC market
     g_bar_elec_GC = mod.ext[:parameters][:g_bar_elec_GC]   # ḡ_GC = consensus
-                                      # target in the elec-GC market
-    ρ_elec_GC  = mod.ext[:parameters][:ρ_elec_GC]          # ρ_GC = penalty
-                                      # weight for elec-GC market
+                                               # target in the elec-GC market
+    ρ_elec_GC  = mod.ext[:parameters][:ρ_elec_GC]            # ρ_GC = penalty
+                                                  # weight for elec-GC market
     agent_type = mod.ext[:parameters][:Type]
 
     if agent_type == "VRES"
@@ -74,7 +74,7 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
         F_cap = get(mod.ext[:parameters], :FixedCost_per_MW, 0.0)
         # Risk parameters (CVaR skeleton; γ = 0 ⇒ risk-neutral by default).
         gamma = get(mod.ext[:parameters], :γ, 1.0)
-        beta_cvar = get(mod.ext[:parameters], :β, 0.95)   # confidence level τ
+        beta_conf = get(mod.ext[:parameters], :β, 0.95)   # confidence level β
         P = mod.ext[:parameters][:P]
         n_years = length(JY)   # apply the annualised charge once per model year
 
@@ -108,9 +108,10 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
         mod.ext[:expressions][:g_net_elec_GC] = @expression(mod, g)   # g_net_elec_GC = +g
 
         # ── Risk variables (agent-level CVaR) ───────────────────────────────
-        # α_VRES: VaR proxy; β_VRES: CVaR; u_VRES[jy]: shortfall per scenario year.
+        # α_VRES: VaR proxy; CVaR_VRES: Conditional Value-at-Risk of loss;
+        # u_VRES[jy]: shortfall per scenario year.
         alpha_VRES = mod.ext[:variables][:alpha_VRES] = @variable(mod, lower_bound = 0, base_name = "alpha_VRES_$(m)")
-        beta_VRES  = mod.ext[:variables][:beta_VRES]  = @variable(mod, lower_bound = 0, base_name = "beta_VRES_$(m)")
+        cvar_VRES  = mod.ext[:variables][:CVaR_VRES]  = @variable(mod, lower_bound = 0, base_name = "CVaR_VRES_$(m)")
         u_VRES     = mod.ext[:variables][:u_VRES]     = @variable(mod, [jy in JY], lower_bound = 0, base_name = "u_VRES_$(m)")
 
         # Per-year economic loss (cost − revenue) excluding ADMM penalties; prices
@@ -127,19 +128,21 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
 
         # CVaR shortfall constraints: u_VRES[jy] ≥ loss_VRES[jy] − α.
         mod.ext[:constraints][:CVaR_VRES_shortfall] = @constraint(mod, [jy in JY],
-            u_VRES[jy] >= loss_VRES[jy] - alpha_VRES
+           u_VRES[jy] >= loss_VRES[jy] - alpha_VRES
+       
         )
 
-        # CVaR definition: β_VRES ≥ α_VRES + (1/(1−τ)) * Σ P[jy]*u_VRES[jy].
-        one_minus_tau = max(1e-6, 1.0 - beta_cvar)
+        # CVaR definition: CVaR_VRES ≥ α_VRES + (1/(1−β)) * Σ P[jy]*u_VRES[jy].
+        one_minus_beta = max(1e-6, 1.0 - beta_conf)
         mod.ext[:constraints][:CVaR_VRES_link] = @constraint(mod,
-            beta_VRES >= alpha_VRES + (1 / one_minus_tau) * sum(P[jy] * u_VRES[jy] for jy in JY)
+            cvar_VRES >= alpha_VRES + (1 / one_minus_beta) * sum(P[jy] * u_VRES[jy] for jy in JY)
+       
         )
 
         # Objective:
         #   min  Σ_{h,d,y} W[d,y]·( MC·g − λ_elec·g − λ_GC·g )       ← (1)
         #      + Σ_{h,d,y} (ρ_elec/2)·W[d,y]·(g − ḡ_elec)²           ← (2)
-        #      + Σ_{h,d,y} (ρ_GC /2)·W[d,y]·(g − ḡ_GC)²             ← (3)
+        #      + Σ_{h,d,y} (ρ_GC /2)·W[d,y]·(g − ḡ_GC)²              ← (3)
         #
         # (1) Production cost minus revenue from the electricity market
         #     minus revenue from the elec-GC market.  The agent earns λ_elec
@@ -238,7 +241,7 @@ end
 # ------------------------------------------------------------------------------
 
 function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
-                                     var_dict::Dict, W::AbstractArray)::JuMP.AbstractJuMPScalar
+                                     var_dict::Dict, W::AbstractArray)
     JH = mod.ext[:sets][:JH]
     JD = mod.ext[:sets][:JD]
     JY = mod.ext[:sets][:JY]
@@ -246,47 +249,39 @@ function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
     _ts(m, k) = m.ext[:timeseries][k]
     agent_type = String(_p(mod, :Type))
 
-    # W_dict is a nested Dict{year => Dict{rep_day => weight}} that enables
-    # convenient indexed access inside JuMP @expression macros (which require
-    # scalar look-ups rather than array slicing).
     W_dict = Dict(y => Dict(r => W[r, y] for r in JD) for y in JY)
 
     if agent_type == "Consumer"
-        # Quadratic utility parameters (defaults guard against missing data).
         A_E = _p(mod, :A_E) !== nothing ? _p(mod, :A_E) : 500.0
         B_E = _p(mod, :B_E) !== nothing ? _p(mod, :B_E) : 0.5
-        # D_bar = peak × load_profile: physical upper bound on consumption.
         D_bar = _ts(mod, :LOAD_E) .* _p(mod, :PeakLoad)
 
         d_E = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="d_E_$(id)")
         @constraint(planner, [jh in JH, jd in JD, jy in JY], d_E[jh, jd, jy] <= D_bar[jh, jd, jy])
 
-        # Welfare contribution = consumer utility U(d) = A_E·d − (B_E/2)·d².
-        # No expenditure term: the planner internalizes prices via market-
-        # clearing duals, so only the utility (= willingness to pay) matters.
-        obj = @expression(planner,
-            sum(W_dict[jy][jd] * ((A_E * d_E[jh, jd, jy]) - 0.5 * B_E * d_E[jh, jd, jy]^2)
-                for jh in JH, jd in JD, jy in JY)
-        )
+        # Per-year welfare = consumer utility U(d) = A_E·d − (B_E/2)·d².
+        # No expenditure term: market payments are transfers that cancel
+        # in the aggregate planner objective. No per-agent CVaR: a single
+        # social CVaR is applied in build_social_planner! to the aggregate.
+        welfare_per_year = Dict{Int, Any}()
+        for jy in JY
+            welfare_per_year[jy] = @expression(planner,
+                sum(W_dict[jy][jd] * ((A_E * d_E[jh, jd, jy]) - 0.5 * B_E * d_E[jh, jd, jy]^2)
+                    for jh in JH, jd in JD)
+            )
+        end
         var_dict[:power_d_E][id] = d_E
-        return obj
+        return welfare_per_year
 
     elseif agent_type == "VRES"
-        # Availability factors and costs.
         AF = _ts(mod, :AF)
         C = _p(mod, :MarginalCost)
-        gamma = get(mod.ext[:parameters], :γ, 1.0)
-        beta_cvar = get(mod.ext[:parameters], :β, 0.95)
-        P = mod.ext[:parameters][:P]
-        # Annualised fixed investment cost per MW of installed VRES capacity (€/MW-year).
         F_cap = get(mod.ext[:parameters], :FixedCost_per_MW, 0.0)
         cap_initial = _p(mod, :Capacity)
 
-        # Yearly capacity and investment variables.
         cap_VRES = @variable(planner, [jy in JY], lower_bound=0, base_name="cap_VRES_$(id)")
         inv_VRES = @variable(planner, [jy in JY], lower_bound=0, base_name="inv_VRES_$(id)")
 
-        # Capacity evolution over years.
         JY_vec = collect(JY)
         first_jy = JY_vec[1]
         @constraint(planner, cap_VRES[first_jy] == cap_initial + inv_VRES[first_jy])
@@ -299,54 +294,37 @@ function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
         q_E = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="q_E_$(id)")
         @constraint(planner, [jh in JH, jd in JD, jy in JY], q_E[jh, jd, jy] <= AF[jh, jd, jy] * cap_VRES[jy])
 
-        # Risk variables for planner CVaR (cost-based, no prices in planner objective).
-        alpha_VRES = @variable(planner, lower_bound=0, base_name="alpha_VRES_$(id)")
-        beta_VRES  = @variable(planner, lower_bound=0, base_name="beta_VRES_$(id)")
-        u_VRES     = @variable(planner, [jy in JY], lower_bound=0, base_name="u_VRES_$(id)")
-
-        # Per-year cost (positive) = production cost + fixed capacity cost in that year.
-        loss_VRES = Dict{Int,JuMP.AffExpr}()
+        # Per-year welfare = −(production cost + fixed capacity cost).
+        # No per-agent CVaR: a single social CVaR is applied in
+        # build_social_planner! to the aggregate social welfare.
+        welfare_per_year = Dict{Int, Any}()
         for jy in JY
-            loss_VRES[jy] = @expression(planner,
-                sum(W_dict[jy][jd] * (C * q_E[jh, jd, jy]) for jh in JH, jd in JD)
-                + F_cap * cap_VRES[jy]
+            welfare_per_year[jy] = @expression(planner,
+                -(sum(W_dict[jy][jd] * (C * q_E[jh, jd, jy]) for jh in JH, jd in JD)
+                  + F_cap * cap_VRES[jy])
             )
         end
-
-        # Shortfall constraints and CVaR link.
-        @constraint(planner, [jy in JY], u_VRES[jy] >= loss_VRES[jy] - alpha_VRES)
-        one_minus_tau = max(1e-6, 1.0 - beta_cvar)
-        @constraint(planner,
-            beta_VRES >= alpha_VRES + (1 / one_minus_tau) * sum(P[iy] * u_VRES[jy] for (iy, jy) in enumerate(JY))
-        )
-
-        # Welfare contribution = −(production cost).  Negative because cost
-        # reduces total welfare; revenue cancels out in the planner's
-        # aggregate (it is a transfer between agents).
-        obj = @expression(planner,
-            -sum(W_dict[jy][jd] * (C * q_E[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
-            - F_cap * sum(cap_VRES[jy] for jy in JY)   # fixed annualised investment cost (capacity-only term)
-            # CVaR risk penalty; γ = 0 ⇒ risk-neutral.
-            - gamma * beta_VRES
-        )
         var_dict[:power_q_E][id] = q_E
         var_dict[:power_cap_VRES][id] = cap_VRES
         var_dict[:power_inv_VRES][id] = inv_VRES
-        return obj
+        return welfare_per_year
 
     else  # Conventional
         cap = _p(mod, :Capacity)
         C = _p(mod, :MarginalCost)
 
         q_E = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="q_E_$(id)")
-        # Dispatchable: capacity limit is constant (no availability factor).
         @constraint(planner, [jh in JH, jd in JD, jy in JY], q_E[jh, jd, jy] <= cap)
 
-        # Welfare contribution = −(production cost), same logic as VRES.
-        obj = @expression(planner,
-            -sum(W_dict[jy][jd] * (C * q_E[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
-        )
+        # Per-year welfare = −(production cost). Revenue from electricity
+        # sales is a transfer that cancels in the aggregate planner objective.
+        welfare_per_year = Dict{Int, Any}()
+        for jy in JY
+            welfare_per_year[jy] = @expression(planner,
+                -sum(W_dict[jy][jd] * (C * q_E[jh, jd, jy]) for jh in JH, jd in JD)
+            )
+        end
         var_dict[:power_q_E][id] = q_E
-        return obj
+        return welfare_per_year
     end
 end

@@ -1,18 +1,18 @@
 ───────────────────────────────────────────────────────────────────────────────
                                       Time                    Allocations      
                              ───────────────────────   ────────────────────────
-      Tot / % measured:           13.1s /  41.0%           2.31GiB /  57.7%    
+      Tot / % measured:           74.5s /  91.2%           10.6GiB /  98.0%    
 
 Section              ncalls     time    %tot     avg     alloc    %tot      avg
 ───────────────────────────────────────────────────────────────────────────────
-Solve agent             776    2.52s   46.9%  3.25ms   1.00GiB   75.2%  1.32MiB
-Dual residuals           97    883ms   16.4%  9.10ms   90.6MiB    6.6%   957KiB
-Query results           776    682ms   12.7%   879μs    151MiB   11.1%   199KiB
-Compute imbalances       97    650ms   12.1%  6.71ms   48.8MiB    3.6%   515KiB
-Update ADMM params      776    288ms    5.4%   371μs   22.0MiB    1.6%  29.0KiB
-Primal residuals         97    170ms    3.2%  1.75ms   17.4MiB    1.3%   184KiB
-Update prices            97    105ms    2.0%  1.08ms   4.45MiB    0.3%  47.0KiB
-Imbalance means          97   65.0ms    1.2%   670μs   4.45MiB    0.3%  46.9KiB
-Update ρ                 97   14.8ms    0.3%   153μs   89.2KiB    0.0%     942B
-Price means              97    436μs    0.0%  4.49μs   15.5KiB    0.0%     163B
+Solve agent           8.00k    61.0s   89.9%  7.63ms   8.97GiB   86.7%  1.15MiB
+Query results         8.00k    4.39s    6.5%   549μs   1.09GiB   10.5%   143KiB
+Dual residuals        1.00k    1.35s    2.0%  1.35ms    196MiB    1.8%   200KiB
+Compute imbalances    1.00k    496ms    0.7%   496μs   50.3MiB    0.5%  51.5KiB
+Update ADMM params    8.00k    465ms    0.7%  58.2μs   25.9MiB    0.2%  3.31KiB
+Primal residuals      1.00k   96.5ms    0.1%  96.5μs   9.35MiB    0.1%  9.58KiB
+Update ρ              1.00k   36.3ms    0.1%  36.3μs    974KiB    0.0%     997B
+Update prices         1.00k   31.0ms    0.0%  31.0μs   8.65MiB    0.1%  8.86KiB
+Imbalance means       1.00k   15.2ms    0.0%  15.2μs    200KiB    0.0%     205B
+Price means           1.00k   10.3ms    0.0%  10.3μs    199KiB    0.0%     204B
 ───────────────────────────────────────────────────────────────────────────────

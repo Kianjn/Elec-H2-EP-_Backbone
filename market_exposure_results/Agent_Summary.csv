@@ -1,9 +1,9 @@
 AgentID,Group,Objective_Value
-Cons_Elec_01,power,-1.1011426762279631e8
-Gen_Conv_01,power,-1.7067078422826238e6
-Gen_VRES_01,power,1737.2166139483452
-Prod_H2_Green,H2,34547.809801306576
-Offtaker_Green,offtaker,135813.9378171675
-Offtaker_Grey,offtaker,-2.0392544815577036e6
-Offtaker_Import,offtaker,0.45369386609367857
-Demand_GC_Elec_01,elec_GC_demand,-26282.127840339424
+Cons_Elec_01,power,-9.297476531159744e8
+Gen_Conv_01,power,-1.8495697959634297e7
+Gen_VRES_01,power,7.005972794723153e6
+Prod_H2_Green,H2,4.458388164918423e6
+Offtaker_Green,offtaker,4.360518059546053e6
+Offtaker_Grey,offtaker,34181.87741303444
+Offtaker_Import,offtaker,-2.473899777940958e9
+Demand_GC_Elec_01,elec_GC_demand,5695.321908303311
