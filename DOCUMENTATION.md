@@ -24,70 +24,70 @@ This section introduces the symbols used throughout the documentation. All sums 
 
 ### 0.1 Indices and Sets
 
-- \( i \in \mathcal{I} \): agents (VRES, conventional generator, consumer, electrolyzer, green offtaker, grey offtaker, importer, GC demand).
-- \( k \in \mathcal{K} \): markets
-  - \(k = \text{elec}, \text{elec\_GC}, \text{H2}, \text{H2\_GC}, \text{EP}\).
-- \( h \in \mathcal{H} = \{1,\dots,n_{\text{Timesteps}}\} \): hours within a representative day.
-- \( d \in \mathcal{D} = \{1,\dots,n_{\text{ReprDays}}\} \): representative days.
-- \( y \in \mathcal{Y} = \{1,\dots,n_{\text{Years}}\} \): scenario years.
+- $i \in \mathcal{I}$: agents (VRES, conventional generator, consumer, electrolyzer, green offtaker, grey offtaker, importer, GC demand).
+- $k \in \mathcal{K}$: markets
+  - $k = \text{elec}, \text{elec\_GC}, \text{H2}, \text{H2\_GC}, \text{EP}$.
+- $h \in \mathcal{H} = \{1,\dots,n_{\text{Timesteps}}\}$: hours within a representative day.
+- $d \in \mathcal{D} = \{1,\dots,n_{\text{ReprDays}}\}$: representative days.
+- $y \in \mathcal{Y} = \{1,\dots,n_{\text{Years}}\}$: scenario years.
 
 In the code, these appear as `JH`, `JD`, `JY`.
 
 ### 0.2 Time Weights and Probabilities
 
-- \( W_{d,y} \): number of real calendar days represented by representative day \(d\) in year \(y\).
-- \( P_y \): probability (or relative weight) of scenario year \(y\) in the CVaR constructions. These are usually normalised so that \(\sum_y P_y = 1\).
+- $W_{d,y}$: number of real calendar days represented by representative day $d$ in year $y$.
+- $P_y$: probability (or relative weight) of scenario year $y$ in the CVaR constructions. These are usually normalised so that $\sum_y P_y = 1$.
 
 ### 0.3 Prices, Quantities, and Net Positions
 
-- \( \lambda_k(h,d,y) \): price in market \(k\) at time \((h,d,y)\).
-- \( q_i^k(h,d,y) \): **physical quantity** traded by agent \(i\) in market \(k\) at time \((h,d,y)\), sign-free.
-- \( g_i^k(h,d,y) \): **net position** of agent \(i\) in market \(k\) at time \((h,d,y)\), following the sign convention:
-  - \(g_i^k > 0\): agent \(i\) is a **supplier** in market \(k\).
-  - \(g_i^k < 0\): agent \(i\) is a **buyer** in market \(k\).
-- Market **imbalance** in market \(k\) at time \((h,d,y)\):
+- $\lambda_k(h,d,y)$: price in market $k$ at time $(h,d,y)$.
+- $q_i^k(h,d,y)$: **physical quantity** traded by agent $i$ in market $k$ at time $(h,d,y)$, sign-free.
+- $g_i^k(h,d,y)$: **net position** of agent $i$ in market $k$ at time $(h,d,y)$, following the sign convention:
+  - $g_i^k > 0$: agent $i$ is a **supplier** in market $k$.
+  - $g_i^k < 0$: agent $i$ is a **buyer** in market $k$.
+- Market **imbalance** in market $k$ at time $(h,d,y)$:
 
-  \[
+  ```math
   r_k(h,d,y) = \sum_{i \in \mathcal{I}_k} g_i^k(h,d,y) - D_k(h,d,y),
-  \]
+  ```
 
-  where \(D_k\) is exogenous demand (for EP only; 0 otherwise).
+  where $D_k$ is exogenous demand (for EP only; 0 otherwise).
 
 The **aggregate imbalance norm** used by ADMM is:
 
-\[
+```math
 \|r_k\|_2 = \left( \sum_{h,d,y} r_k(h,d,y)^2 \right)^{1/2}.
-\]
+```
 
 ### 0.4 Units
 
 - Electricity: MWh.
-- Electricity GC: MWh\(_\text{GC}\) (1 certificate per renewable MWh).
-- Hydrogen: MWh\(_\text{H2}\) (or equivalent energy-based unit).
-- Hydrogen GC: MWh\(_\text{GC,H2}\).
-- End product (EP): MWh\(_\text{EP}\) or t\(_\text{EP}\) (consistent within the model, governed by `Alpha`).
+- Electricity GC: MWh$_\text{GC}$ (1 certificate per renewable MWh).
+- Hydrogen: MWh$_\text{H2}$ (or equivalent energy-based unit).
+- Hydrogen GC: MWh$_\text{GC,H2}$.
+- End product (EP): MWh$_\text{EP}$ or t$_\text{EP}$ (consistent within the model, governed by `Alpha`).
 
 All monetary values are in **EUR** (e.g. €/MWh, €/t, €/MW-year).
 
 ### 0.5 Risk Parameters and CVaR
 
-- \( \gamma_i \in [0,1] \): risk weight for agent \(i\).
-  - \( \gamma_i = 1 \): risk-neutral (expected loss only).
-  - \( 0 < \gamma_i < 1 \): risk-averse (mix of expectation and CVaR).
-- \( \beta \in (0,1) \): CVaR confidence level (e.g. 0.95).
-- \( \alpha_i \): Value-at-Risk (VaR) proxy for agent \(i\).
-- \( u_i(y) \): shortfall above VaR for agent \(i\) in year \(y\).
-- \( \mathrm{CVaR}_i \): Conditional Value-at-Risk for agent \(i\).
+- $\gamma_i \in [0,1]$: risk weight for agent $i$.
+  - $\gamma_i = 1$: risk-neutral (expected loss only).
+  - $0 < \gamma_i < 1$: risk-averse (mix of expectation and CVaR).
+- $\beta \in (0,1)$: CVaR confidence level (e.g. 0.95).
+- $\alpha_i$: Value-at-Risk (VaR) proxy for agent $i$.
+- $u_i(y)$: shortfall above VaR for agent $i$ in year $y$.
+- $\mathrm{CVaR}_i$: Conditional Value-at-Risk for agent $i$.
 
 The **agent-level CVaR** of loss is, in continuous notation:
 
-\[
+```math
 \mathrm{CVaR}_i = \min_{\alpha_i} \left[ \alpha_i + \frac{1}{1-\beta} \mathbb{E}[(\ell_i - \alpha_i)_+] \right],
-\]
+```
 
-where \(\ell_i\) is the random loss and \((x)_+ = \max\{x,0\}\). The code implements the usual linearised form with \(\alpha_i, u_i(y)\) and empirical probabilities \(P_y\).
+where $\ell_i$ is the random loss and $(x)_+ = \max\{x,0\}$. The code implements the usual linearised form with $\alpha_i, u_i(y)$ and empirical probabilities $P_y$.
 
-The **social planner** uses a single \(\gamma\) and a single social CVaR on aggregate welfare (see §6.4).
+The **social planner** uses a single $\gamma$ and a single social CVaR on aggregate welfare (see §6.4).
 
 ---
 
@@ -190,21 +190,21 @@ More explicitly:
 
 - The **deterministic, expected-loss term**
 
-  \[
+  ```math
   \sum_{h,d,y} W_{d,y}\,\bigl(\mathrm{cost}_i(h,d,y) - \mathrm{rev}_i(h,d,y)\bigr)
-  \]
+  ```
 
   contains fuel/operational costs, certificate purchases, and investment annuities on the **cost** side, and all market revenues (price × net position) on the **revenue** side.
 
-- The **risk term** \( \mathrm{CVaR}_i(\mathrm{loss}_i) \) captures the tail of the loss distribution over years \(y\). It is only active when \( \gamma_i < 1 \); for \( \gamma_i=1 \) the CVaR part drops out and the agent becomes risk-neutral.
+- The **risk term** $\mathrm{CVaR}_i(\mathrm{loss}_i)$ captures the tail of the loss distribution over years $y$. It is only active when $\gamma_i < 1$; for $\gamma_i=1$ the CVaR part drops out and the agent becomes risk-neutral.
 
 - The **quadratic ADMM penalties**
 
-  \[
+  ```math
   \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\,\bigl(g_i^k(h,d,y)-\bar g_i^k(h,d,y)\bigr)^2
-  \]
+  ```
 
-  ensure that, in equilibrium, each agent’s net position \(g_i^k\) coincides with a consensus allocation \(\bar g_i^k\) that satisfies market-clearing. Economically, this can be read as a **soft enforcement of market balance**: deviating from the consensus quantity becomes increasingly expensive as \(\rho_k\) grows.
+  ensure that, in equilibrium, each agent’s net position $g_i^k$ coincides with a consensus allocation $\bar g_i^k$ that satisfies market-clearing. Economically, this can be read as a **soft enforcement of market balance**: deviating from the consensus quantity becomes increasingly expensive as $\rho_k$ grows.
 
 The ADMM part is purely **algorithmic**: it does not change the underlying economic problem. At convergence, all net positions are equal to their consensus copies and all quadratic penalties are zero, so the solution coincides with that of the risk-adjusted competitive equilibrium defined by the first two terms.
 
@@ -271,8 +271,8 @@ where loss_G[y] = Σ_{h,d} W × ( λ_H2×h2_in + λ_H2GC×gc_h2 + proc×ep − �
 
 These templates are implemented in the `build_*_agent.jl` files as follows:
 
-- All **price-dependent terms** (e.g. \( \lambda_\text{elec}\,g \), \( \lambda_\text{H2}\,h2\_in \)) are expressed via JuMP `@expression` blocks whose coefficients are updated each ADMM iteration.
-- The **capacity-investment linkage** is enforced via yearly variables (e.g. `cap_VRES[y]`, `inv_VRES[y]`) and simple linear relationships: investment in year \(y\) expands the capacity available in all hours of that year.
+- All **price-dependent terms** (e.g. $\lambda_\text{elec}\,g$, $\lambda_\text{H2}\,h2\_in$) are expressed via JuMP `@expression` blocks whose coefficients are updated each ADMM iteration.
+- The **capacity-investment linkage** is enforced via yearly variables (e.g. `cap_VRES[y]`, `inv_VRES[y]`) and simple linear relationships: investment in year $y$ expands the capacity available in all hours of that year.
 - For risk-averse agents, the **loss-per-year** expressions `loss_VRES[y]`, `loss_H2[y]`, `loss_G[y]` are recomputed in every ADMM iteration with the *current* prices, so that the CVaR always measures risk with respect to the most recent price trajectory.
 
 ### 4.2 Key Constraints
@@ -293,8 +293,8 @@ These templates are implemented in the `build_*_agent.jl` files as follows:
 
 The social planner maximises **risk-adjusted social welfare** with a **single** social CVaR:
 
-```
-max  γ × Σ_y sw_aux[y]  −  (1−γ) × CVaR_social
+```math
+\max \; \gamma \sum_y \text{sw\_aux}[y] \;-\; (1-\gamma)\,\text{CVaR}_\text{social}
 ```
 
 where `sw_aux[y]` is an epigraph proxy for aggregate social welfare per year (see §6.4 for why), and `CVaR_social` penalises tail risk across scenario years. When `γ=1` (risk-neutral), the CVaR term vanishes and the planner reduces to standard welfare maximisation.
@@ -311,8 +311,8 @@ Each `add_*_to_planner!` function returns a `Dict{Int, Any}` of per-year welfare
 
 #### Social welfare aggregation
 
-```
-social_welfare[y] = Σ_i  welfare_per_year_i[y]      (includes quadratic consumer utility)
+```math
+\text{social\_welfare}[y] = \sum_i \text{welfare\_per\_year\_i}[y]
 ```
 
 Market-clearing constraints enforce supply = demand. The single social CVaR applies to the full aggregate welfare (including consumer utility), ensuring the risk-averse planner accounts for all welfare components when assessing tail risk.
@@ -324,25 +324,25 @@ This section summarises the **risk-aversion architecture** and explains precisel
 #### 4.4.1 Agent-level vs system-level risk
 
 - In the **ADMM (market exposure) case**:
-  - A subset of agents (VRES, electrolyzer, green offtaker) can be risk-averse with their own parameters \((\gamma_i,\beta_i)\).
+  - A subset of agents (VRES, electrolyzer, green offtaker) can be risk-averse with their own parameters $(\gamma_i,\beta_i)$.
   - Each such agent minimises a **private risk-adjusted loss**:
 
-    \[
+    ```math
     \gamma_i\,\mathbb{E}[\ell_i] + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i),
-    \]
+    ```
 
     subject to its own technological constraints and the ADMM penalties.
   - Risk is therefore **heterogeneous and decentralised**: different agents may have different attitudes to risk; financial transfers between agents do not directly enter the risk measure.
 
 - In the **social planner case**:
-  - There is a **single** system-wide risk parameter \(\gamma\) and confidence level \(\beta\).
+  - There is a **single** system-wide risk parameter $\gamma$ and confidence level $\beta$.
   - The planner maximises a **single risk-adjusted social welfare**:
 
-    \[
+    ```math
     \gamma\,\mathbb{E}\bigl[SW\bigr] - (1-\gamma)\,\mathrm{CVaR}_\text{social}(-SW),
-    \]
+    ```
 
-    where \(SW\) is aggregate welfare (including consumer utility and production/investment costs).
+    where $SW$ is aggregate welfare (including consumer utility and production/investment costs).
   - Risk is therefore **centralised**: society as a whole is risk-averse with respect to aggregate welfare, rather than each agent separately.
 
 These two formulations represent different normative assumptions about **who bears risk** and **how it is shared**. The ADMM run with per-agent CVaR corresponds to a market in which agents individually care about their own tail losses; the social planner corresponds to a benevolent regulator who cares about systemic tail outcomes.
@@ -352,12 +352,12 @@ These two formulations represent different normative assumptions about **who bea
 When both formulations are made **risk-neutral**, they collapse to the same underlying convex optimisation problem:
 
 - In ADMM:
-  - Set \( \gamma_i = 1 \) for all agents that can be risk-averse (VRES, electrolyzer, green offtaker).
+  - Set $\gamma_i = 1$ for all agents that can be risk-averse (VRES, electrolyzer, green offtaker).
   - This eliminates all per-agent CVaR terms from their objectives.
 
 - In the social planner:
-  - Set the planner-wide risk weight \( \gamma = 1 \).
-  - This eliminates \(\mathrm{CVaR}_\text{social}\) from the planner’s objective, so the model becomes a quadratic (but not quadratically constrained) welfare maximisation with standard consumer surplus and producer surplus terms.
+  - Set the planner-wide risk weight $\gamma = 1$.
+  - This eliminates $\mathrm{CVaR}_\text{social}$ from the planner’s objective, so the model becomes a quadratic (but not quadratically constrained) welfare maximisation with standard consumer surplus and producer surplus terms.
 
 Under these settings:
 
@@ -401,19 +401,19 @@ Each ADMM iteration `k` proceeds as follows:
    - **Primal residual** = `‖imbalance‖₂` (L2 norm; measures market-clearing violation).
    - **Dual residual** = `‖ρ × Δ(consensus deviation)‖₂` (measures position stability).
 
-   More precisely, for each market \(k\):
+   More precisely, for each market $k$:
 
-   - Let \( r_k^t(h,d,y) \) be the **market imbalance** at iteration \(t\).
-   - Let \( \Delta z_k^t(h,d,y) \) be the **change in consensus deviation** (difference between successive consensus copies) at iteration \(t\).
+   - Let $r_k^t(h,d,y)$ be the **market imbalance** at iteration $t$.
+   - Let $\Delta z_k^t(h,d,y)$ be the **change in consensus deviation** (difference between successive consensus copies) at iteration $t$.
 
    Then:
 
-   \[
+   ```math
    \|r_k^t\|_2 = \Bigl(\sum_{h,d,y} r_k^t(h,d,y)^2\Bigr)^{1/2},\qquad
    \|s_k^t\|_2 = \rho_k^t\,\Bigl(\sum_{h,d,y} (\Delta z_k^t(h,d,y))^2\Bigr)^{1/2}.
-   \]
+   ```
 
-   The primal residual \(\|r_k^t\|_2\) measures **how far the market is from clearing**, while the dual residual \(\|s_k^t\|_2\) measures **how stable the agents’ net positions are** from one iteration to the next.
+   The primal residual $\|r_k^t\|_2$ measures **how far the market is from clearing**, while the dual residual $\|s_k^t\|_2$ measures **how stable the agents’ net positions are** from one iteration to the next.
 
 4. **Update prices**: `λ^{k+1} = λ^k − η_k × ρ_k × imbalance^k` (gradient ascent on the dual with **residual-aware step size** `η_k ∈ (0,1]` per market). Far from convergence, `η_k = 1` and we recover the standard update. Near convergence (when both primal and dual residuals are within a modest multiple of tolerance), `η_k` is reduced (e.g. 0.3) to damp oscillations in tightly coupled markets while keeping `ρ_k` fixed.
 
@@ -462,7 +462,7 @@ This combination yields a robust behaviour:
 - **Far from tolerance**: ρ can adapt aggressively enough to overcome stalling and large imbalances.
 - **Near the solution**: ρ becomes effectively fixed and the algorithm behaves like a stable fixed-ρ ADMM, eliminating the classic oscillatory patterns observed with naive adaptive schemes.
 
-In pseudo-code, the **per-market update** at iteration \(t\) can be summarised as:
+In pseudo-code, the **per-market update** at iteration $t$ can be summarised as:
 
 ```text
 for each market k:

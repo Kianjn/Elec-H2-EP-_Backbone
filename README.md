@@ -361,13 +361,13 @@ Each iteration:
 
 1. **Agent solves**: Each agent independently minimises its cost minus revenue plus an ADMM quadratic penalty that pushes its net position toward a market consensus target.
 2. **Imbalance**: Sum of all agents' net positions in each market. Should be zero at equilibrium.
-3. **Price update**: prices are updated in the **direction of imbalance**. In compact form for a given market \(k\),
+3. **Price update**: prices are updated in the **direction of imbalance**. In compact form for a given market $k$:
 
-   \[
+   ```math
    \lambda_{k}^{(t+1)} = \lambda_{k}^{(t)} - \eta_k^{(t)} \,\rho_k^{(t)} \, r_k^{(t)},
-   \]
+   ```
 
-   where \(r_k^{(t)}\) is the current imbalance (sum of net positions), \(\rho_k^{(t)}\) is the penalty weight, and \(\eta_k^{(t)} \in (0,1]\) is a residual-aware step size. **Excess supply** (\(r_k>0\)) reduces prices; **excess demand** (\(r_k<0\)) increases prices.
+   where $r_k^{(t)}$ is the current imbalance (sum of net positions), $\rho_k^{(t)}$ is the penalty weight, and $\eta_k^{(t)} \in (0,1]$ is a residual-aware step size. **Excess supply** ($r_k>0$) reduces prices; **excess demand** ($r_k<0$) increases prices.
 4. **Penalty adaptation**: ρ increases if the market is far from clearing (primal residual too large), decreases if agents are oscillating (dual residual too large).
 5. **Convergence**: Stops when all markets have both primal and dual residuals below tolerance.
 
