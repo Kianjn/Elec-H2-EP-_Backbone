@@ -373,7 +373,13 @@ Each iteration:
 
 ### Social Planner
 
-Solves a single QP maximising total welfare = Σ(consumer utility − producer costs), subject to:
+Solves a single QP maximising total welfare
+
+```math
+\sum (\text{consumer utility} - \text{producer costs}),
+```
+
+subject to:
 - All individual agent constraints (capacity, conversion, GC mandates).
 - Market-clearing constraints (supply = demand in each market).
 
