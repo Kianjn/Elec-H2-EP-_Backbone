@@ -2,6 +2,7 @@
 
 ## Table of Contents
 
+0. [Notation and Units](#0-notation-and-units)
 1. [Overview](#1-overview)
 2. [Markets](#2-markets)
 3. [Agents](#3-agents)
@@ -14,6 +15,79 @@
 10. [File Reference](#10-file-reference)
 11. [Output Files](#11-output-files)
 12. [Code Conventions](#12-code-conventions)
+
+---
+
+## 0. Notation and Units
+
+This section introduces the symbols used throughout the documentation. All sums in the optimisation problems follow this notation.
+
+### 0.1 Indices and Sets
+
+- \( i \in \mathcal{I} \): agents (VRES, conventional generator, consumer, electrolyzer, green offtaker, grey offtaker, importer, GC demand).
+- \( k \in \mathcal{K} \): markets
+  - \(k = \text{elec}, \text{elec\_GC}, \text{H2}, \text{H2\_GC}, \text{EP}\).
+- \( h \in \mathcal{H} = \{1,\dots,n_{\text{Timesteps}}\} \): hours within a representative day.
+- \( d \in \mathcal{D} = \{1,\dots,n_{\text{ReprDays}}\} \): representative days.
+- \( y \in \mathcal{Y} = \{1,\dots,n_{\text{Years}}\} \): scenario years.
+
+In the code, these appear as `JH`, `JD`, `JY`.
+
+### 0.2 Time Weights and Probabilities
+
+- \( W_{d,y} \): number of real calendar days represented by representative day \(d\) in year \(y\).
+- \( P_y \): probability (or relative weight) of scenario year \(y\) in the CVaR constructions. These are usually normalised so that \(\sum_y P_y = 1\).
+
+### 0.3 Prices, Quantities, and Net Positions
+
+- \( \lambda_k(h,d,y) \): price in market \(k\) at time \((h,d,y)\).
+- \( q_i^k(h,d,y) \): **physical quantity** traded by agent \(i\) in market \(k\) at time \((h,d,y)\), sign-free.
+- \( g_i^k(h,d,y) \): **net position** of agent \(i\) in market \(k\) at time \((h,d,y)\), following the sign convention:
+  - \(g_i^k > 0\): agent \(i\) is a **supplier** in market \(k\).
+  - \(g_i^k < 0\): agent \(i\) is a **buyer** in market \(k\).
+- Market **imbalance** in market \(k\) at time \((h,d,y)\):
+
+  \[
+  r_k(h,d,y) = \sum_{i \in \mathcal{I}_k} g_i^k(h,d,y) - D_k(h,d,y),
+  \]
+
+  where \(D_k\) is exogenous demand (for EP only; 0 otherwise).
+
+The **aggregate imbalance norm** used by ADMM is:
+
+\[
+\|r_k\|_2 = \left( \sum_{h,d,y} r_k(h,d,y)^2 \right)^{1/2}.
+\]
+
+### 0.4 Units
+
+- Electricity: MWh.
+- Electricity GC: MWh\(_\text{GC}\) (1 certificate per renewable MWh).
+- Hydrogen: MWh\(_\text{H2}\) (or equivalent energy-based unit).
+- Hydrogen GC: MWh\(_\text{GC,H2}\).
+- End product (EP): MWh\(_\text{EP}\) or t\(_\text{EP}\) (consistent within the model, governed by `Alpha`).
+
+All monetary values are in **EUR** (e.g. €/MWh, €/t, €/MW-year).
+
+### 0.5 Risk Parameters and CVaR
+
+- \( \gamma_i \in [0,1] \): risk weight for agent \(i\).
+  - \( \gamma_i = 1 \): risk-neutral (expected loss only).
+  - \( 0 < \gamma_i < 1 \): risk-averse (mix of expectation and CVaR).
+- \( \beta \in (0,1) \): CVaR confidence level (e.g. 0.95).
+- \( \alpha_i \): Value-at-Risk (VaR) proxy for agent \(i\).
+- \( u_i(y) \): shortfall above VaR for agent \(i\) in year \(y\).
+- \( \mathrm{CVaR}_i \): Conditional Value-at-Risk for agent \(i\).
+
+The **agent-level CVaR** of loss is, in continuous notation:
+
+\[
+\mathrm{CVaR}_i = \min_{\alpha_i} \left[ \alpha_i + \frac{1}{1-\beta} \mathbb{E}[(\ell_i - \alpha_i)_+] \right],
+\]
+
+where \(\ell_i\) is the random loss and \((x)_+ = \max\{x,0\}\). The code implements the usual linearised form with \(\alpha_i, u_i(y)\) and empirical probabilities \(P_y\).
+
+The **social planner** uses a single \(\gamma\) and a single social CVaR on aggregate welfare (see §6.4).
 
 ---
 
@@ -112,6 +186,28 @@ where:
 - `γ_i` is a **per-agent risk weight** (`γ=1` → risk-neutral, `γ<1` → risk-averse). Non-trivial CVaR is used only for VRES, electrolyzer, and green offtaker.
 - `CVaR_i(loss_i)` is an agent-specific Conditional Value-at-Risk term constructed with auxiliary variables `(α_i, u_i[jy])` over yearly scenarios `jy ∈ JY`, at confidence level `β`.
 
+More explicitly:
+
+- The **deterministic, expected-loss term**
+
+  \[
+  \sum_{h,d,y} W_{d,y}\,\bigl(\mathrm{cost}_i(h,d,y) - \mathrm{rev}_i(h,d,y)\bigr)
+  \]
+
+  contains fuel/operational costs, certificate purchases, and investment annuities on the **cost** side, and all market revenues (price × net position) on the **revenue** side.
+
+- The **risk term** \( \mathrm{CVaR}_i(\mathrm{loss}_i) \) captures the tail of the loss distribution over years \(y\). It is only active when \( \gamma_i < 1 \); for \( \gamma_i=1 \) the CVaR part drops out and the agent becomes risk-neutral.
+
+- The **quadratic ADMM penalties**
+
+  \[
+  \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\,\bigl(g_i^k(h,d,y)-\bar g_i^k(h,d,y)\bigr)^2
+  \]
+
+  ensure that, in equilibrium, each agent’s net position \(g_i^k\) coincides with a consensus allocation \(\bar g_i^k\) that satisfies market-clearing. Economically, this can be read as a **soft enforcement of market balance**: deviating from the consensus quantity becomes increasingly expensive as \(\rho_k\) grows.
+
+The ADMM part is purely **algorithmic**: it does not change the underlying economic problem. At convergence, all net positions are equal to their consensus copies and all quadratic penalties are zero, so the solution coincides with that of the risk-adjusted competitive equilibrium defined by the first two terms.
+
 #### CVaR formulation (per agent)
 
 For each risk-averse agent (VRES, electrolyzer, green offtaker), CVaR is linearised via:
@@ -173,6 +269,12 @@ min  γ × [ Σ_y loss_G[y] + F_cap × Σ_y cap_EP[y] ]
 where loss_G[y] = Σ_{h,d} W × ( λ_H2×h2_in + λ_H2GC×gc_h2 + proc×ep − λ_EP×ep )
 ```
 
+These templates are implemented in the `build_*_agent.jl` files as follows:
+
+- All **price-dependent terms** (e.g. \( \lambda_\text{elec}\,g \), \( \lambda_\text{H2}\,h2\_in \)) are expressed via JuMP `@expression` blocks whose coefficients are updated each ADMM iteration.
+- The **capacity-investment linkage** is enforced via yearly variables (e.g. `cap_VRES[y]`, `inv_VRES[y]`) and simple linear relationships: investment in year \(y\) expands the capacity available in all hours of that year.
+- For risk-averse agents, the **loss-per-year** expressions `loss_VRES[y]`, `loss_H2[y]`, `loss_G[y]` are recomputed in every ADMM iteration with the *current* prices, so that the CVaR always measures risk with respect to the most recent price trajectory.
+
 ### 4.2 Key Constraints
 
 | Constraint | Equation | Scope | Rationale |
@@ -215,6 +317,68 @@ social_welfare[y] = Σ_i  welfare_per_year_i[y]      (includes quadratic consume
 
 Market-clearing constraints enforce supply = demand. The single social CVaR applies to the full aggregate welfare (including consumer utility), ensuring the risk-averse planner accounts for all welfare components when assessing tail risk.
 
+### 4.4 Risk Aversion and Risk-Neutral Consistency
+
+This section summarises the **risk-aversion architecture** and explains precisely when the **ADMM equilibrium** coincides with the **social planner** solution.
+
+#### 4.4.1 Agent-level vs system-level risk
+
+- In the **ADMM (market exposure) case**:
+  - A subset of agents (VRES, electrolyzer, green offtaker) can be risk-averse with their own parameters \((\gamma_i,\beta_i)\).
+  - Each such agent minimises a **private risk-adjusted loss**:
+
+    \[
+    \gamma_i\,\mathbb{E}[\ell_i] + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i),
+    \]
+
+    subject to its own technological constraints and the ADMM penalties.
+  - Risk is therefore **heterogeneous and decentralised**: different agents may have different attitudes to risk; financial transfers between agents do not directly enter the risk measure.
+
+- In the **social planner case**:
+  - There is a **single** system-wide risk parameter \(\gamma\) and confidence level \(\beta\).
+  - The planner maximises a **single risk-adjusted social welfare**:
+
+    \[
+    \gamma\,\mathbb{E}\bigl[SW\bigr] - (1-\gamma)\,\mathrm{CVaR}_\text{social}(-SW),
+    \]
+
+    where \(SW\) is aggregate welfare (including consumer utility and production/investment costs).
+  - Risk is therefore **centralised**: society as a whole is risk-averse with respect to aggregate welfare, rather than each agent separately.
+
+These two formulations represent different normative assumptions about **who bears risk** and **how it is shared**. The ADMM run with per-agent CVaR corresponds to a market in which agents individually care about their own tail losses; the social planner corresponds to a benevolent regulator who cares about systemic tail outcomes.
+
+#### 4.4.2 Risk-neutral benchmark and equivalence
+
+When both formulations are made **risk-neutral**, they collapse to the same underlying convex optimisation problem:
+
+- In ADMM:
+  - Set \( \gamma_i = 1 \) for all agents that can be risk-averse (VRES, electrolyzer, green offtaker).
+  - This eliminates all per-agent CVaR terms from their objectives.
+
+- In the social planner:
+  - Set the planner-wide risk weight \( \gamma = 1 \).
+  - This eliminates \(\mathrm{CVaR}_\text{social}\) from the planner’s objective, so the model becomes a quadratic (but not quadratically constrained) welfare maximisation with standard consumer surplus and producer surplus terms.
+
+Under these settings:
+
+1. **Agent technology and preferences** are identical in both formulations:
+   - The same constraints on capacities, conversion efficiencies, and mandates apply.
+   - The same quadratic utility and cost functions are used.
+2. **Market-clearing conditions** are enforced:
+   - In ADMM, via the augmented Lagrangian and convergence of primal/dual residuals.
+   - In the planner, via explicit equality constraints.
+3. **Welfare decomposition** coincides with the sum of individual profit/utility functions.
+
+As a result, in the **limit of exact ADMM convergence** (all markets have residuals within tolerance, and ρ updates have stabilised), the ADMM allocation coincides with the planner’s allocation, and the recovered equilibrium prices coincide with the planner’s dual variables up to numerical tolerance. This is the formal sense in which the **risk-neutral social planner and the risk-neutral ADMM equilibrium should produce the same result**.
+
+In practice, small discrepancies can arise from:
+
+- Finite ADMM stopping tolerance (non-zero residuals),
+- Different initialisations of prices and ρ,
+- Numerical tolerances in the solver (Gurobi) and the QP/QCP/LP transformation.
+
+These differences are typically negligible for economic interpretation and are visible in the diagnostic plots and CSVs.
+
 ---
 
 ## 5. ADMM Algorithm
@@ -237,12 +401,26 @@ Each ADMM iteration `k` proceeds as follows:
    - **Primal residual** = `‖imbalance‖₂` (L2 norm; measures market-clearing violation).
    - **Dual residual** = `‖ρ × Δ(consensus deviation)‖₂` (measures position stability).
 
-4. **Update prices**: `λ^{k+1} = λ^k − ρ × imbalance^k` (gradient ascent on the dual).
+   More precisely, for each market \(k\):
 
-5. **Update ρ** (Boyd rule with three regimes): For each market independently:
-   - **Regime 1 (imbalance rp vs rd)**: If `primal > 2 × dual` → increase `ρ` (under-penalised). If `dual > 2 × primal` → decrease `ρ` (over-penalised).
-   - **Regime 2 (far from tolerance, rp ≈ rd)**: If both residuals are much larger than the market tolerance but comparable, apply a **gentle multiplicative increase** to ρ to avoid stalling with large residuals.
-   - **Regime 3 (near-convergence stability)**: If both residuals are within a modest multiple of tolerance and comparable, **freeze ρ** (keep it fixed) to prevent small oscillations near the optimum from being amplified by further ρ changes.
+   - Let \( r_k^t(h,d,y) \) be the **market imbalance** at iteration \(t\).
+   - Let \( \Delta z_k^t(h,d,y) \) be the **change in consensus deviation** (difference between successive consensus copies) at iteration \(t\).
+
+   Then:
+
+   \[
+   \|r_k^t\|_2 = \Bigl(\sum_{h,d,y} r_k^t(h,d,y)^2\Bigr)^{1/2},\qquad
+   \|s_k^t\|_2 = \rho_k^t\,\Bigl(\sum_{h,d,y} (\Delta z_k^t(h,d,y))^2\Bigr)^{1/2}.
+   \]
+
+   The primal residual \(\|r_k^t\|_2\) measures **how far the market is from clearing**, while the dual residual \(\|s_k^t\|_2\) measures **how stable the agents’ net positions are** from one iteration to the next.
+
+4. **Update prices**: `λ^{k+1} = λ^k − η_k × ρ_k × imbalance^k` (gradient ascent on the dual with **residual-aware step size** `η_k ∈ (0,1]` per market). Far from convergence, `η_k = 1` and we recover the standard update. Near convergence (when both primal and dual residuals are within a modest multiple of tolerance), `η_k` is reduced (e.g. 0.3) to damp oscillations in tightly coupled markets while keeping `ρ_k` fixed.
+
+5. **Update ρ** (history-aware multi-regime rule): For each market independently:
+   - **Regime 1 (rp vs rd imbalanced)**: If `primal > balance_threshold × dual` → increase `ρ` (under-penalised). If `dual > balance_threshold × primal` → decrease `ρ` (over-penalised). Increases are applied only when they have not worsened the recent residual history.
+   - **Regime 2 (far from tolerance, rp ≈ rd)**: If both residuals are much larger than the market tolerance but comparable, apply a **gentle multiplicative increase** to ρ (again, only if the recent residual history has not deteriorated) to avoid stalling with large residuals.
+   - **Regime 3 (near-convergence stability with hysteresis)**: If both residuals are within a modest multiple of tolerance and close to the **best residuals seen so far** for that market, **freeze ρ permanently**. From that point on, ADMM behaves like fixed-ρ ADMM in that market, preventing later ρ updates from kicking the algorithm out of a good basin and eliminating small oscillations around the optimum.
 
 6. **Convergence check**: All five markets must have both primal and dual residuals below their tolerance.
 
@@ -258,20 +436,99 @@ The `(n+1)` denominator comes from the sharing ADMM formulation, which introduce
 
 ### 5.3 Adaptive Penalty (ρ)
 
-Per-market parameters (see `update_rho.jl`):
+The adaptive penalty mechanism is implemented in `update_rho.jl` and is designed as a **state-of-the-art, history-aware extension** of the classic Boyd rule. It combines:
+
+1. **Per-market tuning** (different growth caps and factors per market),
+2. **Three behavioural regimes** (balance, gentle push, stability),
+3. **Hysteresis and residual-history safeguards** that prevent the algorithm from leaving a good basin once it has found one and avoid harmful ρ increases.
+
+Per-market parameters:
 
 | Market | Increase factor | Decrease factor | ρ_max | Notes |
 |---|---|---|---|---|
-| `elec`, `elec_GC` | 1.10 | 1/1.10 | 100,000 | Loosely coupled electricity/GC markets; faster adaptation is safe. |
-| `H2` | 1.01 | 1/1.01 | 100 | Tightly coupled to electricity and EP; gentle updates reduce oscillation. |
-| `H2_GC` | 1.05 | 1/1.05 | 100 | Hourly GC market but thin volumes; moderate adaptation. |
-| `EP` | 1.01 | 1/1.01 | 100 | Stiff EP market; slow adaptation avoids limit cycles when capacities/investments bind. |
+| `elec`, `elec_GC` | 1.05 | 1/1.05 | 5,000 | Dominant, tightly coupled electricity/GC markets; moderate adaptation with a low cap avoids ill-conditioning while still correcting imbalances quickly. |
+| `H2` | 1.01 | 1/1.01 | 100 | Strongly coupled to electricity and EP; very gentle updates minimise oscillation when H₂ capacity/investment kinks are active. |
+| `H2_GC` | 1.05 | 1/1.05 | 100 | Hourly GC market but thin volumes; moderate adaptation with a conservative cap. |
+| `EP` | 1.01 | 1/1.01 | 100 | Stiff EP market; slow adaptation avoids limit cycles when EP capacities/investments bind. |
 
-Near convergence, ρ can become **fixed per market** (Regime 3) so ADMM behaves like fixed-ρ ADMM around the solution.
+In addition to these static parameters, the algorithm maintains:
 
-### 5.4 Convergence Tolerances
+- **Best residuals per market**: `best_primal[key]`, `best_dual[key]` track the smallest primal and dual residuals seen so far. They serve as a *hysteresis anchor* for deciding when a market has truly entered a near-solution region.
+- **A short residual history per market**: `R_hist[key]` stores a short window of `R = rp + rd`. Before increasing ρ, the rule checks whether residuals have improved (or at least not deteriorated) over this window; if they have worsened, the increase is skipped.
+- **Per-market freeze flags**: once a market hits residuals that are both within a modest multiple of tolerance and close to its best-ever residuals, its `ρ` is frozen permanently. Subsequent iterations keep ρ fixed for that market.
 
-All markets currently use the same base tolerance `epsilon` from `data.yaml` (initialised in `define_results.jl`). Residuals are L2 norms over all time slots; when interpreting them, divide by √(nTimesteps × nReprDays × nYears) to get an approximate per-slot scale.
+This combination yields a robust behaviour:
+
+- **Far from tolerance**: ρ can adapt aggressively enough to overcome stalling and large imbalances.
+- **Near the solution**: ρ becomes effectively fixed and the algorithm behaves like a stable fixed-ρ ADMM, eliminating the classic oscillatory patterns observed with naive adaptive schemes.
+
+In pseudo-code, the **per-market update** at iteration \(t\) can be summarised as:
+
+```text
+for each market k:
+    compute rp = ||r_k^t||_2, rd = ||s_k^t||_2
+    update best_primal[k], best_dual[k], R_hist[k]
+
+    if rho_frozen[k]:
+        continue   # Regime 3: fixed-ρ near convergence
+
+    if rp <= c_freeze * ε_pri_k  and  rd <= c_freeze * ε_dual_k
+       and rp, rd close to best_primal[k], best_dual[k]:
+        rho_frozen[k] = true     # enter permanent fixed-ρ regime
+        continue
+
+    if rp > balance_threshold * rd or rd > balance_threshold * rp:
+        # Regime 1: classic Boyd-like rule with safeguards
+        if rp > balance_threshold * rd and residual_history_improved(k):
+            ρ_k^{t+1} = min(ρ_max[k], ρ_inc[k] * ρ_k^t)
+        elseif rd > balance_threshold * rp and residual_history_improved(k):
+            ρ_k^{t+1} = ρ_dec[k] * ρ_k^t
+        else
+            ρ_k^{t+1} = ρ_k^t
+    elseif rp, rd >> ε_pri_k, ε_dual_k and residual_history_improved(k):
+        # Regime 2: gentle push when both residuals are large but balanced
+        ρ_k^{t+1} = min(ρ_max[k], ρ_soft_inc[k] * ρ_k^t)
+    else:
+        ρ_k^{t+1} = ρ_k^t
+```
+
+where:
+
+- `c_freeze` controls how close to tolerance we require residuals to be before freezing ρ,
+- `ρ_inc[k]`, `ρ_dec[k]`, and `ρ_soft_inc[k]` are the multiplicative factors from the table above,
+- `residual_history_improved(k)` checks whether the short history window in `R_hist[k]` has improved (or at least not deteriorated), guarding against **myopic** ρ increases that would worsen convergence.
+
+### 5.4 Convergence Tolerances (Boyd-style)
+
+Instead of a single scalar tolerance, the implementation follows the **absolute + relative** stopping criteria proposed by Boyd et al. (2011) for ADMM. For each market `k` we define:
+
+- Absolute tolerance `ε_abs` (MW-scale), taken from `ADMM.epsilon_abs` in `data.yaml` if present, otherwise from `ADMM.epsilon`.
+- Relative tolerance `ε_rel` (dimensionless), taken from `ADMM.epsilon_rel` in `data.yaml` if present, otherwise `0.0`.
+
+Let:
+
+- `n = nTimesteps × nReprDays × nYears` be the number of time slots in the horizon.
+- `Scale_primal[k]` and `Scale_dual[k]` be fixed reference magnitudes for the primal and dual residuals of market `k`, captured from the first non-zero residual observed for that market (stored in `ADMM["ResidualScale"]`).
+
+Then the per-market primal and dual tolerances are:
+
+```
+ε_pri_k  = ε_abs * sqrt(n) + ε_rel * Scale_primal[k]
+ε_dual_k = ε_abs * sqrt(n) + ε_rel * Scale_dual[k]
+```
+
+The stopping rule is:
+
+- **Primal**: for every market `k`, the L2 norm of the imbalance vector must satisfy `‖r_k‖₂ ≤ ε_pri_k`.
+- **Dual**: for every market `k`, the L2 norm of the change in consensus deviation must satisfy `‖s_k‖₂ ≤ ε_dual_k`.
+
+All five markets must simultaneously satisfy both conditions for convergence to be declared.
+
+This has three advantages over a single scalar `epsilon`:
+
+1. **Scale awareness**: Markets with large typical flows (e.g. electricity) naturally get larger absolute tolerances than thin markets (e.g. GC), while still using a common `(ε_abs, ε_rel)` pair.
+2. **Robustness to refinement**: If the temporal resolution or the number of representative days changes (n increases), the `sqrt(n)` factor keeps the per-slot accuracy comparable.
+3. **Numerical realism**: Once residuals are small relative to the problem’s own scale (`Scale_*[k]`), the criteria do not force the algorithm to chase tiny numerical oscillations; they recognise that the solution is “good enough” in the sense of Boyd et al.
 
 ### 5.5 Sign Convention
 

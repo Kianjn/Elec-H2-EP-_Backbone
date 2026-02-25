@@ -144,13 +144,68 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     #   Primal = L2 norm of market imbalance (how far supply ≠ demand).
     #   Dual   = L2 norm of the change in consensus variable g_bar between
     #            consecutive iterations (how much the "agreed" allocation shifted).
-    # ADMM converges when both residuals fall below the market's Tolerance.
+    # Convergence is checked using Boyd-style absolute + relative tolerances
+    # (see ADMM.jl and DOCUMENTATION.md §5.4).
     ADMM["Residuals"] = Dict(
         "Primal" => Dict("elec" => Float64[], "H2" => Float64[], "elec_GC" => Float64[], "H2_GC" => Float64[], "EP" => Float64[]),
         "Dual"   => Dict("elec" => Float64[], "H2" => Float64[], "elec_GC" => Float64[], "H2_GC" => Float64[], "EP" => Float64[]),
     )
 
-    # Per-market convergence tolerances.
+    # Best (smallest) primal/dual residual seen so far per market; used by
+    # update_rho! to implement hysteresis and freeze ρ once the algorithm has
+    # entered a near-solution region.
+    ADMM["BestResidual"] = Dict(
+        "Primal" => Dict("elec" => Inf, "H2" => Inf, "elec_GC" => Inf, "H2_GC" => Inf, "EP" => Inf),
+        "Dual"   => Dict("elec" => Inf, "H2" => Inf, "elec_GC" => Inf, "H2_GC" => Inf, "EP" => Inf),
+    )
+
+    # Per-market flag indicating that ρ has been frozen permanently; once set
+    # to true, update_rho! stops adapting ρ for that market and ADMM behaves
+    # like fixed-ρ ADMM in the local neighbourhood of the solution.
+    ADMM["ρ_frozen"] = Dict(
+        "elec" => false,
+        "H2" => false,
+        "elec_GC" => false,
+        "H2_GC" => false,
+        "EP" => false,
+    )
+
+    # Short history of residual metrics R = rp + rd per market; update_rho!
+    # uses this to decide whether increasing ρ has been beneficial over the
+    # recent window, and skips harmful increases that would worsen residuals.
+    ADMM["R_hist"] = Dict(
+        "elec"    => Float64[],
+        "H2"      => Float64[],
+        "elec_GC" => Float64[],
+        "H2_GC"   => Float64[],
+        "EP"      => Float64[],
+    )
+
+    # ResidualScale: reference magnitude for primal and dual residuals used in
+    # the Boyd-style absolute + relative stopping criteria. These are set from
+    # the first non-zero residual observed per market and kept fixed for the
+    # rest of the run.
+    ADMM["ResidualScale"] = Dict(
+        "Primal" => Dict("elec" => 0.0, "H2" => 0.0, "elec_GC" => 0.0, "H2_GC" => 0.0, "EP" => 0.0),
+        "Dual"   => Dict("elec" => 0.0, "H2" => 0.0, "elec_GC" => 0.0, "H2_GC" => 0.0, "EP" => 0.0),
+    )
+
+    # Absolute and relative tolerances for the ADMM stopping rule:
+    #   ε_abs: base absolute tolerance (MW-scale), taken from epsilon if no
+    #          dedicated epsilon_abs is given in data.yaml.
+    #   ε_rel: relative tolerance (dimensionless), optional; defaults to 0.
+    # Combined per Boyd et al. as:
+    #   ε_pri = ε_abs * sqrt(n) + ε_rel * Scale_primal
+    #   ε_dual = ε_abs * sqrt(n) + ε_rel * Scale_dual
+    # where n is the number of time slots and Scale_* are the entries of
+    # ResidualScale above.
+    eps_abs = get(admm_data, "epsilon_abs", get(admm_data, "epsilon", 1.0))
+    eps_rel = get(admm_data, "epsilon_rel", 0.0)
+    ADMM["EpsilonAbs"] = eps_abs
+    ADMM["EpsilonRel"] = eps_rel
+
+    # Legacy per-market convergence tolerances (kept for diagnostics; the
+    # actual stopping rule uses EpsilonAbs/EpsilonRel and ResidualScale).
     base_tol = get(admm_data, "epsilon", 1.0)
     ADMM["Tolerance"] = Dict(
         "elec"    => base_tol,

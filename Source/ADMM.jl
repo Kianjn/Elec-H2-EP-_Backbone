@@ -103,11 +103,35 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         # standard ADMM stopping criterion (Boyd et al., 2011).
         # ------------------------------------------------------------------
         @timeit TO "Primal residuals" begin
-            push!(ADMM_state["Residuals"]["Primal"]["elec"],    sqrt(sum(ADMM_state["Imbalances"]["elec"][end].^2)))
-            push!(ADMM_state["Residuals"]["Primal"]["H2"],      sqrt(sum(ADMM_state["Imbalances"]["H2"][end].^2)))
-            push!(ADMM_state["Residuals"]["Primal"]["elec_GC"], sqrt(sum(ADMM_state["Imbalances"]["elec_GC"][end].^2)))
-            push!(ADMM_state["Residuals"]["Primal"]["H2_GC"],   sqrt(sum(ADMM_state["Imbalances"]["H2_GC"][end].^2)))
-            push!(ADMM_state["Residuals"]["Primal"]["EP"],      sqrt(sum(ADMM_state["Imbalances"]["EP"][end].^2)))
+            rp_elec    = sqrt(sum(ADMM_state["Imbalances"]["elec"][end].^2))
+            rp_H2      = sqrt(sum(ADMM_state["Imbalances"]["H2"][end].^2))
+            rp_elec_GC = sqrt(sum(ADMM_state["Imbalances"]["elec_GC"][end].^2))
+            rp_H2_GC   = sqrt(sum(ADMM_state["Imbalances"]["H2_GC"][end].^2))
+            rp_EP      = sqrt(sum(ADMM_state["Imbalances"]["EP"][end].^2))
+            push!(ADMM_state["Residuals"]["Primal"]["elec"],    rp_elec)
+            push!(ADMM_state["Residuals"]["Primal"]["H2"],      rp_H2)
+            push!(ADMM_state["Residuals"]["Primal"]["elec_GC"], rp_elec_GC)
+            push!(ADMM_state["Residuals"]["Primal"]["H2_GC"],   rp_H2_GC)
+            push!(ADMM_state["Residuals"]["Primal"]["EP"],      rp_EP)
+
+            # Initialise per-market primal residual scales on first non-zero
+            # observation; used in Boyd-style absolute + relative tolerances.
+            scales_pr = ADMM_state["ResidualScale"]["Primal"]
+            if scales_pr["elec"] == 0.0 && rp_elec > 0.0
+                scales_pr["elec"] = rp_elec
+            end
+            if scales_pr["H2"] == 0.0 && rp_H2 > 0.0
+                scales_pr["H2"] = rp_H2
+            end
+            if scales_pr["elec_GC"] == 0.0 && rp_elec_GC > 0.0
+                scales_pr["elec_GC"] = rp_elec_GC
+            end
+            if scales_pr["H2_GC"] == 0.0 && rp_H2_GC > 0.0
+                scales_pr["H2_GC"] = rp_H2_GC
+            end
+            if scales_pr["EP"] == 0.0 && rp_EP > 0.0
+                scales_pr["EP"] = rp_EP
+            end
         end
 
         # ------------------------------------------------------------------
@@ -173,6 +197,30 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
                     dual_EP += sum((ADMM_state["ρ"]["EP"][end] .* diff).^2)
                 end
                 push!(ADMM_state["Residuals"]["Dual"]["EP"], sqrt(dual_EP))
+
+                # Initialise per-market dual residual scales on first non-zero
+                # observation; used in Boyd-style absolute + relative tolerances.
+                scales_du = ADMM_state["ResidualScale"]["Dual"]
+                rd_elec    = ADMM_state["Residuals"]["Dual"]["elec"][end]
+                rd_H2      = ADMM_state["Residuals"]["Dual"]["H2"][end]
+                rd_elec_GC = ADMM_state["Residuals"]["Dual"]["elec_GC"][end]
+                rd_H2_GC   = ADMM_state["Residuals"]["Dual"]["H2_GC"][end]
+                rd_EP      = ADMM_state["Residuals"]["Dual"]["EP"][end]
+                if scales_du["elec"] == 0.0 && rd_elec < Inf
+                    scales_du["elec"] = rd_elec
+                end
+                if scales_du["H2"] == 0.0 && rd_H2 < Inf
+                    scales_du["H2"] = rd_H2
+                end
+                if scales_du["elec_GC"] == 0.0 && rd_elec_GC < Inf
+                    scales_du["elec_GC"] = rd_elec_GC
+                end
+                if scales_du["H2_GC"] == 0.0 && rd_H2_GC < Inf
+                    scales_du["H2_GC"] = rd_H2_GC
+                end
+                if scales_du["EP"] == 0.0 && rd_EP < Inf
+                    scales_du["EP"] = rd_EP
+                end
             else
                 # First iteration: no previous iterate exists, so dual residuals
                 # are undefined. Set to Inf to prevent premature convergence.
@@ -185,19 +233,25 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         end
 
         # ------------------------------------------------------------------
-        # Price (dual variable) update: λ_new = λ_old − ρ · imbalance.
-        # Standard ADMM dual variable update (gradient ascent on the
-        # Lagrangian dual with step size ρ).
+        # Price (dual variable) update: λ_new = λ_old − η · ρ · imbalance.
+        # Standard ADMM dual variable update with a per-market, iteration-
+        # dependent step-size factor η ∈ (0,1], derived from current residuals.
         #   • When supply > demand (positive imbalance) → price decreases.
         #   • When demand > supply (negative imbalance) → price increases.
-        # NOTE: Over-relaxation (α > 1) was tested and caused divergence
-        # in this tightly-coupled multi-market problem.  Standard update
-        # (α = 1) is used instead.
+        # Far from convergence, η = 1 so we recover the usual update. Near
+        # convergence (small primal/dual residuals), η is reduced to damp
+        # oscillations in tightly coupled markets while ρ remains fixed.
         # ------------------------------------------------------------------
         @timeit TO "Update prices" begin
             for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+                rp = ADMM_state["Residuals"]["Primal"][mkt][end]
+                rd = ADMM_state["Residuals"]["Dual"][mkt][end]
+                tol = ADMM_state["Tolerance"][mkt]
+                base = max(rp, rd)
+                mid_resid_factor = 2.0
+                η = base <= mid_resid_factor * tol ? 0.3 : 1.0
                 push!(results["λ"][mkt],
-                      results["λ"][mkt][end] .- ADMM_state["ρ"][mkt][end] .* ADMM_state["Imbalances"][mkt][end])
+                      results["λ"][mkt][end] .- η .* ADMM_state["ρ"][mkt][end] .* ADMM_state["Imbalances"][mkt][end])
             end
             # H2_GC price floor: the electrolyzer VOLUNTARILY issues green
             # certificates — at price < 0 no rational producer would issue,
@@ -227,12 +281,24 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         set_description(iterations, "")
 
         # ------------------------------------------------------------------
-        # Convergence check (standard ADMM stopping criterion, Boyd et al., 2011).
+        # Convergence check: Boyd-style absolute + relative criteria.
+        #
+        # For each market k we compute primal and dual tolerances:
+        #
+        #   ε_pri_k  = ε_abs * sqrt(n) + ε_rel * Scale_primal_k
+        #   ε_dual_k = ε_abs * sqrt(n) + ε_rel * Scale_dual_k
+        #
+        # where n is the number of time slots in the horizon and Scale_*_k are
+        # fixed reference magnitudes captured from the first non-zero residual
+        # (see define_results.jl). This mirrors the stopping rule in Boyd et
+        # al. (2011), making the criteria scale-aware and robust across
+        # markets with very different quantity ranges.
+        #
         # ALL five markets must have BOTH primal AND dual residuals below
-        # their market-specific tolerance. If any single residual exceeds
-        # its tolerance, the algorithm continues iterating. This ensures
-        # that every market has simultaneously cleared (primal) and that
-        # agent positions have stabilized (dual) before we declare convergence.
+        # their respective tolerance. If any single residual exceeds its
+        # tolerance, the algorithm continues iterating. This ensures that
+        # every market has simultaneously cleared (primal) and that agent
+        # positions have stabilised (dual) before we declare convergence.
         #
         # IMPORTANT: skip convergence check for the first min_iter iterations.
         # In early iterations, residuals can be spuriously small (agents
@@ -241,12 +307,28 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         # ------------------------------------------------------------------
         min_iter = get(data["ADMM"], "min_iter", 500)
         if iter >= min_iter
-            tol = ADMM_state["Tolerance"]
-            if (ADMM_state["Residuals"]["Primal"]["elec"][end] <= tol["elec"] && ADMM_state["Residuals"]["Dual"]["elec"][end] <= tol["elec"] &&
-                ADMM_state["Residuals"]["Primal"]["H2"][end] <= tol["H2"] && ADMM_state["Residuals"]["Dual"]["H2"][end] <= tol["H2"] &&
-                ADMM_state["Residuals"]["Primal"]["elec_GC"][end] <= tol["elec_GC"] && ADMM_state["Residuals"]["Dual"]["elec_GC"][end] <= tol["elec_GC"] &&
-                ADMM_state["Residuals"]["Primal"]["H2_GC"][end] <= tol["H2_GC"] && ADMM_state["Residuals"]["Dual"]["H2_GC"][end] <= tol["H2_GC"] &&
-                ADMM_state["Residuals"]["Primal"]["EP"][end] <= tol["EP"] && ADMM_state["Residuals"]["Dual"]["EP"][end] <= tol["EP"])
+            eps_abs = ADMM_state["EpsilonAbs"]
+            eps_rel = ADMM_state["EpsilonRel"]
+            n_slots = n_ts * n_rd * n_yr
+            sqrt_n = sqrt(n_slots)
+            scale_pr = ADMM_state["ResidualScale"]["Primal"]
+            scale_du = ADMM_state["ResidualScale"]["Dual"]
+
+            function within_tol(key::String)
+                rp = ADMM_state["Residuals"]["Primal"][key][end]
+                rd = ADMM_state["Residuals"]["Dual"][key][end]
+                sp = max(scale_pr[key], 1.0)
+                sd = max(scale_du[key], 1.0)
+                eps_pr = eps_abs * sqrt_n + eps_rel * sp
+                eps_du = eps_abs * sqrt_n + eps_rel * sd
+                return (rp <= eps_pr) && (rd <= eps_du)
+            end
+
+            if (within_tol("elec") &&
+                within_tol("H2") &&
+                within_tol("elec_GC") &&
+                within_tol("H2_GC") &&
+                within_tol("EP"))
                 convergence = 1
             end
         end

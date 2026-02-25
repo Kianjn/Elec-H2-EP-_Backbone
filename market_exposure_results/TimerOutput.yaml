@@ -1,18 +1,18 @@
 ───────────────────────────────────────────────────────────────────────────────
                                       Time                    Allocations      
                              ───────────────────────   ────────────────────────
-      Tot / % measured:           74.5s /  91.2%           10.6GiB /  98.0%    
+      Tot / % measured:           11.1s /  48.1%           2.27GiB /  51.4%    
 
 Section              ncalls     time    %tot     avg     alloc    %tot      avg
 ───────────────────────────────────────────────────────────────────────────────
-Solve agent           8.00k    61.0s   89.9%  7.63ms   8.97GiB   86.7%  1.15MiB
-Query results         8.00k    4.39s    6.5%   549μs   1.09GiB   10.5%   143KiB
-Dual residuals        1.00k    1.35s    2.0%  1.35ms    196MiB    1.8%   200KiB
-Compute imbalances    1.00k    496ms    0.7%   496μs   50.3MiB    0.5%  51.5KiB
-Update ADMM params    8.00k    465ms    0.7%  58.2μs   25.9MiB    0.2%  3.31KiB
-Primal residuals      1.00k   96.5ms    0.1%  96.5μs   9.35MiB    0.1%  9.58KiB
-Update ρ              1.00k   36.3ms    0.1%  36.3μs    974KiB    0.0%     997B
-Update prices         1.00k   31.0ms    0.0%  31.0μs   8.65MiB    0.1%  8.86KiB
-Imbalance means       1.00k   15.2ms    0.0%  15.2μs    200KiB    0.0%     205B
-Price means           1.00k   10.3ms    0.0%  10.3μs    199KiB    0.0%     204B
+Solve agent             496    2.43s   45.3%  4.89ms    806MiB   67.5%  1.62MiB
+Dual residuals           62    971ms   18.1%  15.7ms    113MiB    9.5%  1.82MiB
+Compute imbalances       62    631ms   11.8%  10.2ms   63.4MiB    5.3%  1.02MiB
+Query results           496    483ms    9.0%   973μs    125MiB   10.4%   257KiB
+Update prices            62    311ms    5.8%  5.02ms   26.7MiB    2.2%   441KiB
+Update ADMM params      496    292ms    5.5%   589μs   31.6MiB    2.6%  65.2KiB
+Primal residuals         62    188ms    3.5%  3.03ms   22.2MiB    1.9%   367KiB
+Imbalance means          62   38.9ms    0.7%   627μs   5.29MiB    0.4%  87.4KiB
+Update ρ                 62   11.5ms    0.2%   186μs    586KiB    0.0%  9.45KiB
+Price means              62    310μs    0.0%  5.00μs   24.1KiB    0.0%     398B
 ───────────────────────────────────────────────────────────────────────────────

@@ -76,10 +76,10 @@ function define_common_parameters!(m::String, mod::Model, data::Dict, ts::Dict, 
     # overridden in data.yaml and use P in CVaR risk terms for green agents.
     P = ones(n_years) ./ n_years
     mod.ext[:parameters][:P] = P
-    # γ (gamma): per-agent risk weight in the objective. γ=0 gives a strictly
-    #   risk-neutral agent; γ>0 scales the CVaR(loss) term for agents that
-    #   implement risk aversion (currently only VRES, electrolyzer, and
-    #   GreenOfftaker read and use γ explicitly).
+    # γ (gamma): per-agent risk weight in the objective. γ=1 gives a strictly
+    #   risk-neutral agent; γ<1 increases the weight on the CVaR(loss) term for
+    #   agents that implement risk aversion (currently only VRES, electrolyzer,
+    #   and GreenOfftaker read and use γ explicitly).
     # β (beta): CVaR confidence level τ (e.g. 0.95 = worst 5% of scenarios).
     # All agents receive γ, β here for convenience; build_* files decide
     # whether to actually use them in the objective.

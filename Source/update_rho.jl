@@ -51,11 +51,31 @@ function update_rho!(ADMM_state::Dict, iter::Int)
         rd = ADMM_state["Residuals"]["Dual"][key][end]
         ρ  = ADMM_state["ρ"][key][end]
 
+        # Update best-seen residuals (hysteresis anchor) and residual history.
+        best_pr = ADMM_state["BestResidual"]["Primal"][key]
+        best_du = ADMM_state["BestResidual"]["Dual"][key]
+        if rp < best_pr
+            ADMM_state["BestResidual"]["Primal"][key] = rp
+            best_pr = rp
+        end
+        if rd < best_du
+            ADMM_state["BestResidual"]["Dual"][key] = rd
+            best_du = rd
+        end
+        R = rp + rd
+        push!(ADMM_state["R_hist"][key], R)
+
+        # If ρ has been frozen for this market, keep it fixed forever.
+        if ADMM_state["ρ_frozen"][key]
+            push!(ADMM_state["ρ"][key], ρ)
+            continue
+        end
+
         # Per-market parameters
         if key in ("elec", "elec_GC")
-            inc_factor = 1.10
-            dec_factor = 1.0 / 1.10
-            ρ_max = 100_000.0
+            inc_factor = 1.05
+            dec_factor = 1.0 / 1.05
+            ρ_max = 5_000.0
         elseif key == "H2_GC"
             # H2_GC is hourly but still a thin certificate market.
             # Moderate adaptation avoids destabilizing the tightly-coupled
@@ -73,19 +93,38 @@ function update_rho!(ADMM_state::Dict, iter::Int)
         market_tol = get(ADMM_state["Tolerance"], key, 1.0)
         # When rp and rd differ by more than this factor, we are clearly in
         # regime (1) "normal Boyd updates".
-        balance_threshold = 2.0
+        balance_threshold = 1.2
         # When BOTH rp and rd are below this multiple of tol, we consider
-        # the market to be in the near-convergence stability zone and fix ρ
-        # (regime (3)).
-        mid_resid_factor = 3.0
+        # the market to be in the near-convergence stability zone.
+        mid_resid_factor = 2.0
         # When BOTH rp and rd are above this multiple of tol, and roughly
         # balanced, we apply the gentle push (regime (2)).
-        high_resid_factor = 10.0
+        high_resid_factor = 2.0
+
+        # Window length and tolerance for deciding whether increasing ρ has
+        # recently helped or hurt residuals.
+        window_len = 5
+        improve_tol = 1.05
 
         # === Regime (1): normal Boyd updates when rp and rd are imbalanced ===
         if rp > balance_threshold * rd
-            # Primal >> dual: increase ρ to enforce feasibility more strongly.
-            push!(ADMM_state["ρ"][key], min(ρ_max, inc_factor * ρ))
+            # Primal >> dual: increase ρ to enforce feasibility more strongly,
+            # but only if doing so has not been worsening residuals over the
+            # recent history window.
+            can_increase = true
+            R_hist = ADMM_state["R_hist"][key]
+            if length(R_hist) >= window_len
+                R_now = R_hist[end]
+                R_past = R_hist[end - window_len + 1]
+                if R_now > improve_tol * R_past
+                    can_increase = false
+                end
+            end
+            if can_increase
+                push!(ADMM_state["ρ"][key], min(ρ_max, inc_factor * ρ))
+            else
+                push!(ADMM_state["ρ"][key], ρ)
+            end
         elseif rd > balance_threshold * rp
             # Dual >> primal: decrease ρ to avoid overshooting.
             push!(ADMM_state["ρ"][key], max(1e-4, dec_factor * ρ))
@@ -93,18 +132,35 @@ function update_rho!(ADMM_state::Dict, iter::Int)
             # rp and rd are of comparable magnitude.
             if rp <= mid_resid_factor * market_tol && rd <= mid_resid_factor * market_tol
                 # === Regime (3): near-convergence — fix ρ for stability ===
-                # Once BOTH residuals are within a modest multiple of tol, we stop
-                # adapting ρ for this market. This prevents small oscillations in
-                # tight, kinked problems (e.g. with investment and capacity) from
-                # being amplified by continual ρ changes.
+                # Once BOTH residuals are within a modest multiple of tol and
+                # close to the best residuals observed so far, we freeze ρ for
+                # this market permanently. This hysteresis prevents later
+                # updates from kicking the algorithm out of a good basin.
+                close_to_best = (rp <= improve_tol * best_pr) && (rd <= improve_tol * best_du)
+                if close_to_best
+                    ADMM_state["ρ_frozen"][key] = true
+                end
                 push!(ADMM_state["ρ"][key], ρ)
             elseif rp > high_resid_factor * market_tol && rd > high_resid_factor * market_tol
                 # === Regime (2): far from tol but rp≈rd — gentle push ===
                 # We are clearly far from convergence (both residuals large) but
                 # the classic Boyd rule sees them as "balanced" and would freeze
                 # ρ. To avoid a true stall, we nudge ρ upward only slightly.
-                mild_inc = key in ("H2", "EP") ? 1.01 : 1.02
-                push!(ADMM_state["ρ"][key], min(ρ_max, mild_inc * ρ))
+                mild_inc = 1.01
+                can_increase = true
+                R_hist = ADMM_state["R_hist"][key]
+                if length(R_hist) >= window_len
+                    R_now = R_hist[end]
+                    R_past = R_hist[end - window_len + 1]
+                    if R_now > improve_tol * R_past
+                        can_increase = false
+                    end
+                end
+                if can_increase
+                    push!(ADMM_state["ρ"][key], min(ρ_max, mild_inc * ρ))
+                else
+                    push!(ADMM_state["ρ"][key], ρ)
+                end
             else
                 # Intermediate band: rp≈rd but not too far from tol and not yet
                 # clearly in the near-convergence zone. Keep ρ unchanged so that

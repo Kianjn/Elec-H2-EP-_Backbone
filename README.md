@@ -2,7 +2,15 @@
 
 **Author:** Kian Jafarinejad — PhD Researcher at TU Delft ([K.Jafarinejad@tudelft.nl](mailto:K.Jafarinejad@tudelft.nl))
 
+*A multi-market, multi-agent equilibrium model with endogenous investment, risk aversion, and rigorous convergence diagnostics.*
+
 A multi-agent equilibrium model for coupled **electricity**, **hydrogen**, **green-certificate**, and **end-product** markets, solved via **ADMM** (Alternating Direction Method of Multipliers) with a centralised **social planner** benchmark.
+
+At a high level:
+
+- **Agents** (generators, electrolyzer, offtakers, GC demand) each solve their own optimisation problem.
+- **Markets** (power, hydrogen, certificates, end product) are cleared by **prices** updated iteratively by ADMM.
+- A **social planner** model with a single welfare-maximising objective provides a rigorous benchmark for the decentralised ADMM solution.
 
 ---
 
@@ -12,10 +20,12 @@ A multi-agent equilibrium model for coupled **electricity**, **hydrogen**, **gre
 - [Features](#features)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
+- [Quick Start](#quick-start)
 - [Project Structure](#project-structure)
 - [Configuration](#configuration)
 - [Running the Model](#running-the-model)
 - [Output Files](#output-files)
+- [Visualisation & Analysis](#visualisation--analysis)
 - [How It Works](#how-it-works)
 - [Extending the Model](#extending-the-model)
 - [Troubleshooting](#troubleshooting)
@@ -29,6 +39,8 @@ A multi-agent equilibrium model for coupled **electricity**, **hydrogen**, **gre
 This project simulates a multi-agent energy system where independent agents (generators, consumers, hydrogen producers, offtakers) trade across five interconnected markets. The agents are coordinated through ADMM, a distributed optimisation algorithm that iteratively adjusts prices until all markets clear simultaneously.
 
 A centralized **social planner** benchmark maximises total welfare in a single optimization, providing theoretical equilibrium prices and quantities against which the distributed ADMM solution can be compared.
+
+If you are mainly interested in the **mathematical formulation** and algorithmic details, see `DOCUMENTATION.md` (technical documentation). This `README` focuses on **installation**, **configuration**, and **how to run and interpret** the model.
 
 Both the ADMM and social planner use the **same problem definition** from the `Source/` folder. Changing a constraint or objective in one place automatically propagates to both.
 
@@ -127,6 +139,42 @@ The timeseries CSV must have columns: `Time`, `SOLAR`, `LOAD_E`, `LOAD_H`, `LOAD
 The representative-days CSV must have columns: `periods`, `weights`, `selected_periods`.
 
 ---
+
+## Quick Start
+
+The following minimal sequence should work on a properly configured machine:
+
+1. **Instantiate Julia environment**
+
+   ```bash
+   julia --project=. -e "using Pkg; Pkg.instantiate()"
+   ```
+
+2. **Check that Gurobi is available to Julia**
+
+   ```bash
+   julia --project=. -e "using Gurobi; Gurobi.Env(); println(\"Gurobi OK\")"
+   ```
+
+3. **Run the distributed ADMM simulation**
+
+   ```bash
+   julia --project=. market_exposure.jl
+   ```
+
+4. **Run the social planner benchmark**
+
+   ```bash
+   julia --project=. social_planner.jl
+   ```
+
+5. **Optionally generate figures** (after both runs have completed)
+
+   ```bash
+   python visualization/visualize_results.py
+   ```
+
+For a deeper understanding of what these scripts do internally, see the **How It Works** section below and the full `DOCUMENTATION.md`.
 
 ## Project Structure
 
@@ -261,6 +309,50 @@ After running both scripts, compare `market_exposure_results/Agent_Quantities_Fi
 
 ---
 
+## Visualisation & Analysis
+
+The folder `visualization/` contains a Python script for **side-by-side comparison** of the ADMM market-exposure results and the social planner benchmark:
+
+- **File**: `visualization/visualize_results.py`
+- **Inputs** (expected to exist after running both Julia scripts):
+  - `social_planner_results/Market_Prices.csv`
+  - `social_planner_results/Agent_Summary.csv`
+  - `market_exposure_results/Market_Prices.csv`
+  - `market_exposure_results/Agent_Quantities_Final.csv`
+  - Other diagnostic CSVs in `market_exposure_results/`
+- **Outputs**:
+  - Publication-ready figures in `visualization/figures/` (`.png` and `.pdf`), including:
+    - Price differences (social planner vs ADMM) per market
+    - Quantity comparison per agent
+    - Price evolution over time
+    - ADMM convergence plots (primal/dual residuals)
+    - Market history (price and imbalance)
+    - Price heatmaps (hour-of-day vs representative day)
+
+### Python environment
+
+The script uses standard scientific Python packages:
+
+- `pandas`
+- `numpy`
+- `matplotlib`
+
+You can install them, for example, via:
+
+```bash
+pip install pandas numpy matplotlib
+```
+
+Then run:
+
+```bash
+python visualization/visualize_results.py
+```
+
+For notebook-style use, you can also open the script in an IDE and execute the `# %%` cells interactively.
+
+---
+
 ## How It Works
 
 ### ADMM (Alternating Direction Method of Multipliers)
@@ -269,7 +361,13 @@ Each iteration:
 
 1. **Agent solves**: Each agent independently minimises its cost minus revenue plus an ADMM quadratic penalty that pushes its net position toward a market consensus target.
 2. **Imbalance**: Sum of all agents' net positions in each market. Should be zero at equilibrium.
-3. **Price update**: `λ_new = λ_old − ρ × imbalance` (excess supply → lower price; excess demand → higher price).
+3. **Price update**: prices are updated in the **direction of imbalance**. In compact form for a given market \(k\),
+
+   \[
+   \lambda_{k}^{(t+1)} = \lambda_{k}^{(t)} - \eta_k^{(t)} \,\rho_k^{(t)} \, r_k^{(t)},
+   \]
+
+   where \(r_k^{(t)}\) is the current imbalance (sum of net positions), \(\rho_k^{(t)}\) is the penalty weight, and \(\eta_k^{(t)} \in (0,1]\) is a residual-aware step size. **Excess supply** (\(r_k>0\)) reduces prices; **excess demand** (\(r_k<0\)) increases prices.
 4. **Penalty adaptation**: ρ increases if the market is far from clearing (primal residual too large), decreases if agents are oscillating (dual residual too large).
 5. **Convergence**: Stops when all markets have both primal and dual residuals below tolerance.
 
