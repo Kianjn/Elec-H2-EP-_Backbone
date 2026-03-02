@@ -18,7 +18,9 @@ ADMM:
   rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
   max_iter: 1000        # Iteration budget
   epsilon: 0.5          # Convergence tolerance on L2 norm of primal/dual residuals. With 72 timesteps, epsilon=1 ≈ 0.12 MW per-timestep accuracy (<1% of quantities 20-50 MW).
-  min_iter: 0           # Minimum iterations before checking convergence. Early residuals can be spuriously small; 100 ensures prices have stabilized before checking.
+  min_iter: 100         # Minimum iterations before checking convergence. Early residuals can be spuriously small; 100 ensures prices have stabilized before checking.
+  gamma: 1              # Risk weight for CVaR (γ=1 ⇒ risk-neutral). Used by both social planner and ADMM agents. Change here to update both simultaneously.
+  beta: 0.95            # CVaR confidence level τ (e.g. 0.95 = worst 5% of scenarios). Used by both social planner and ADMM agents.
 
 # ---------------------------------------------------------------------------
 # Market initial prices and penalty weights
@@ -64,8 +66,8 @@ Power:
     Profile_Column: "SOLAR"    # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
     MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
     FixedCost_per_MW: 70000.0  # €/MW-year — Annualised CAPEX + fixed O&M for utility-scale solar. Assumes ≈700 k€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈70 k€/MW-year, consistent with recent LCOE studies.
-    gamma: 1.0                 # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
-    beta: 0.95                 # CVaR confidence level τ (placeholder; only active when gamma>0).
+    gamma: 1                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
+    beta: 0.95                 # CVaR confidence level τ (placeholder; only active when gamma<1).
 
   # Dispatchable conventional generator (e.g. gas turbine)
   Gen_Conv_01:
@@ -93,7 +95,7 @@ Hydrogen:
     SpecificConsumption: 1.5                  # MWh_elec per MWh_H2 produced (i.e. efficiency = 1/1.5 ≈ 67%); typical PEM electrolyzer value
     OperationalCost: 3.0                      # €/MWh_H2 — Variable O&M for water treatment, stack degradation, etc.
     FixedCost_per_MW_Electrolyzer: 100000.0   # €/MW_elec-year — Annualised CAPEX for PEM electrolysers. Assumes ≈1.0 M€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈100 k€/MW-year (within IEA/IEEFA benchmark ranges).
-    gamma: 1.0                                # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
+    gamma: 1                                  # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
     beta: 0.95                                # CVaR confidence level τ.
 
 # ---------------------------------------------------------------------------
@@ -108,7 +110,7 @@ Hydrogen_Offtaker:
     Alpha: 0.75                        # H2-to-EP conversion ratio (MWh_EP per MWh_H2). 0.75 means 1 MWh_H2 yields 0.75 MWh_EP of NH3, consistent with typical industrial Haber–Bosch efficiencies (≈70–80% on an LHV basis).
     ProcessingCost: 7.0                # €/MWh_EP — Cost of converting H2 to end product (energy, catalysts, labour)
     FixedCost_per_MW_EP_Out: 120000.0  # €/MW_EP-year — Annualised CAPEX for downstream synthesis/processing (e.g. ammonia plant). Assumes ≈1.2 M€/MW_EP CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈120 k€/MW-year.
-    gamma: 1.0                         # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
+    gamma: 1                           # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
     beta: 0.95                         # CVaR confidence level τ.
 
   # Grey offtaker — uses conventional (grey) hydrogen but must buy H2 GCs for a fraction of its implied H2 use
@@ -143,3 +145,17 @@ Electricity_GC_Demand:
 # for future elastic (if any) EP demand agents.
 # ---------------------------------------------------------------------------
 EP_Demand: {}
+
+# ---------------------------------------------------------------------------
+# Contracts — Bilateral contract pool (VRES ↔ H2 producer)
+# Used ONLY by market_exposure_contracts.jl. Ignored by market_exposure.jl
+# and social_planner.jl.
+#
+# VRES and the electrolyzer can enter a bilateral contract: VRES commits
+# contract_cap (MW) of capacity; the electrolyzer receives electricity
+# pay-as-produced (only when VRES actually generates). The contract price
+# λ_contract (€/MWh) is cleared by the contract pool.
+# ---------------------------------------------------------------------------
+Contracts:
+  initial_price: 60.0    # €/MWh — Seed for contract energy price (pay-as-produced)
+  rho_initial: 0.5       # ADMM penalty for contract market (moderate: thin market)

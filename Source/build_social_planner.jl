@@ -29,12 +29,14 @@
 #
 # ==============================================================================
 
+# data: full data.yaml dict; gamma and beta are read from data["ADMM"] so that
+#       changing them there updates both social planner and ADMM simultaneously.
 # env: optional Gurobi environment for license reuse. When provided, the
 # planner model shares the same Gurobi license token as the caller, avoiding
 # the overhead of acquiring a new license. If nothing, a fresh Env is created.
 function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_market::Dict,
                                elec_GC_market::Dict, H2_GC_market::Dict, EP_market::Dict,
-                               env::Union{Gurobi.Env, Nothing} = nothing)
+                               data::Dict; env::Union{Gurobi.Env, Nothing} = nothing)
     if isempty(agents[:all])
         error("No agents defined in data.yaml; cannot build social planner problem.")
     end
@@ -249,13 +251,13 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
     # ── Single social CVaR ───────────────────────────────────────────────
     # Instead of per-agent CVaR terms (which incorrectly produced 3 separate
     # risk-aversion terms), the social planner applies a SINGLE CVaR to the
-    # aggregate social welfare. γ and β are read from any agent (all agents
-    # share the same values). When γ=1 (risk-neutral), the CVaR term
-    # vanishes and the planner reduces to the standard welfare maximization,
-    # matching the ADMM risk-neutral equilibrium.
-
-    gamma = mdict[agents[:all][1]].ext[:parameters][:γ]
-    beta_conf = mdict[agents[:all][1]].ext[:parameters][:β]
+    # aggregate social welfare. γ and β are read from data["ADMM"] so that
+    # changing them there updates both social planner and ADMM simultaneously.
+    # When γ=1 (risk-neutral), the CVaR term vanishes and the planner reduces
+    # to the standard welfare maximization, matching the ADMM risk-neutral equilibrium.
+    admm = get(data, "ADMM", Dict{String, Any}())
+    gamma = get(admm, "gamma", 1.0)
+    beta_conf = get(admm, "beta", 0.95)
     P = mdict[agents[:all][1]].ext[:parameters][:P]
 
     # ── Aggregate social welfare per year ─────────────────────────────────

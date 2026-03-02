@@ -148,6 +148,9 @@ include(joinpath(home_dir, "Source", "build_EP_demand_agent.jl"))
 # market-clearing balance constraints, and sets Max(total welfare) objective.
 include(joinpath(home_dir, "Source", "build_social_planner.jl"))
 
+# Shared objective computation (used by save_social_planner_results! and save_results).
+include(joinpath(home_dir, "Source", "compute_agent_objective.jl"))
+
 # Result writer: extracts dual prices and agent quantities/welfare from the
 # solved planner model and writes Market_Prices.csv + Agent_Summary.csv.
 include(joinpath(home_dir, "Source", "save_social_planner_results.jl"))
@@ -283,7 +286,7 @@ end
 
 for m in agents[:power]
     # Common: sets (JY, JD, JH), weights W, P, γ, β, market flags, ADMM arrays.
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["ADMM"], data["Power"][m]), ts_dict, repr_days, agents)
+    define_common_parameters!(m, mdict[m], merge(data["General"], data["Power"][m], data["ADMM"]), ts_dict, repr_days, agents)
     # Power-specific: capacity, profile column, costs, or consumer utility/load.
     define_power_parameters!(m, mdict[m], merge(data["General"], data["Power"][m]), ts_dict, repr_days)
 end
@@ -291,27 +294,27 @@ end
 for m in agents[:H2]
     # Common + H2-specific: electrolyzer capacity, H2 output capacity,
     # specific consumption, operational cost, efficiency η.
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["ADMM"], data["Hydrogen"][m]), ts_dict, repr_days, agents)
+    define_common_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen"][m], data["ADMM"]), ts_dict, repr_days, agents)
     define_H2_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen"][m]), ts_dict, repr_days)
 end
 
 for m in agents[:offtaker]
     # Common + offtaker-specific: type (Green/Grey/Importer), capacities,
     # alpha, processing cost, marginal cost, gamma_GC, gamma_NH3, import cost.
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["ADMM"], data["Hydrogen_Offtaker"][m]), ts_dict, repr_days, agents)
+    define_common_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m], data["ADMM"]), ts_dict, repr_days, agents)
     define_offtaker_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m]), ts_dict, repr_days)
 end
 
 for m in agents[:elec_GC_demand]
     # Common + GC demand-specific: peak load, load column, A_GC, B_GC
     # (quadratic utility for GC demand).
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["ADMM"], data["Electricity_GC_Demand"][m]), ts_dict, repr_days, agents)
+    define_common_parameters!(m, mdict[m], merge(data["General"], data["Electricity_GC_Demand"][m], data["ADMM"]), ts_dict, repr_days, agents)
     define_elec_GC_demand_parameters!(m, mdict[m], merge(data["General"], data["Electricity_GC_Demand"][m]), ts_dict, repr_days)
 end
 
 for m in agents[:EP_demand]
     # Common + EP demand-specific: placeholder for future elastic EP demand.
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["ADMM"], data["EP_Demand"][m]), ts_dict, repr_days, agents)
+    define_common_parameters!(m, mdict[m], merge(data["General"], data["EP_Demand"][m], data["ADMM"]), ts_dict, repr_days, agents)
     define_EP_demand_parameters!(m, mdict[m], merge(data["General"], data["EP_Demand"][m]), ts_dict, repr_days)
 end
 
@@ -340,7 +343,7 @@ end
 #                   needed by the two-step solve and save_social_planner_results!.
 planner, planner_state = build_social_planner!(mdict, agents, elec_market, H2_market,
                                               elec_GC_market, H2_GC_market, EP_market,
-                                              GUROBI_ENV)
+                                              data; env = GUROBI_ENV)
 
 # ------------------------------------------------------------------------------
 # SECTION 11: TWO-STEP SOLVE WITH DUAL RECOVERY

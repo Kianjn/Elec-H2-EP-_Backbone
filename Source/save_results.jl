@@ -104,27 +104,383 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     end
 
     # --------------------------------------------------------------------------
-    # Agent_Summary.csv — GROUP MEMBERSHIP + OBJECTIVE VALUE
+    # Agent_Summary.csv — GROUP MEMBERSHIP + CLEAN (NO-PENALTY) OBJECTIVE VALUE
     # --------------------------------------------------------------------------
     # One row per agent recording which sector / group it belongs to (power,
-    # H2, offtaker, elec_GC_demand) and the agent's objective value from the
-    # last ADMM solve. The objective value is the optimal value of the agent's
-    # individual minimization problem (cost − revenue + ADMM penalty terms).
-    # At ADMM convergence the penalty terms vanish and the objective reflects
-    # the agent's net cost.
-    agent_rows = String[]
-    agent_types = String[]
-    agent_objs = Float64[]
+    # H2, offtaker, elec_GC_demand) and an objective value that matches the
+    # ADMM-style cost − revenue metric used for the social planner benchmark.
+    # IMPORTANT: we intentionally EXCLUDE ADMM quadratic penalty terms here so
+    # that in the risk-neutral case (γ = 1) the per-agent objectives are
+    # comparable between market_exposure and social_planner.
+
+    # Classify agents by sub-type (mirrors build_social_planner.jl).
+    power_consumers = String[]
+    power_vres = String[]
+    power_conv = String[]
+    for id in get(agents, :power, String[])
+        m = mdict[id]
+        atype = String(get(m.ext[:parameters], :Type, ""))
+        if atype == "Consumer"
+            push!(power_consumers, id)
+        elseif atype == "VRES"
+            push!(power_vres, id)
+        else
+            push!(power_conv, id)
+        end
+    end
+
+    H2_producers = String[]
+    H2_consumers = String[]
+    for id in get(agents, :H2, String[])
+        m = mdict[id]
+        p = m.ext[:parameters]
+        if haskey(p, :Capacity_Electrolyzer) || (haskey(p, :E_bar) && haskey(p, :H_bar))
+            push!(H2_producers, id)
+        elseif haskey(p, :D_H_bar)
+            push!(H2_consumers, id)
+        end
+    end
+
+    offtaker_green = String[]
+    offtaker_grey = String[]
+    offtaker_import = String[]
+    for id in get(agents, :offtaker, String[])
+        m = mdict[id]
+        atype = String(get(m.ext[:parameters], :Type, ""))
+        if atype == "GreenOfftaker"
+            push!(offtaker_green, id)
+        elseif atype == "EPImporter"
+            push!(offtaker_import, id)
+        else
+            push!(offtaker_grey, id)
+        end
+    end
+
+    # Final ADMM prices (used to value cost − revenue, matching the planner).
+    λ_elec_final    = results["λ"]["elec"][end]
+    λ_H2_final      = results["λ"]["H2"][end]
+    λ_elec_GC_final = results["λ"]["elec_GC"][end]
+    λ_H2_GC_final   = results["λ"]["H2_GC"][end]
+    λ_EP_final      = results["λ"]["EP"][end]
+
+    prices = Dict(
+        :λ_elec => λ_elec_final, :λ_H2 => λ_H2_final, :λ_elec_GC => λ_elec_GC_final,
+        :λ_H2_GC => λ_H2_GC_final, :λ_EP => λ_EP_final,
+    )
+
+    # Helper: compute the agent's economic objective using the shared
+    # compute_agent_objective_economic so objectives match social_planner.
+    function _admm_objective_economic(id::String)
+        m = mdict[id]
+        p = m.ext[:parameters]
+        sets = m.ext[:sets]
+        vars = m.ext[:variables]
+        W = p[:W]
+        JH = sets[:JH]
+        JD = sets[:JD]
+        JY = sets[:JY]
+        params = merge(Dict(:W => W), Dict(k => v for (k, v) in p))
+        quantities = Dict{Symbol, Any}()
+
+        if id in power_consumers
+            quantities[:d] = [value(vars[:d][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            return compute_agent_objective_economic(:power_consumer, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+        elseif id in power_vres
+            quantities[:g] = [value(vars[:g][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            if haskey(vars, :cap_VRES)
+                quantities[:cap_VRES] = [value(vars[:cap_VRES][jy]) for jy in JY]
+            end
+            return compute_agent_objective_economic(:power_vres, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+        elseif id in power_conv
+            quantities[:g] = [value(vars[:g][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            return compute_agent_objective_economic(:power_conv, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+        elseif id in H2_producers
+            quantities[:e_in] = [value(vars[:e_in][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_elec_gc] = [value(vars[:q_elec_gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:h2_out] = [value(vars[:h2_out][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            if haskey(vars, :cap_H2_y)
+                quantities[:cap_H2_y] = [value(vars[:cap_H2_y][jy]) for jy in JY]
+            end
+            return compute_agent_objective_economic(:H2_producer, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+        elseif id in H2_consumers
+            quantities[:d_H] = [value(vars[:d_H][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            return compute_agent_objective_economic(:H2_consumer, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+        elseif id in offtaker_green
+            quantities[:h2_in] = [value(vars[:h2_in][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:ep] = [value(vars[:ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            if haskey(vars, :cap_EP_y)
+                quantities[:cap_EP_y] = [value(vars[:cap_EP_y][jy]) for jy in JY]
+            end
+            return compute_agent_objective_economic(:offtaker_green, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+        elseif id in offtaker_grey
+            quantities[:ep] = [value(vars[:ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            return compute_agent_objective_economic(:offtaker_grey, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+        elseif id in offtaker_import
+            quantities[:ep] = [value(vars[:ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            return compute_agent_objective_economic(:offtaker_import, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+        elseif id in get(agents, :elec_GC_demand, String[])
+            quantities[:d_gc] = [value(vars[:d_gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            return compute_agent_objective_economic(:elec_GC_demand, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+        else
+            return 0.0
+        end
+    end
+
+    # Helper: per-agent net market quantities at final iteration (same sign convention
+    # as Agent_Quantities_Final below).
+    function _final_net_quantities(id::String)
+        g_list   = results["g"][id]
+        h2_list  = results["h2"][id]
+        egc_list = results["elec_GC"][id]
+        hgc_list = results["H2_GC"][id]
+        ep_list  = results["EP"][id]
+        elec_q    = isempty(g_list)   ? 0.0 : sum(g_list[end])
+        H2_q      = isempty(h2_list)  ? 0.0 : sum(h2_list[end])
+        elec_GC_q = isempty(egc_list) ? 0.0 : sum(egc_list[end])
+        H2_GC_q   = isempty(hgc_list) ? 0.0 : sum(hgc_list[end])
+        EP_q      = isempty(ep_list)  ? 0.0 : sum(ep_list[end])
+        return elec_q, H2_q, elec_GC_q, H2_GC_q, EP_q
+    end
+
+    # Helper: capacity summary from final ADMM iteration (final-year capacity and
+    # total investment over the horizon) for capacity-expanding agents.
+    function _capacity_summary_admm(id::String)
+        cap_final = 0.0
+        inv_total = 0.0
+
+        if id in power_vres
+            cap_hist = results["Cap_VRES"][id]
+            inv_hist = results["Inv_VRES"][id]
+            if !isempty(cap_hist)
+                cap_vec = cap_hist[end]
+                cap_final = isempty(cap_vec) ? 0.0 : cap_vec[end]
+            end
+            if !isempty(inv_hist)
+                inv_vec = inv_hist[end]
+                inv_total = sum(inv_vec)
+            end
+        elseif id in H2_producers
+            cap_hist = results["Cap_Elec_H2"][id]
+            inv_hist = results["Inv_Elec_H2"][id]
+            if !isempty(cap_hist)
+                cap_vec = cap_hist[end]
+                cap_final = isempty(cap_vec) ? 0.0 : cap_vec[end]
+            end
+            if !isempty(inv_hist)
+                inv_vec = inv_hist[end]
+                inv_total = sum(inv_vec)
+            end
+        elseif id in offtaker_green
+            cap_hist = results["Cap_EP_Green"][id]
+            inv_hist = results["Inv_EP_Green"][id]
+            if !isempty(cap_hist)
+                cap_vec = cap_hist[end]
+                cap_final = isempty(cap_vec) ? 0.0 : cap_vec[end]
+            end
+            if !isempty(inv_hist)
+                inv_vec = inv_hist[end]
+                inv_total = sum(inv_vec)
+            end
+        end
+
+        return cap_final, inv_total
+    end
+
+    # Unified Agent_Summary.csv for market_exposure: quantities, investment, objectives.
+    agent_ids_sum = String[]
+    group_sum     = String[]
+    type_sum      = String[]
+    elec_sum      = Float64[]
+    H2_sum        = Float64[]
+    elec_GC_sum   = Float64[]
+    H2_GC_sum     = Float64[]
+    EP_sum        = Float64[]
+    cap_final_sum = Float64[]
+    inv_total_sum = Float64[]
+    obj_sum       = Float64[]
+
     for k in (:power, :H2, :offtaker, :elec_GC_demand)
         haskey(agents, k) || continue
         for id in agents[k]
-            push!(agent_rows, String(id))
-            push!(agent_types, String(k))
-            push!(agent_objs, objective_value(mdict[id]))
+            push!(agent_ids_sum, String(id))
+            push!(group_sum, String(k))
+
+            type_label = if id in power_consumers
+                "PowerCons"
+            elseif id in power_vres || id in power_conv
+                "PowerGen"
+            elseif id in H2_producers
+                "H2Prod"
+            elseif id in H2_consumers
+                "H2Cons"
+            elseif id in offtaker_green || id in offtaker_grey || id in offtaker_import
+                "Offtaker"
+            elseif k == :elec_GC_demand
+                "GC_Demand"
+            else
+                "Unknown"
+            end
+            push!(type_sum, type_label)
+
+            e_q, h_q, egc_q, hgc_q, ep_q = _final_net_quantities(String(id))
+            push!(elec_sum, e_q)
+            push!(H2_sum, h_q)
+            push!(elec_GC_sum, egc_q)
+            push!(H2_GC_sum, hgc_q)
+            push!(EP_sum, ep_q)
+
+            cap_f, inv_t = _capacity_summary_admm(String(id))
+            push!(cap_final_sum, cap_f)
+            push!(inv_total_sum, inv_t)
+
+            push!(obj_sum, _admm_objective_economic(String(id)))
         end
     end
-    agents_df = DataFrame(AgentID = agent_rows, Group = agent_types, Objective_Value = agent_objs)
+
+    agents_df = DataFrame(
+        AgentID = agent_ids_sum,
+        Group = group_sum,
+        Type = type_sum,
+        elec_net_sum = elec_sum,
+        H2_net_sum = H2_sum,
+        elec_GC_net_sum = elec_GC_sum,
+        H2_GC_net_sum = H2_GC_sum,
+        EP_net_sum = EP_sum,
+        Capacity_Final_MW = cap_final_sum,
+        Investment_Total_MW = inv_total_sum,
+        Objective_Value = obj_sum,
+    )
     CSV.write(joinpath(results_dir, "Agent_Summary.csv"), agents_df)
+
+    # --------------------------------------------------------------------------
+    # Agent_Objectives_Per_Timestep.csv — Per-hour prices, quantities, objective contributions
+    # --------------------------------------------------------------------------
+    # One row per timestep (jh, jd, jy). Column order: Time, jh, jd, jy, W; all prices;
+    # all quantities (VRES, CONV, elec demand, elec GC demand, H2 prod, green off, grey off, …);
+    # all objective values (same agent order). Same structure as planner for direct comparison.
+    all_agent_ids = get(agents, :all, vcat(get.(Ref(agents), [:power, :H2, :offtaker, :elec_GC_demand, :EP_demand], Ref(String[]))...))
+    ordered_agents = vcat(
+        power_vres, power_conv, power_consumers,
+        get(agents, :elec_GC_demand, String[]),
+        H2_producers, offtaker_green, offtaker_grey, offtaker_import,
+        H2_consumers, get(agents, :EP_demand, String[]),
+    )
+    ordered_agents = [id for id in ordered_agents if id in all_agent_ids]
+    if !isempty(ordered_agents)
+        m0 = mdict[ordered_agents[1]]
+        JH = collect(m0.ext[:sets][:JH])
+        JD = collect(m0.ext[:sets][:JD])
+        JY = collect(m0.ext[:sets][:JY])
+        λ_elec = results["λ"]["elec"][end]
+        λ_H2 = results["λ"]["H2"][end]
+        λ_elec_GC = results["λ"]["elec_GC"][end]
+        λ_H2_GC = results["λ"]["H2_GC"][end]
+        λ_EP = results["λ"]["EP"][end]
+        W_mat = m0.ext[:parameters][:W]
+        qvars = Dict(:power_vres => [:g], :power_conv => [:g], :power_consumer => [:d], :elec_GC_demand => [:d_gc],
+                     :H2_producer => [:e_in, :q_elec_gc, :h2_out, :q_h2gc], :offtaker_green => [:h2_in, :q_h2gc, :ep],
+                     :offtaker_grey => [:ep, :q_h2gc], :offtaker_import => [:ep], :H2_consumer => [:d_H], :EP_demand => [:d_EP])
+        type_of(id) = id in power_vres ? :power_vres : id in power_conv ? :power_conv : id in power_consumers ? :power_consumer :
+                      id in get(agents, :elec_GC_demand, []) ? :elec_GC_demand : id in H2_producers ? :H2_producer :
+                      id in offtaker_green ? :offtaker_green : id in offtaker_grey ? :offtaker_grey :
+                      id in offtaker_import ? :offtaker_import : id in H2_consumers ? :H2_consumer :
+                      id in get(agents, :EP_demand, []) ? :EP_demand : :unknown
+
+        function _admm_agent_data(id)
+            m = mdict[id]
+            p = m.ext[:parameters]
+            vars = m.ext[:variables]
+            params = merge(Dict(:W => p[:W]), Dict(k => v for (k, v) in p))
+            prices_dict = Dict(:λ_elec => λ_elec, :λ_H2 => λ_H2, :λ_elec_GC => λ_elec_GC,
+                              :λ_H2_GC => λ_H2_GC, :λ_EP => λ_EP)
+            quantities = Dict{Symbol, Any}()
+            agent_type = nothing
+            if id in power_consumers
+                agent_type = :power_consumer
+                quantities[:d] = [value(vars[:d][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            elseif id in power_vres
+                agent_type = :power_vres
+                quantities[:g] = [value(vars[:g][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                haskey(vars, :cap_VRES) && (quantities[:cap_VRES] = [value(vars[:cap_VRES][jy]) for jy in JY])
+            elseif id in power_conv
+                agent_type = :power_conv
+                quantities[:g] = [value(vars[:g][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            elseif id in H2_producers
+                agent_type = :H2_producer
+                quantities[:e_in] = [value(vars[:e_in][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                quantities[:q_elec_gc] = [value(vars[:q_elec_gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                quantities[:h2_out] = [value(vars[:h2_out][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                haskey(vars, :cap_H2_y) && (quantities[:cap_H2_y] = [value(vars[:cap_H2_y][jy]) for jy in JY])
+            elseif id in H2_consumers
+                agent_type = :H2_consumer
+                quantities[:d_H] = [value(vars[:d_H][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            elseif id in offtaker_green
+                agent_type = :offtaker_green
+                quantities[:h2_in] = [value(vars[:h2_in][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                quantities[:ep] = [value(vars[:ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                haskey(vars, :cap_EP_y) && (quantities[:cap_EP_y] = [value(vars[:cap_EP_y][jy]) for jy in JY])
+            elseif id in offtaker_grey
+                agent_type = :offtaker_grey
+                quantities[:ep] = [value(vars[:ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            elseif id in offtaker_import
+                agent_type = :offtaker_import
+                quantities[:ep] = [value(vars[:ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            elseif id in get(agents, :elec_GC_demand, String[])
+                agent_type = :elec_GC_demand
+                quantities[:d_gc] = [value(vars[:d_gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            elseif id in get(agents, :EP_demand, String[])
+                agent_type = :EP_demand
+                quantities[:d_EP] = [value(vars[:q_ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            end
+            contrib = agent_type !== nothing ? compute_agent_objective_contributions(agent_type, quantities, prices_dict, params; JH=JH, JD=JD, JY=JY) : nothing
+            return agent_type, quantities, contrib
+        end
+
+        col_order = [:Time, :jh, :jd, :jy, :W, :Elec_Price, :H2_Price, :Elec_GC_Price, :H2_GC_Price, :EP_Price]
+        for id in ordered_agents
+            t = type_of(id)
+            for v in get(qvars, t, [])
+                push!(col_order, Symbol(id * "_" * string(v)))
+            end
+        end
+        for id in ordered_agents
+            push!(col_order, Symbol(id * "_obj"))
+        end
+
+        admm_agent_data = Dict(id => _admm_agent_data(id) for id in ordered_agents)
+        ts_rows = []
+        t_idx = 1
+        for jy in JY, jd in JD, jh in JH
+            w = W_mat[jd, jy]
+            row = Dict(:Time => t_idx, :jh => jh, :jd => jd, :jy => jy, :W => w,
+                       :Elec_Price => λ_elec[jh, jd, jy], :H2_Price => λ_H2[jh, jd, jy],
+                       :Elec_GC_Price => λ_elec_GC[jh, jd, jy], :H2_GC_Price => λ_H2_GC[jh, jd, jy],
+                       :EP_Price => λ_EP[jh, jd, jy])
+            for id in ordered_agents
+                atype, q, c = admm_agent_data[id]
+                row[Symbol(id * "_obj")] = c !== nothing ? c[jh, jd, jy] : 0.0
+                if q !== nothing
+                    for (k, v) in q
+                        if v isa AbstractArray && ndims(v) == 3
+                            row[Symbol(id * "_" * string(k))] = v[jh, jd, jy]
+                        end
+                    end
+                end
+            end
+            push!(ts_rows, row)
+            t_idx += 1
+        end
+        ts_df = DataFrame(ts_rows)
+        present = [c for c in col_order if c in propertynames(ts_df)]
+        ts_df = select(ts_df, present)
+        CSV.write(joinpath(results_dir, "Agent_Objectives_Per_Timestep.csv"), ts_df)
+    end
 
     # --------------------------------------------------------------------------
     # Agent_Quantities_Final.csv — PER-AGENT NET QUANTITIES AT FINAL ITERATION
@@ -141,43 +497,6 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     # sums over all (jh, jd, jy) entries to collapse it into a single scalar.
     # This scalar is the total energy traded by that agent across the full
     # modeled year (all hours × representative days × scenario years).
-
-    function _total_last(arr_dict::Dict, id)
-        lst = arr_dict[id]
-        return isempty(lst) ? 0.0 : sum(lst[end])
-    end
-
-    agent_ids_q = String[]
-    group_q     = String[]
-    elec_q      = Float64[]
-    h2_q        = Float64[]
-    elec_gc_q   = Float64[]
-    h2_gc_q     = Float64[]
-    ep_q        = Float64[]
-
-    for k in (:power, :H2, :offtaker, :elec_GC_demand)
-        haskey(agents, k) || continue
-        for id in agents[k]
-            push!(agent_ids_q, String(id))
-            push!(group_q, String(k))
-            push!(elec_q,    _total_last(results["g"],       id))
-            push!(h2_q,      _total_last(results["h2"],      id))
-            push!(elec_gc_q, _total_last(results["elec_GC"], id))
-            push!(h2_gc_q,   _total_last(results["H2_GC"],   id))
-            push!(ep_q,      _total_last(results["EP"],      id))
-        end
-    end
-
-    agent_q_df = DataFrame(
-        AgentID        = agent_ids_q,
-        Group          = group_q,
-        elec_net_sum   = elec_q,
-        H2_net_sum     = h2_q,
-        elec_GC_net_sum = elec_gc_q,
-        H2_GC_net_sum  = h2_gc_q,
-        EP_net_sum     = ep_q,
-    )
-    CSV.write(joinpath(results_dir, "Agent_Quantities_Final.csv"), agent_q_df)
 
     # --------------------------------------------------------------------------
     # Offtaker_GC_Diagnostics.csv — GREEN-CERTIFICATE COMPLIANCE PER OFFTAKER
@@ -289,62 +608,6 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
             GC_per_H2     = gc_to_h2,
         )
         CSV.write(joinpath(results_dir, "H2_Producer_Diagnostics.csv"), el_df)
-    end
-
-    # --------------------------------------------------------------------------
-    # Capacity_Investments.csv — YEARLY CAPACITY AND INVESTMENT FOR GREEN AGENTS
-    # --------------------------------------------------------------------------
-    # For VRES, electrolyzer, and green offtaker agents, export per-year capacity
-    # and investment decisions from the final ADMM iteration.
-    cap_rows = Vector{NamedTuple{(:AgentID, :Group, :Type, :YearIndex, :Capacity_MW, :Investment_MW),Tuple{String,String,String,Int,Float64,Float64}}}()
-
-    # Helper to append rows for an agent given the appropriate result keys.
-    function _append_cap_rows!(rows, id::String, group::String, atype::String,
-                               cap_hist::Dict, inv_hist::Dict, mdict::Dict)
-        lst_cap = cap_hist[id]
-        lst_inv = inv_hist[id]
-        isempty(lst_cap) && return
-        cap_vec = lst_cap[end]
-        inv_vec = isempty(lst_inv) ? zeros(length(cap_vec)) : lst_inv[end]
-        # JY index is the model's year index; we report it directly.
-        for (iy, cap_val) in enumerate(cap_vec)
-            inv_val = inv_vec[iy]
-            push!(rows, (AgentID = String(id),
-                         Group = group,
-                         Type = atype,
-                         YearIndex = iy,
-                         Capacity_MW = cap_val,
-                         Investment_MW = inv_val))
-        end
-    end
-
-    # VRES (power agents with Type == "VRES")
-    for id in agents[:power]
-        m = mdict[id]
-        atype = String(get(m.ext[:parameters], :Type, ""))
-        atype == "VRES" || continue
-        _append_cap_rows!(cap_rows, id, "power", atype, results["Cap_VRES"], results["Inv_VRES"], mdict)
-    end
-
-    # Electrolyzer (H2 producers)
-    for id in agents[:H2]
-        m = mdict[id]
-        atype = String(get(m.ext[:parameters], :Type, ""))
-        # Currently only electrolyzers are modeled as H2 agents.
-        _append_cap_rows!(cap_rows, id, "H2", atype, results["Cap_Elec_H2"], results["Inv_Elec_H2"], mdict)
-    end
-
-    # Green offtaker (offtaker agents with Type == "GreenOfftaker")
-    for id in agents[:offtaker]
-        m = mdict[id]
-        atype = String(get(m.ext[:parameters], :Type, ""))
-        atype == "GreenOfftaker" || continue
-        _append_cap_rows!(cap_rows, id, "offtaker", atype, results["Cap_EP_Green"], results["Inv_EP_Green"], mdict)
-    end
-
-    if !isempty(cap_rows)
-        cap_df = DataFrame(cap_rows)
-        CSV.write(joinpath(results_dir, "Capacity_Investments.csv"), cap_df)
     end
 
     # --------------------------------------------------------------------------

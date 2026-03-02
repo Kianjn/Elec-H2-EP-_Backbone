@@ -4,7 +4,7 @@
 
 0. [Notation and Units](#0-notation-and-units)
 1. [Overview](#1-overview)
-2. [Markets](#2-markets)
+2. [Markets](#2-markets) — incl. [Contract pool](#contract-pool-market_exposure_contractsjl-only) and [How contract capacity is determined](#how-contract-capacity-is-determined)
 3. [Agents](#3-agents)
 4. [Mathematical Formulation](#4-mathematical-formulation)
 5. [ADMM Algorithm](#5-admm-algorithm)
@@ -95,12 +95,13 @@ The **social planner** uses a single $\gamma$ and a single social CVaR on aggreg
 
 This project implements a **multi-agent equilibrium model** for coupled electricity, hydrogen, green-certificate, and end-product markets, coordinated via **ADMM** (Alternating Direction Method of Multipliers). Each agent has its own JuMP optimization model; market-clearing is achieved by iteratively updating prices and penalty terms so that supply and demand balance in each market.
 
-The project includes two entry points:
+The project includes three entry points:
 
-- **`market_exposure.jl`** — Distributed ADMM simulation where agents optimise independently and are coordinated through iterative price signals.
+- **`market_exposure.jl`** — Distributed ADMM simulation where agents optimise independently and are coordinated through iterative price signals. Five markets: electricity, elec GC, H₂, H₂ GC, end product.
+- **`market_exposure_contracts.jl`** — Same as market_exposure but with a **bilateral contract pool** between VRES and the electrolyzer. VRES commits capacity (`contract_cap` MW); the electrolyzer receives electricity **pay-as-produced** at λ_contract (€/MWh). When VRES has no output (e.g. night for solar), nothing is delivered and nothing is paid. The contract pool clears via ADMM alongside the five standard markets.
 - **`social_planner.jl`** — Centralised welfare-maximisation benchmark where all agents are optimised jointly in a single model. Equilibrium prices emerge as dual variables of market-clearing constraints.
 
-Both scripts share the **same** problem definition (objectives, constraints, variables) from `Source/`. If you change a constraint or objective in a `build_*` file, the change automatically propagates to both the market exposure and the social planner.
+The base ADMM and social planner share the **same** problem definition from `Source/`. The contracts case uses contract-specific build/solve/ADMM/save modules that extend the base logic. The social planner is unchanged and does not include the contract pool.
 
 ---
 
@@ -116,6 +117,57 @@ The model contains five interconnected markets:
 | **Hydrogen GC** | `H2_GC` | H₂ green certificates (from certified electricity) | MWh_H2 | Electrolyzer | Green offtaker, grey offtaker |
 | **End Product** | `EP` | Ammonia / downstream product | MWh_EP | Green offtaker, grey offtaker, EP importer | Fixed demand `D_EP` |
 
+### Contract pool (market_exposure_contracts.jl only)
+
+In `market_exposure_contracts.jl`, an additional **bilateral contract pool** couples VRES and the electrolyzer:
+
+| Market | Key | Description | Unit | Supply Side | Demand Side |
+|---|---|---|---|---|---|
+| **Contract** | `contract` | Bilateral VRES–electrolyzer energy flow | MWh | VRES (`g_contract`) | Electrolyzer (`g_contract`) |
+
+- **Contract capacity** `contract_cap` (MW): Upper bound on `g_contract` at each hour. Both parties must agree via ADMM consensus; there is **no separate capacity price**.
+- **Contract energy** `g_contract` (MWh): Energy delivered under the contract at each timestep. Cleared at λ_contract (€/MWh).
+- **Pay-as-produced**: When VRES has no output (e.g. night for solar), `g_contract = 0`, so nothing is delivered and nothing is paid. Revenue/cost = λ_contract × g_contract (only for energy actually delivered).
+
+The contract pool uses the same ADMM structure as the other markets: imbalance = g_contract_VRES − g_contract_elec (must be zero at equilibrium). The `contract_cap` consensus is scalar: both agents must choose the same `contract_cap` (VRES: +cap, electrolyzer: −cap in net-position convention).
+
+#### How contract capacity is determined
+
+There is **no separate capacity price** (no λ_contract_cap). The contracted capacity `contract_cap` is determined by two mechanisms working together:
+
+**1. Economic optimisation (each agent chooses independently)**
+
+Each agent has `contract_cap` as a **decision variable** in its optimisation. The choice is driven by economic incentives:
+
+- **VRES**: Revenue from the contract is λ_contract × g_contract. VRES maximises revenue subject to:
+  - `g_contract ≤ contract_cap` at every hour (contract_cap is the upper bound),
+  - `g_EOM + g_contract ≤ AF × cap_VRES` (total generation limited by capacity and availability).
+  - If λ_contract is attractive relative to λ_elec, VRES prefers to sell via the contract. It will set `contract_cap` high enough to allow as much `g_contract` as is profitable, but not beyond what its total capacity and the electrolyzer’s demand can support.
+
+- **Electrolyzer**: Cost from the contract is λ_contract × g_contract. The electrolyzer minimises cost subject to:
+  - `g_contract ≤ contract_cap` at every hour,
+  - `h2_out = η × (e_in_pool + g_contract)` and `h2_out ≤ cap_H2`.
+  - If λ_contract < λ_elec, the electrolyzer prefers contract over pool. It will set `contract_cap` high enough to allow as much `g_contract` as it finds profitable given its H₂ production needs and the relative prices.
+
+**2. ADMM consensus (both must agree)**
+
+The two agents would generally choose different `contract_cap` values if unconstrained. ADMM enforces agreement via a quadratic penalty:
+
+- **VRES** minimises: `(ρ_contract_cap/2) × (contract_cap − ḡ_contract_cap)²`
+- **Electrolyzer** minimises: `(ρ_contract_cap/2) × (−contract_cap − ḡ_contract_cap)²`
+
+Here `ḡ_contract_cap` is the consensus target from the sharing-ADMM formula (see §5.5). As iterations proceed, the imbalance `contract_cap_VRES − contract_cap_elec` shrinks, and `ḡ_contract_cap` moves toward a value both can accept. At convergence, both choose the same `contract_cap`.
+
+**3. Equilibrium outcome**
+
+At equilibrium:
+
+1. Both agents choose the same `contract_cap` (consensus satisfied).
+2. `g_contract` matches between VRES and electrolyzer (cleared by λ_contract).
+3. The equilibrium `contract_cap` is the level where both agents’ preferred values coincide, given the equilibrium λ_contract.
+
+The capacity commitment is implicitly priced through the energy price λ_contract: a higher `contract_cap` allows more `g_contract` when VRES is available, so the pay-as-produced structure bundles capacity and energy. The equilibrium `contract_cap` emerges from the intersection of VRES’s willingness to commit capacity (driven by λ_contract vs λ_elec and total cap_VRES) and the electrolyzer’s willingness to contract (driven by λ_contract vs λ_elec and its H₂ production needs).
+
 ### Market coupling
 
 The markets are coupled through the **electrolyzer**, which sits at the nexus:
@@ -127,6 +179,8 @@ The markets are coupled through the **electrolyzer**, which sits at the nexus:
 
 The **end-product market** is coupled to H2 and H2_GC through the offtakers, who convert hydrogen into the end product and must comply with the GC mandate.
 
+In the **contracts case**, VRES splits generation: `g_EOM` (sold to the electricity market) and `g_contract` (delivered under contract). The electrolyzer receives `g_contract` and buys `e_in_pool` from the electricity market. Total electrolyzer input = `e_in_pool + g_contract`. The contract capacity `contract_cap` limits `g_contract` at every hour; both parties agree on it via ADMM consensus.
+
 ---
 
 ## 3. Agents
@@ -135,7 +189,7 @@ The **end-product market** is coupled to H2 and H2_GC through the offtakers, who
 
 | Agent | Type | Description |
 |---|---|---|
-| `Gen_VRES_01` | `VRES` | Variable renewable (e.g. solar). Zero marginal cost. Produces both electricity and elec GCs (1:1). Constrained by hourly availability factor × **endogenous capacity**. Decides yearly installed capacity and investment (MW), incurring fixed annualised CAPEX `FixedCost_per_MW × capacity`. |
+| `Gen_VRES_01` | `VRES` | Variable renewable (e.g. solar). Zero marginal cost. Produces both electricity and elec GCs (1:1). Constrained by hourly availability factor × **endogenous capacity**. Decides yearly installed capacity and investment (MW), incurring fixed annualised CAPEX `FixedCost_per_MW × capacity`. In `market_exposure_contracts.jl`: splits generation into `g_EOM` (pool) and `g_contract` (contract); `g_contract ≤ contract_cap` at every hour; revenue includes λ_contract × g_contract. |
 | `Gen_Conv_01` | `Conventional` | Dispatchable thermal plant. Constant availability (AF = 1). Marginal cost sets price floor. No GC production. |
 | `Cons_Elec_01` | `Consumer` | Elastic electricity demand. Quadratic utility `U(d) = A_E·d − ½B_E·d²` gives inverse demand `p(d) = A_E − B_E·d`. Bounded by `PeakLoad × load_profile`. |
 
@@ -143,7 +197,7 @@ The **end-product market** is coupled to H2 and H2_GC through the offtakers, who
 
 | Agent | Type | Description |
 |---|---|---|
-| `Prod_H2_Green` | `GreenProducer` | PEM electrolyzer with **endogenous H₂ output capacity**. Converts electricity to H₂ with efficiency `η = 1/SpecificConsumption`. Buys elec + elec GCs; sells H₂ + H₂ GCs. Annual green-backing constraint ensures GCs purchased ≥ `(1/η) × GCs issued`. Decides yearly H₂ capacity and investment (MW_H₂), incurring fixed annualised CAPEX `FixedCost_per_MW_Electrolyzer × capacity`. |
+| `Prod_H2_Green` | `GreenProducer` | PEM electrolyzer with **endogenous H₂ output capacity**. Converts electricity to H₂ with efficiency `η = 1/SpecificConsumption`. Buys elec + elec GCs; sells H₂ + H₂ GCs. Annual green-backing constraint ensures GCs purchased ≥ `(1/η) × GCs issued`. Decides yearly H₂ capacity and investment (MW_H₂), incurring fixed annualised CAPEX `FixedCost_per_MW_Electrolyzer × capacity`. In `market_exposure_contracts.jl`: receives `g_contract` from VRES (pay-as-produced) and buys `e_in_pool` from the electricity market; total input = `e_in_pool + g_contract`; `g_contract ≤ contract_cap` at every hour; cost includes λ_contract × g_contract. |
 
 ### 3.3 Offtaker Agents
 
@@ -235,6 +289,8 @@ min  γ × [ Σ_y loss_VRES[y] + F_cap × Σ_y cap_VRES[y] ]
 where loss_VRES[y] = Σ_{h,d} W × ( MC×g − λ_elec×g − λ_GC×g )
 ```
 
+**VRES in contracts case** (`build_power_agent_contracts.jl`): Splits generation into `g_EOM` (pool) and `g_contract` (contract). Loss includes `−λ_contract×g_contract`; penalties add `(ρ_contract/2)×Σ W×(g_contract − ḡ_contract)²` and `(ρ_contract_cap/2)×(contract_cap − ḡ_contract_cap)²`. Constraint: `g_contract ≤ contract_cap` at every hour.
+
 **Conventional generator:**
 ```
 min Σ W × ( MC×g − λ_elec×g )  +  (ρ_elec/2)×Σ W×(g − ḡ_elec)²
@@ -257,6 +313,8 @@ min  γ × [ Σ_y loss_H2[y] + F_cap × Σ_y cap_H2[y] ]
 
 where loss_H2[y] = Σ_{h,d} W × ( λ_elec×e_in + λ_GC×gc_e + op×h2 − λ_H2×h2 − λ_H2GC×gc_h2 )
 ```
+
+**Electrolyzer in contracts case** (`build_H2_agent_contracts.jl`): Uses `e_in_pool` (pool) and `g_contract` (contract). Loss includes `λ_contract×g_contract`; conversion `h2_out = η×(e_in_pool + g_contract)`; penalties add `(ρ_contract/2)×Σ W×(−g_contract − ḡ_contract)²` and `(ρ_contract_cap/2)×(−contract_cap − ḡ_contract_cap)²`. Constraint: `g_contract ≤ contract_cap` at every hour.
 
 **Green offtaker (with endogenous EP capacity and CVaR):**
 ```
@@ -450,6 +508,7 @@ Per-market parameters:
 | `H2` | 1.01 | 1/1.01 | 100 | Strongly coupled to electricity and EP; very gentle updates minimise oscillation when H₂ capacity/investment kinks are active. |
 | `H2_GC` | 1.05 | 1/1.05 | 100 | Hourly GC market but thin volumes; moderate adaptation with a conservative cap. |
 | `EP` | 1.01 | 1/1.01 | 100 | Stiff EP market; slow adaptation avoids limit cycles when EP capacities/investments bind. |
+| `contract`, `contract_cap` | 1.05 | 1/1.05 | 500 | Thin bilateral pool; moderate adaptation for responsive convergence (same as H2/EP). |
 
 In addition to these static parameters, the algorithm maintains:
 
@@ -530,7 +589,20 @@ This has three advantages over a single scalar `epsilon`:
 2. **Robustness to refinement**: If the temporal resolution or the number of representative days changes (n increases), the `sqrt(n)` factor keeps the per-slot accuracy comparable.
 3. **Numerical realism**: Once residuals are small relative to the problem’s own scale (`Scale_*[k]`), the criteria do not force the algorithm to chase tiny numerical oscillations; they recognise that the solution is “good enough” in the sense of Boyd et al.
 
-### 5.5 Sign Convention
+### 5.5 Contract Pool ADMM (market_exposure_contracts.jl)
+
+In the contracts case, the ADMM loop (`ADMM_contracts.jl`) extends the standard loop with:
+
+1. **Contract energy imbalance**: `r_contract(h,d,y) = g_contract_VRES(h,d,y) − g_contract_elec(h,d,y)`. Primal residual = ‖r_contract‖₂.
+2. **Contract capacity consensus**: `r_contract_cap = contract_cap_VRES − contract_cap_elec` (scalar). Both parties must agree; no separate price for capacity.
+3. **Price update**: λ_contract is updated like other 3D prices: `λ_contract^{k+1} = λ_contract^k − η × ρ_contract × r_contract`. Contract capacity has no price.
+4. **ρ adaptation** (`update_rho_contracts.jl`): Contract and contract_cap use the same regime logic as H2/EP: inc_factor 1.05, dec_factor 1/1.05, ρ_max 500. This ensures responsive convergence in the thin bilateral pool.
+
+The consensus target for contract_cap uses the net-position convention: VRES stores +contract_cap, electrolyzer stores −contract_cap. The imbalance is the sum of net positions. The `g_bar_contract_cap` update follows the same sharing-ADMM formula as other markets.
+
+For a detailed explanation of **how VRES and the electrolyzer decide on the contracted capacity** (economic optimisation plus ADMM consensus, with no separate capacity price), see §2 *Contract pool* → *How contract capacity is determined*.
+
+### 5.6 Sign Convention
 
 | Role | Net position sign | Example |
 |---|---|---|
@@ -668,7 +740,16 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 | `H2_GC_market` | 50.0 €/MWh_GC | 0.3 | Renewable premium |
 | `EP_market` | 700.0 €/t_EP | 3.0 | Ammonia market level; also has `Demand_Column`, `Total_Demand` |
 
-### 8.4 Agent Parameters
+### 8.4 Contracts (market_exposure_contracts.jl only)
+
+| Parameter | Value | Description |
+|---|---|---|
+| `initial_price` | 60.0 €/MWh | Seed for λ_contract (pay-as-produced energy price) |
+| `rho_initial` | 0.5 | ADMM penalty for contract pool (moderate: thin bilateral market) |
+
+The contract pool clears `g_contract` (MWh) at λ_contract (€/MWh). Both VRES and electrolyzer agree on `contract_cap` (MW) via ADMM consensus; there is no separate capacity price.
+
+### 8.5 Agent Parameters
 
 See `Data/data.yaml` for the full annotated configuration. Key parameters:
 
@@ -687,7 +768,8 @@ See `Data/data.yaml` for the full annotated configuration. Key parameters:
 
 ```
 Now/
-├── market_exposure.jl          # Entry point: distributed ADMM simulation
+├── market_exposure.jl          # Entry point: distributed ADMM simulation (5 markets)
+├── market_exposure_contracts.jl # Entry point: ADMM with bilateral VRES–electrolyzer contracts
 ├── social_planner.jl           # Entry point: centralized benchmark
 ├── Project.toml                # Julia project dependencies
 ├── Manifest.toml               # Julia dependency lock file
@@ -738,11 +820,21 @@ Now/
 │   ├── define_results.jl             # Initialize result & ADMM state dictionaries
 │   ├── ADMM.jl                       # Main ADMM coordination loop
 │   ├── ADMM_subroutine.jl            # Per-agent step: update params, solve, record
-│   ├── update_rho.jl                 # Adaptive penalty update (Boyd rule with 3 regimes: balance, gentle push, fixed-ρ near convergence)
-│   ├── save_results.jl               # Write market-exposure CSV outputs (including capacity & investment summaries)
-│   └── save_social_planner_results.jl # Write social-planner CSV outputs (including capacity & investment summaries)
+│   ├── update_rho.jl                 # Adaptive penalty update (Boyd rule with 3 regimes)
+│   ├── save_results.jl               # Write market-exposure CSV outputs
+│   ├── ADMM_contracts.jl             # ADMM loop with contract pool (market_exposure_contracts)
+│   ├── ADMM_subroutine_contracts.jl  # Per-agent step with contract g_bar/λ/ρ
+│   ├── update_rho_contracts.jl      # Adaptive penalty update including contract/contract_cap
+│   ├── build_power_agent_contracts.jl # VRES with g_EOM, g_contract, contract_cap
+│   ├── build_H2_agent_contracts.jl  # Electrolyzer with e_in_pool, g_contract, contract_cap
+│   ├── define_contract_parameters.jl # Contract market flags and parameters
+│   ├── define_contract_market_parameters.jl
+│   ├── define_results_contracts.jl   # Results and ADMM state for contract pool
+│   ├── save_results_contracts.jl     # Contracts.csv, Green_Agents_Detail.csv, ADMM outputs
+│   └── save_social_planner_results.jl # Write social-planner CSV outputs
 │
 ├── market_exposure_results/          # Output from market_exposure.jl
+├── market_exposure_contracts_results/ # Output from market_exposure_contracts.jl
 │   ├── ADMM_Convergence.csv          # Primal & dual residuals per iteration
 │   ├── ADMM_Diagnostics.csv          # ρ, mean price, mean imbalance per iteration
 │   ├── Electricity_Market_History.csv
@@ -756,6 +848,19 @@ Now/
 │   ├── H2_Producer_Diagnostics.csv   # H₂ GC-to-production ratio
 │   ├── Capacity_Investments.csv      # VRES/electrolyzer/green offtaker yearly capacity & investment (ADMM)
 │   └── TimerOutput.yaml              # Profiling data
+│
+├── market_exposure_contracts_results/ # Output from market_exposure_contracts.jl
+│   ├── ADMM_Convergence.csv          # Same as market_exposure + contract, contract_cap columns
+│   ├── ADMM_Diagnostics.csv          # Same + contract, contract_cap columns
+│   ├── Electricity_Market_History.csv
+│   ├── Hydrogen_Market_History.csv
+│   ├── Electricity_GC_Market_History.csv
+│   ├── H2_GC_Market_History.csv
+│   ├── End_Product_Market_History.csv
+│   ├── Agent_Summary.csv             # Same structure as market_exposure (no contract columns)
+│   ├── Market_Prices.csv             # Same + Contract_Price column
+│   ├── Contracts.csv                 # capacity_contracted_MW, energy_transferred_MWh, contract_price_EUR_per_MWh
+│   └── Green_Agents_Detail.csv       # Per-agent (VRES, electrolyzer): total capacity, contracted capacity, energy from contract vs pool, prices
 │
 └── social_planner_results/           # Output from social_planner.jl
     ├── Market_Prices.csv             # Equilibrium prices (duals of balance constraints)
@@ -772,6 +877,7 @@ Now/
 | File | Purpose |
 |---|---|
 | `market_exposure.jl` | Entry point for distributed ADMM. Sections 1–13: env, packages, dirs, source loading, data loading, results folder, agent init, market params, agent params, build models, run ADMM, save results. |
+| `market_exposure_contracts.jl` | Entry point for ADMM with bilateral VRES–electrolyzer contracts. Same structure as market_exposure but uses contract-specific modules: define_contract_parameters, define_contract_market_parameters, define_results_contracts, build_power_agent_contracts, build_H2_agent_contracts, ADMM_contracts, save_results_contracts. Outputs to `market_exposure_contracts_results/`. |
 | `social_planner.jl` | Entry point for centralised benchmark. Sections 1–12: same structure as market_exposure but builds a single planner model instead of per-agent models + ADMM loop. Section 11 implements the two-step QCP dual recovery (QCP solve → fix demand vars + replace QC → LP solve → extract duals). |
 
 ### 10.2 Parameter Definition Files
@@ -796,6 +902,8 @@ Now/
 | `build_offtaker_agent.jl` | `build_offtaker_agent!()` — green/grey/importer (green with EP capacity & CVaR) | `add_offtaker_agent_to_planner!()` — same constraints, returns per-year welfare = −processing/import cost − fixed CAPEX (no per-agent CVaR) |
 | `build_elec_GC_demand_agent.jl` | `build_elec_GC_demand_agent!()` — GC demand with ADMM | `add_elec_GC_demand_agent_to_planner!()` — returns per-year utility expression |
 | `build_EP_demand_agent.jl` | `build_EP_demand_agent!()` — placeholder | `add_EP_demand_agent_to_planner!()` — returns per-year utility expression |
+| `build_power_agent_contracts.jl` | `build_power_agent_contracts!()` — VRES with g_EOM, g_contract, contract_cap; conventional/consumer delegate to build_power_agent! | — (contracts case only; planner unchanged) |
+| `build_H2_agent_contracts.jl` | `build_H2_agent_contracts!()` — electrolyzer with e_in_pool, g_contract, contract_cap | — (contracts case only) |
 | `build_social_planner.jl` | — | `build_social_planner!()` — orchestrates all add_*_to_planner!, adds balance constraints, aggregates welfare, adds epigraph + single social CVaR, sets risk-adjusted objective |
 
 ### 10.4 Solve Files
@@ -814,13 +922,17 @@ Now/
 |---|---|
 | `ADMM.jl` | Main loop: iterate agents → imbalances → primal residuals → dual residuals → price update → ρ update → convergence check. Progress bar. Summary printout. |
 | `ADMM_subroutine.jl` | Per-agent step: update g_bar/λ/ρ on model → dispatch to solve_* → extract & record quantities. H₂-GC prices averaged to annual scalars. |
+| `ADMM_contracts.jl` | Same as ADMM.jl but adds contract energy imbalance, contract_cap consensus, λ_contract price update, and convergence check for contract and contract_cap. |
+| `ADMM_subroutine_contracts.jl` | Per-agent step with contract g_bar_contract, g_bar_contract_cap, λ_contract, ρ_contract, ρ_contract_cap. Dispatches to solve_power_agent_contracts! / solve_H2_agent_contracts! for contract agents. |
 | `update_rho.jl` | Boyd rule: per-market adaptive ρ update with market-specific factors and caps. |
+| `update_rho_contracts.jl` | Extends update_rho! with contract and contract_cap (inc 1.05, ρ_max 500). |
 
 ### 10.6 Save Files
 
 | File | Role |
 |---|---|
 | `save_results.jl` | Writes: ADMM_Convergence.csv, ADMM_Diagnostics.csv, per-market history CSVs, Agent_Summary.csv, Agent_Quantities_Final.csv, Offtaker_GC_Diagnostics.csv, H2_Producer_Diagnostics.csv. |
+| `save_results_contracts.jl` | Writes the same major ADMM outputs as save_results (with contract columns) plus: Contracts.csv (capacity_contracted_MW, energy_transferred_MWh, contract_price_EUR_per_MWh), Green_Agents_Detail.csv (per-agent breakdown: total capacity, contracted vs pool energy, prices). Agent_Summary matches market_exposure structure (no contract columns). |
 | `save_social_planner_results.jl` | Called after two-step dual recovery (LP re-solve). Writes: Market_Prices.csv (duals of balance constraints), Agent_Summary.csv (quantities + welfare), Capacity_Investments_Planner.csv. |
 
 ---
@@ -840,7 +952,16 @@ Now/
 | `H2_Producer_Diagnostics.csv` | Columns: `AgentID`, `H2_total`, `H2_GC_total`, `GC_per_H2`. |
 | `TimerOutput.yaml` | Profiling: time spent in imbalances, residuals, price updates, solve, etc. |
 
-### 11.2 Social Planner Results
+### 11.2 Market Exposure with Contracts Results (`market_exposure_contracts_results/`)
+
+`market_exposure_contracts.jl` produces the same major ADMM outputs as market_exposure (ADMM_Convergence, ADMM_Diagnostics, 5× Market_History, Agent_Summary, Market_Prices), with additional contract and contract_cap columns in convergence and diagnostics. It adds two focal contract outputs:
+
+| File | Contents |
+|---|---|
+| `Contracts.csv` | Single row: `capacity_contracted_MW`, `energy_transferred_MWh`, `contract_price_EUR_per_MWh`. Summary of the bilateral contract outcome. |
+| `Green_Agents_Detail.csv` | Per-agent (VRES, electrolyzer): `AgentID`, `Type`, `total_capacity_MW` (VRES: cap_VRES; electrolyzer: cap_H2_y in MW_H2 output), `contracted_capacity_MW`, `energy_from_contract_MWh`, `energy_from_pool_MWh`, `contract_price_EUR_per_MWh`, `electricity_price_EUR_per_MWh`. Detailed breakdown of how much capacity/energy is contracted vs sold/bought on the electricity market, and at which prices. |
+
+### 11.3 Social Planner Results
 
 | File | Contents |
 |---|---|

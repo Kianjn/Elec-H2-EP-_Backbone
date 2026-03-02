@@ -6,10 +6,16 @@
 
 A multi-agent equilibrium model for coupled **electricity**, **hydrogen**, **green-certificate**, and **end-product** markets, solved via **ADMM** (Alternating Direction Method of Multipliers) with a centralised **social planner** benchmark.
 
+The project offers **three entry points**:
+
+- **`market_exposure.jl`** — Distributed ADMM simulation (five markets, no bilateral contracts).
+- **`social_planner.jl`** — Centralised welfare-maximising benchmark.
+- **`market_exposure_contracts.jl`** — Same as market_exposure but with **bilateral VRES–electrolyzer contracts**: VRES commits capacity to the electrolyzer; the electrolyzer pays **pay-as-produced** (€/MWh for energy actually delivered). When VRES has no output (e.g. night for solar), nothing is delivered and nothing is paid.
+
 At a high level:
 
 - **Agents** (generators, electrolyzer, offtakers, GC demand) each solve their own optimisation problem.
-- **Markets** (power, hydrogen, certificates, end product) are cleared by **prices** updated iteratively by ADMM.
+- **Markets** (power, hydrogen, certificates, end product; plus a **contract pool** in the contracts case) are cleared by **prices** updated iteratively by ADMM.
 - A **social planner** model with a single welfare-maximising objective provides a rigorous benchmark for the decentralised ADMM solution.
 
 ---
@@ -48,7 +54,7 @@ Both the ADMM and social planner use the **same problem definition** from the `S
 
 ## Features
 
-- **Five coupled markets**: Electricity, Electricity Guarantees of Origin (GC), Hydrogen, Hydrogen GC, End Product
+- **Five coupled markets**: Electricity, Electricity Guarantees of Origin (GC), Hydrogen, Hydrogen GC, End Product (plus an optional **bilateral contract pool** in `market_exposure_contracts.jl`)
 - **Seven agent types**: VRES generator, conventional generator, elastic consumer, electrolyzer, green offtaker, grey offtaker, EP importer
 - **Endogenous capacity investment**: VRES, electrolyzer, and green offtaker decide yearly capacity and investment (MW), with fixed annualised CAPEX proportional to installed capacity.
 - **Optional risk aversion (CVaR)**: Those three "green" agents can include a CVaR risk term in their objectives via per-agent `gamma` (risk weight) and `beta` (confidence level); default `gamma = 0.0` keeps them risk-neutral.
@@ -168,7 +174,15 @@ The following minimal sequence should work on a properly configured machine:
    julia --project=. social_planner.jl
    ```
 
-5. **Optionally generate figures** (after both runs have completed)
+5. **Run the ADMM simulation with bilateral VRES–electrolyzer contracts** (optional)
+
+   ```bash
+   julia --project=. market_exposure_contracts.jl
+   ```
+
+   This produces the same major ADMM outputs plus `Contracts.csv` and `Green_Agents_Detail.csv` (capacity contracted, energy transferred, and prices for the contract pool).
+
+6. **Optionally generate figures** (after both runs have completed)
 
    ```bash
    python visualization/visualize_results.py
@@ -182,6 +196,7 @@ For a deeper understanding of what these scripts do internally, see the **How It
 Now/
 ├── market_exposure.jl          # ADMM distributed simulation (entry point)
 ├── social_planner.jl           # Centralized benchmark (entry point)
+├── market_exposure_contracts.jl # ADMM with bilateral VRES–electrolyzer contracts (entry point)
 ├── Project.toml                # Julia dependencies
 ├── Manifest.toml               # Dependency lock file
 ├── DOCUMENTATION.md            # Full technical documentation
@@ -204,9 +219,16 @@ Now/
 │   ├── ADMM_subroutine.jl      # Per-agent ADMM step
 │   ├── update_rho.jl           # Adaptive penalty update
 │   ├── save_results.jl         # Market-exposure CSV output
+│   ├── save_results_contracts.jl # Contract-aware CSV output (Contracts.csv, Green_Agents_Detail.csv)
+│   ├── ADMM_contracts.jl      # ADMM loop with contract pool
+│   ├── ADMM_subroutine_contracts.jl
+│   ├── update_rho_contracts.jl
+│   ├── build_power_agent_contracts.jl
+│   ├── build_H2_agent_contracts.jl
 │   └── save_social_planner_results.jl  # Planner CSV output
 │
 ├── market_exposure_results/    # Output from market_exposure.jl
+├── market_exposure_contracts_results/  # Output from market_exposure_contracts.jl
 └── social_planner_results/     # Output from social_planner.jl
 ```
 
@@ -238,9 +260,21 @@ ADMM:
 3. Provide all required parameters for that type.
 4. Run — no code changes needed. The `define_common_parameters!` function automatically classifies the agent and assigns it to the correct markets.
 
+### Contracts Configuration (market_exposure_contracts.jl only)
+
+Under `Contracts:` in `data.yaml`:
+
+```yaml
+Contracts:
+  initial_price: 60.0    # €/MWh — Seed for contract energy price (pay-as-produced)
+  rho_initial: 0.5       # ADMM penalty for contract pool (moderate: thin bilateral market)
+```
+
+The contract pool clears `g_contract` (MWh) at `λ_contract` (€/MWh). Both VRES and electrolyzer must agree on `contract_cap` (MW) via ADMM consensus; there is no separate capacity price.
+
 ### Changing Tolerances
 
-The convergence tolerance `epsilon` in the ADMM block controls the base L2 residual threshold for **all five markets** (see `define_results.jl`). Residual norms are L2 over all time slots (hours × representative days × years), so "per-slot" imbalances are smaller than the raw norms might suggest.
+The convergence tolerance `epsilon` in the ADMM block controls the base L2 residual threshold for **all five markets** (see `define_results.jl`). In the contracts case, the contract and contract_cap consensus use the same base tolerance. Residual norms are L2 over all time slots (hours × representative days × years), so "per-slot" imbalances are smaller than the raw norms might suggest.
 
 ---
 
@@ -260,6 +294,16 @@ This will:
 5. Write results to `market_exposure_results/`.
 
 **Typical runtime:** 1–30 minutes depending on `max_iter`, `epsilon`, and system hardware.
+
+### Market Exposure with Contracts (ADMM + Bilateral Contract)
+
+```bash
+julia --project=. market_exposure_contracts.jl
+```
+
+This runs the same ADMM simulation as `market_exposure.jl` but with a bilateral contract pool between VRES and the electrolyzer. VRES commits capacity; the electrolyzer receives electricity pay-as-produced. Outputs go to `market_exposure_contracts_results/`, including `Contracts.csv` and `Green_Agents_Detail.csv`.
+
+**Typical runtime:** Similar to market_exposure; convergence is typically achieved within 100–500 iterations with the adaptive ρ and ε logic.
 
 ### Social Planner (Benchmark)
 
@@ -298,6 +342,17 @@ After running both scripts, compare `market_exposure_results/Agent_Quantities_Fi
 | `H2_Producer_Diagnostics.csv` | GC-to-production ratio for electrolyzers |
 | `Capacity_Investments.csv` | For VRES, electrolyzer, and green offtaker: per-year installed capacity and investment (MW) at the final ADMM iteration |
 | `TimerOutput.yaml` | Profiling data (time per ADMM section) |
+
+### Market Exposure with Contracts (`market_exposure_contracts_results/`)
+
+`market_exposure_contracts.jl` produces the **same major ADMM outputs** as `market_exposure.jl` (ADMM_Convergence, ADMM_Diagnostics, 5× Market_History, Agent_Summary, Market_Prices), with additional contract columns for convergence and diagnostics. It adds two focal contract outputs:
+
+| File | Description |
+|---|---|
+| `Contracts.csv` | Single-row summary: `capacity_contracted_MW`, `energy_transferred_MWh`, `contract_price_EUR_per_MWh` |
+| `Green_Agents_Detail.csv` | Per-agent breakdown (VRES, electrolyzer): total capacity, contracted capacity, energy from contract vs pool, contract price, electricity price |
+
+**Contract model**: VRES commits `contract_cap` (MW) of capacity; the electrolyzer receives electricity **pay-as-produced** at λ_contract (€/MWh). When VRES has no output (e.g. night for solar), nothing is delivered and nothing is paid. The contract pool clears via ADMM alongside the five standard markets.
 
 ### Social Planner (`social_planner_results/`)
 
@@ -385,7 +440,7 @@ subject to:
 
 Equilibrium prices are the **dual variables** (shadow prices) of the balance constraints.
 
-### Market Coupling
+### Market Coupling (market_exposure.jl)
 
 ```
 Electricity Market  ←──  VRES, Conventional, Consumer, Electrolyzer
@@ -398,6 +453,19 @@ Electricity Market  ←──  VRES, Conventional, Consumer, Electrolyzer
                                 │
                                 └──→  EP Market  ←──  Green, Grey, Importer  ──→  D_EP
 ```
+
+### Market Coupling with Contracts (market_exposure_contracts.jl)
+
+In the contracts case, VRES and the electrolyzer additionally participate in a **bilateral contract pool**:
+
+```
+VRES  ──g_EOM──→  Electricity Market  ←──  Consumer, Electrolyzer (e_in_pool)
+  │
+  └──g_contract──→  Contract Pool  ←──  Electrolyzer (g_contract)
+       (pay-as-produced at λ_contract; capacity contract_cap agreed via ADMM consensus)
+```
+
+VRES splits generation: `g_EOM` (sold to the electricity market) and `g_contract` (delivered under contract). The electrolyzer receives `g_contract` and buys `e_in_pool` from the pool. Total electrolyzer input = `e_in_pool + g_contract`. When VRES has no output (e.g. night for solar), `g_contract = 0` and nothing is paid.
 
 ---
 
