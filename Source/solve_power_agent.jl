@@ -59,58 +59,60 @@ function solve_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
 
         # ── Recompute per-year loss expressions with current λ ────────────
         # loss_VRES[jy] = Σ_{h,d} W[d,y]·( MC·g − λ_elec·g − λ_GC·g )
-        #   = per-year economic loss (production cost minus market revenues).
-        # JuMP expressions bake in coefficient values at creation time, so
-        # the loss expressions built in build_power_agent! contain the old λ
-        # from the previous (or initial) ADMM iteration. Since λ updates
-        # every iteration, we must rebuild these expressions from scratch.
+        #   = per-year operational loss (production cost minus market revenues).
+        # loss_total[jy] = loss_VRES[jy] + F_cap·cap_VRES[jy] = FULL per-year loss.
+        # CRITICAL: CVaR must use loss_total, not just loss_VRES. Otherwise, when
+        # γ<1, the fixed cost is only in the γ-weighted term, so the effective
+        # weight on F_cap becomes γ instead of 1. With nYears=1 (no scenarios),
+        # changing γ would then change the objective, breaking SP/ME equivalence.
+        # JuMP expressions bake in coefficient values at creation time, so we
+        # must rebuild these expressions from scratch each iteration.
         loss_VRES = Dict{Int,JuMP.AffExpr}()
+        loss_total = Dict{Int,JuMP.AffExpr}()
         for jy in JY
             loss_VRES[jy] = @expression(mod,
                 sum(W[jd, jy] * (MC * g[jh, jd, jy]
                     - λ_elec[jh, jd, jy] * g[jh, jd, jy]
                     - λ_elec_GC[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD)
             )
+            loss_total[jy] = @expression(mod, loss_VRES[jy] + F_cap * cap_VRES[jy])
         end
         mod.ext[:expressions][:loss_VRES] = loss_VRES
 
         # ── Risk-adjusted objective ───────────────────────────────────────
-        #   min  γ · ( Σ_y loss_VRES[y] + F_cap · Σ_y cap_VRES[y] )   ← (1)
-        #      + (1−γ) · CVaR_VRES                                      ← (2)
+        #   min  γ · ( Σ_y loss_total[y] )   ← (1) expected full loss
+        #      + (1−γ) · CVaR_VRES           ← (2) CVaR of full loss
         #      + (ρ_elec/2) · Σ W·(g − ḡ_elec)²                        ← (3)
         #      + (ρ_GC /2)  · Σ W·(g − ḡ_GC)²                          ← (4)
         #
-        # (1) Expected cost: weighted sum of per-year losses (production
-        #     cost minus revenue) plus annualised fixed capacity cost.
-        # (2) Tail-risk penalty: CVaR of the loss distribution. When γ=1
-        #     (risk-neutral) this term vanishes, recovering the standard
-        #     expected-cost objective used in the build function.
+        # (1) Expected full loss (operational + fixed capacity cost).
+        # (2) CVaR of full loss. When γ=1 (risk-neutral) this term vanishes.
+        #     With nYears=1, CVaR = loss_total, so objective = loss_total = risk-neutral.
         # (3) ADMM augmented-Lagrangian penalty for the electricity market.
         # (4) ADMM augmented-Lagrangian penalty for the elec-GC market.
+        # (5) Investment consensus: penalty on cap toward capacity needed for g_bar.
+        cap_bar = get(mod.ext[:parameters], :cap_bar, zeros(length(JY)))
+        ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
+        cap_pen = haskey(mod.ext[:parameters], :cap_bar) ? sum(ρ_cap/2 * (cap_VRES[jy] - cap_bar[jy])^2 for jy in JY) : 0.0
         mod.ext[:objective] = @objective(mod, Min,
-            gamma * (
-                sum(loss_VRES[jy] for jy in JY)
-                + F_cap * sum(cap_VRES[jy] for jy in JY)
-            )
+            gamma * sum(loss_total[jy] for jy in JY)
             + (1 - gamma) * cvar_VRES
             + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_elec_GC/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+            + cap_pen
         )
 
         # ── Delete stale CVaR constraints and re-add with fresh losses ────
-        # The shortfall constraints u_VRES[jy] ≥ loss_VRES[jy] − α_VRES
-        # and the linking constraint CVaR_VRES ≥ α + (1/(1−β))·Σ P·u
-        # both reference the loss expressions. Since those expressions
-        # changed (new λ coefficients), we must delete the old constraints
-        # and create new ones.
+        # Shortfall uses loss_total (operational + F_cap·cap) so that with
+        # nYears=1, CVaR = loss_total and γ has no effect (SP/ME equivalence).
         for jy in JY
             delete(mod, mod.ext[:constraints][:CVaR_VRES_shortfall][jy])
         end
         delete(mod, mod.ext[:constraints][:CVaR_VRES_link])
 
-        # Shortfall constraints: u_VRES[jy] ≥ loss_VRES[jy] − α_VRES.
+        # Shortfall constraints: u_VRES[jy] ≥ loss_total[jy] − α_VRES.
         mod.ext[:constraints][:CVaR_VRES_shortfall] = @constraint(mod, [jy in JY],
-            u_VRES[jy] >= loss_VRES[jy] - alpha_VRES
+            u_VRES[jy] >= loss_total[jy] - alpha_VRES
         )
         # CVaR linking: CVaR_VRES ≥ α_VRES + (1/(1−β)) · Σ P[jy]·u_VRES[jy].
         one_minus_beta = max(1e-6, 1.0 - beta_conf)

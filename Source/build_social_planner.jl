@@ -312,10 +312,14 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
     #   alpha_social = VaR proxy (threshold of the loss distribution)
     #   u_social[jy] = max(0, social_loss[jy] − alpha_social) — shortfall
     #   cvar_social  ≥ alpha_social + (1/(1−β)) · Σ P[jy]·u_social[jy]
-    # lower_bound = 0 on all three is consistent with the individual ADMM
-    # agent formulations. All constraints below are purely LINEAR.
-    alpha_social = @variable(planner, lower_bound = 0, base_name = "alpha_social")
-    cvar_social  = @variable(planner, lower_bound = 0, base_name = "CVaR_social")
+    # alpha_social and cvar_social must be FREE (no lower bound). When social
+    # welfare is positive, the social loss = −sw_aux is NEGATIVE. The optimal
+    # VaR α for CVaR of a negative loss is negative. With α ≥ 0, we force
+    # cvar_social ≥ 0, so the objective becomes γ·sw_aux instead of sw_aux when
+    # γ < 1 — breaking SP/ME equivalence for nYears=1. With α free, CVaR = loss
+    # when nYears=1, so objective = sw_aux regardless of γ.
+    alpha_social = @variable(planner, base_name = "alpha_social")
+    cvar_social  = @variable(planner, base_name = "CVaR_social")
     u_social     = @variable(planner, [jy in JY], lower_bound = 0, base_name = "u_social")
 
     # Shortfall: u[jy] ≥ −sw_aux[jy] − α (purely LINEAR).

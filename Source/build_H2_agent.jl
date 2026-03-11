@@ -132,6 +132,7 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
 
     # Per-year economic loss (cost − revenue) excluding ADMM penalties.
     loss_H2 = Dict{Int,JuMP.AffExpr}()
+    loss_total = Dict{Int,JuMP.AffExpr}()
     for jy in JY
         loss_H2[jy] = @expression(mod,
             sum(W[jd, jy] * (
@@ -142,12 +143,13 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
+        loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y[jy])
     end
     mod.ext[:expressions][:loss_H2] = loss_H2
 
-    # Shortfall constraints: u_H2[jy] ≥ loss_H2[jy] − α_H2.
+    # Shortfall constraints: u_H2[jy] ≥ loss_total[jy] − α_H2 (full loss for CVaR).
     mod.ext[:constraints][:CVaR_H2_shortfall] = @constraint(mod, [jy in JY],
-        u_H2[jy] >= loss_H2[jy] - alpha_H2
+        u_H2[jy] >= loss_total[jy] - alpha_H2
     )
 
     # CVaR definition: CVaR_H2 ≥ α_H2 + (1/(1−β)) * Σ P[jy]*u_H2[jy].

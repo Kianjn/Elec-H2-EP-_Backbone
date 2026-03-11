@@ -56,13 +56,12 @@ function solve_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     P         = mod.ext[:parameters][:P]               # scenario probabilities
 
     # ── Recompute per-year loss expressions with current λ ────────────────
-    # loss_H2[jy] = Σ_{h,d} W[d,y]·( λ_elec·e_in + λ_GC·gc_e + op·h2
-    #                                 − λ_H2·h2   − λ_H2GC·gc_h2 )
-    #   = per-year economic loss (procurement + operating cost minus sales).
-    # JuMP expressions freeze coefficient values at creation time, so the
-    # loss expressions built in build_H2_agent! contain stale λ from the
-    # previous (or initial) ADMM iteration. We rebuild them from scratch.
+    # loss_H2[jy] = per-year operational loss (procurement + op cost minus sales).
+    # loss_total[jy] = loss_H2[jy] + F_cap·cap_H2_y[jy] = FULL per-year loss.
+    # CRITICAL: CVaR must use loss_total so that with nYears=1, γ has no effect.
+    # JuMP expressions freeze coefficient values at creation time; rebuild each iter.
     loss_H2 = Dict{Int,JuMP.AffExpr}()
+    loss_total = Dict{Int,JuMP.AffExpr}()
     for jy in JY
         loss_H2[jy] = @expression(mod,
             sum(W[jd, jy] * (
@@ -73,49 +72,45 @@ function solve_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
+        loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y[jy])
     end
     mod.ext[:expressions][:loss_H2] = loss_H2
 
     # ── Risk-adjusted objective ───────────────────────────────────────────
-    #   min  γ · ( Σ_y loss_H2[y] + F_cap · Σ_y cap_H2_y[y] )          ← (1)
-    #      + (1−γ) · CVaR_H2                                             ← (2)
+    #   min  γ · ( Σ_y loss_total[y] )   ← (1) expected full loss
+    #      + (1−γ) · CVaR_H2             ← (2) CVaR of full loss
     #      + (ρ_elec/2)    · Σ W·(−e_in     − ḡ_elec)²                  ← (3)
     #      + (ρ_GC/2)      · Σ W·(−gc_e     − ḡ_GC)²                   ← (4)
     #      + (ρ_H2/2)      · Σ W·(+h2       − ḡ_H2)²                   ← (5)
     #      + (ρ_H2GC/2)    · Σ W·(+gc_h2    − ḡ_H2GC)²                 ← (6)
     #
-    # (1) Expected cost: procurement + operational − sales + fixed CAPEX.
-    # (2) Tail-risk penalty: CVaR of the loss distribution. When γ=1
-    #     (risk-neutral) this term vanishes, recovering the standard
-    #     expected-cost objective.
+    # (1) Expected full loss (operational + fixed CAPEX).
+    # (2) CVaR of full loss. With nYears=1, CVaR = loss_total ⇒ γ has no effect.
     # (3)–(6) ADMM augmented-Lagrangian penalties for each market.
-    #     Net positions use sign convention: −e_in, −gc_e (purchases),
-    #     +h2, +gc_h2 (sales), minus the respective consensus targets ḡ.
+    # (7) Investment consensus: penalty on cap toward capacity needed for g_bar_H2.
+    cap_bar = get(mod.ext[:parameters], :cap_bar, zeros(length(JY)))
+    ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
+    cap_pen = haskey(mod.ext[:parameters], :cap_bar) ? sum(ρ_cap/2 * (cap_H2_y[jy] - cap_bar[jy])^2 for jy in JY) : 0.0
     mod.ext[:objective] = @objective(mod, Min,
-        gamma * (
-            sum(loss_H2[jy] for jy in JY)
-            + F_cap * sum(cap_H2_y[jy] for jy in JY)
-        )
+        gamma * sum(loss_total[jy] for jy in JY)
         + (1 - gamma) * cvar_H2
         + sum(ρ_elec/2 * W[jd, jy] * ((-e_in[jh, jd, jy])      - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2/2 * W[jd, jy] * (h2_out[jh, jd, jy]         - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2_GC/2 * W[jd, jy] * (q_h2gc[jh, jd, jy]      - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+        + cap_pen
     )
 
     # ── Delete stale CVaR constraints and re-add with fresh losses ────────
-    # The shortfall constraints u_H2[jy] ≥ loss_H2[jy] − α_H2 and the
-    # linking constraint CVaR_H2 ≥ α + (1/(1−β))·Σ P·u both reference the
-    # loss expressions. Since those expressions changed (new λ coefficients),
-    # we must delete the old constraints and create new ones.
+    # Shortfall uses loss_total (operational + F_cap·cap) so γ has no effect when nYears=1.
     for jy in JY
         delete(mod, mod.ext[:constraints][:CVaR_H2_shortfall][jy])
     end
     delete(mod, mod.ext[:constraints][:CVaR_H2_link])
 
-    # Shortfall constraints: u_H2[jy] ≥ loss_H2[jy] − α_H2.
+    # Shortfall constraints: u_H2[jy] ≥ loss_total[jy] − α_H2.
     mod.ext[:constraints][:CVaR_H2_shortfall] = @constraint(mod, [jy in JY],
-        u_H2[jy] >= loss_H2[jy] - alpha_H2
+        u_H2[jy] >= loss_total[jy] - alpha_H2
     )
     # CVaR linking: CVaR_H2 ≥ α_H2 + (1/(1−β)) · Σ P[jy]·u_H2[jy].
     one_minus_beta = max(1e-6, 1.0 - beta_conf)

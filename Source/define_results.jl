@@ -23,7 +23,7 @@
 function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dict,
                         elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
                         H2_GC_market::Dict, EP_market::Dict;
-                        sp_prices_file::String = "")
+                        sp_prices_file::String = "", sp_primal_file::String = "", use_primal_warmstart::Bool = true)
     n_ts = admm_data["nTimesteps"]
     n_rd = admm_data["nReprDays"]
     n_yr = admm_data["nYears"]
@@ -49,15 +49,19 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
             sp_df = CSV.read(sp_prices_file, DataFrame)
             n_total = n_ts * n_rd * n_yr
             if nrow(sp_df) == n_total
+                # Use SP prices as-is when warm-starting. Do NOT clamp H2_GC to 0 here:
+                # clamping would change the equilibrium and cause agents to produce wrong
+                # quantities → large imbalance → cascading price updates (e.g. negative elec).
+                # The H2_GC floor is applied in ADMM.jl after each price update; for iter 1
+                # we trust the SP solution.
                 results["λ"] = Dict(
                     "elec"    => [reshape(Float64.(sp_df.Elec_Price),    shp)],
                     "H2"      => [reshape(Float64.(sp_df.H2_Price),     shp)],
                     "elec_GC" => [reshape(Float64.(sp_df.Elec_GC_Price), shp)],
-                    "H2_GC"   => [max.(reshape(Float64.(sp_df.H2_GC_Price), shp), 0.0)],
+                    "H2_GC"   => [reshape(Float64.(sp_df.H2_GC_Price), shp)],
                     "EP"      => [reshape(Float64.(sp_df.EP_Price),     shp)],
                 )
                 sp_loaded = true
-                @info "Warm-started ADMM λ from social planner hourly prices ($sp_prices_file)"
             else
                 @warn "Social planner prices file has $(nrow(sp_df)) rows, expected $n_total. " *
                       "Falling back to scalar warm-start."
@@ -83,11 +87,72 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     # pushed (by ADMM_subroutine); non-participants keep empty lists. Initialising
     # all agents avoids key-missing errors in generic post-processing loops.
     # Key = agent ID (String), value = list of 3D arrays (one per ADMM iteration).
+    #
+    # Warm-start: If SP_Primal_Quantities.csv exists (and we loaded SP prices),
+    # pre-populate with SP solution so iteration 1 has g_bar = SP (prev = SP, imb = 0).
+    # Agents then solve with (λ=SP, g_bar=SP) and reproduce SP → zero imbalance → immediate convergence.
     results["g"]       = Dict(m => [] for m in agents[:all])   # Electricity net position (MW; + = sell, − = buy)
     results["h2"]      = Dict(m => [] for m in agents[:all])   # Hydrogen net position (MW_H2)
     results["elec_GC"] = Dict(m => [] for m in agents[:all])   # Electricity GC net position (MW_GC)
     results["H2_GC"]   = Dict(m => [] for m in agents[:all])   # Hydrogen GC net position (MW_GC)
     results["EP"]      = Dict(m => [] for m in agents[:all])   # End-product net position (MW_EP)
+
+    primal_loaded = false
+    if sp_loaded && use_primal_warmstart && !isempty(sp_primal_file) && isfile(sp_primal_file)
+        try
+            sp_primal = CSV.read(sp_primal_file, DataFrame)
+            n_total = n_ts * n_rd * n_yr
+            if nrow(sp_primal) == n_total
+                # CSV rows are (jy, jd, jh) order. Build 3D [jh, jd, jy] arrays.
+                for m in agents[:all]
+                    g_col = Symbol(m * "_elec")
+                    h2_col = Symbol(m * "_H2")
+                    gc_col = Symbol(m * "_elec_GC")
+                    h2gc_col = Symbol(m * "_H2_GC")
+                    ep_col = Symbol(m * "_EP")
+                    g_arr = zeros(n_ts, n_rd, n_yr)
+                    h2_arr = zeros(n_ts, n_rd, n_yr)
+                    gc_arr = zeros(n_ts, n_rd, n_yr)
+                    h2gc_arr = zeros(n_ts, n_rd, n_yr)
+                    ep_arr = zeros(n_ts, n_rd, n_yr)
+                    for (iy, jy) in enumerate(1:n_yr), (id, jd) in enumerate(1:n_rd), (ih, jh) in enumerate(1:n_ts)
+                        row_idx = (iy - 1) * n_rd * n_ts + (id - 1) * n_ts + ih
+                        if hasproperty(sp_primal, g_col)
+                            g_arr[ih, id, iy] = sp_primal[row_idx, g_col]
+                        end
+                        if hasproperty(sp_primal, h2_col)
+                            h2_arr[ih, id, iy] = sp_primal[row_idx, h2_col]
+                        end
+                        if hasproperty(sp_primal, gc_col)
+                            gc_arr[ih, id, iy] = sp_primal[row_idx, gc_col]
+                        end
+                        if hasproperty(sp_primal, h2gc_col)
+                            h2gc_arr[ih, id, iy] = sp_primal[row_idx, h2gc_col]
+                        end
+                        if hasproperty(sp_primal, ep_col)
+                            ep_arr[ih, id, iy] = sp_primal[row_idx, ep_col]
+                        end
+                    end
+                    push!(results["g"][m], g_arr)
+                    push!(results["h2"][m], h2_arr)
+                    push!(results["elec_GC"][m], gc_arr)
+                    push!(results["H2_GC"][m], h2gc_arr)
+                    push!(results["EP"][m], ep_arr)
+                end
+                primal_loaded = true
+                # Sanity check: elec market should clear (sum of g_net ≈ 0)
+                elec_sum = sum(sum(results["g"][m][end]) for m in agents[:elec_market])
+                if abs(elec_sum) > 0.01
+                    @warn "SP primal warm-start: elec market sum = $elec_sum (expected ≈0). " *
+                          "Index/ordering or g_net mapping may be wrong."
+                end
+            else
+                @warn "SP primal file has $(nrow(sp_primal)) rows, expected $n_total. Skipping primal warm-start."
+            end
+        catch e
+            @warn "Could not read SP primal quantities ($sp_primal_file): $e. Skipping primal warm-start."
+        end
+    end
 
     # Per-agent capacity and investment history for green agents (one vector per ADMM iteration).
     # These are populated only for agents that actually own these variables (VRES, electrolyzer, green offtaker).
@@ -101,12 +166,14 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     # ADMM["ρ"] — Per-market list of scalar penalty weights, one entry per ADMM
     # iteration. Updated by update_rho! (which may increase/decrease ρ based on
     # the ratio of primal to dual residuals). The first element = rho_initial.
+    rho_cap_init = get(admm_data, "rho_cap_initial", 0.1)
     ADMM["ρ"] = Dict(
         "elec"    => [elec_market["rho_initial"]],
         "H2"      => [H2_market["rho_initial"]],
         "elec_GC" => [elec_GC_market["rho_initial"]],
         "H2_GC"   => [H2_GC_market["rho_initial"]],
         "EP"      => [EP_market["rho_initial"]],
+        "cap"     => [rho_cap_init],
     )
 
     # Full 3D imbalance tensor per iteration: sum of all agents' net positions in
@@ -147,16 +214,16 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     # Convergence is checked using Boyd-style absolute + relative tolerances
     # (see ADMM.jl and DOCUMENTATION.md §5.4).
     ADMM["Residuals"] = Dict(
-        "Primal" => Dict("elec" => Float64[], "H2" => Float64[], "elec_GC" => Float64[], "H2_GC" => Float64[], "EP" => Float64[]),
-        "Dual"   => Dict("elec" => Float64[], "H2" => Float64[], "elec_GC" => Float64[], "H2_GC" => Float64[], "EP" => Float64[]),
+        "Primal" => Dict("elec" => Float64[], "H2" => Float64[], "elec_GC" => Float64[], "H2_GC" => Float64[], "EP" => Float64[], "cap" => Float64[]),
+        "Dual"   => Dict("elec" => Float64[], "H2" => Float64[], "elec_GC" => Float64[], "H2_GC" => Float64[], "EP" => Float64[], "cap" => Float64[]),
     )
 
     # Best (smallest) primal/dual residual seen so far per market; used by
     # update_rho! to implement hysteresis and freeze ρ once the algorithm has
     # entered a near-solution region.
     ADMM["BestResidual"] = Dict(
-        "Primal" => Dict("elec" => Inf, "H2" => Inf, "elec_GC" => Inf, "H2_GC" => Inf, "EP" => Inf),
-        "Dual"   => Dict("elec" => Inf, "H2" => Inf, "elec_GC" => Inf, "H2_GC" => Inf, "EP" => Inf),
+        "Primal" => Dict("elec" => Inf, "H2" => Inf, "elec_GC" => Inf, "H2_GC" => Inf, "EP" => Inf, "cap" => Inf),
+        "Dual"   => Dict("elec" => Inf, "H2" => Inf, "elec_GC" => Inf, "H2_GC" => Inf, "EP" => Inf, "cap" => Inf),
     )
 
     # Per-market flag indicating that ρ has been frozen permanently; once set
@@ -168,6 +235,7 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
         "elec_GC" => false,
         "H2_GC" => false,
         "EP" => false,
+        "cap" => false,
     )
 
     # Short history of residual metrics R = rp + rd per market; update_rho!
@@ -179,6 +247,7 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
         "elec_GC" => Float64[],
         "H2_GC"   => Float64[],
         "EP"      => Float64[],
+        "cap"     => Float64[],
     )
 
     # ResidualScale: reference magnitude for primal and dual residuals used in
@@ -186,8 +255,8 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     # the first non-zero residual observed per market and kept fixed for the
     # rest of the run.
     ADMM["ResidualScale"] = Dict(
-        "Primal" => Dict("elec" => 0.0, "H2" => 0.0, "elec_GC" => 0.0, "H2_GC" => 0.0, "EP" => 0.0),
-        "Dual"   => Dict("elec" => 0.0, "H2" => 0.0, "elec_GC" => 0.0, "H2_GC" => 0.0, "EP" => 0.0),
+        "Primal" => Dict("elec" => 0.0, "H2" => 0.0, "elec_GC" => 0.0, "H2_GC" => 0.0, "EP" => 0.0, "cap" => 0.0),
+        "Dual"   => Dict("elec" => 0.0, "H2" => 0.0, "elec_GC" => 0.0, "H2_GC" => 0.0, "EP" => 0.0, "cap" => 0.0),
     )
 
     # Absolute and relative tolerances for the ADMM stopping rule:
@@ -213,8 +282,12 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
         "EP"      => base_tol,
         "H2"      => base_tol,
         "H2_GC"   => base_tol,
+        "cap"     => base_tol,
     )
     ADMM["n_iter"]   = 0     # Iteration counter; incremented each ADMM loop
     ADMM["walltime"] = 0.0   # Cumulative wall-clock time (seconds); measured in ADMM.jl
+
+    # Warm-start flags for consolidated logging (read by market_exposure.jl)
+    results["warmstart"] = Dict("λ" => sp_loaded, "primal" => primal_loaded)
     return results, ADMM
 end

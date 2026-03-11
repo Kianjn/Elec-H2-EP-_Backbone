@@ -140,7 +140,7 @@ Input/output_2021/decision_variables_short.csv
 Input/output_2021/ordering_variable.csv
 ```
 
-The timeseries CSV must have columns: `Time`, `SOLAR`, `LOAD_E`, `LOAD_H`, `LOAD_EP`, `WIND_ONSHORE` (8760 rows for a full year at hourly resolution).
+The timeseries CSV must have columns: `Time`, `SOLAR`, `LOAD_E`, `LOAD_H`, `LOAD_EP`, `WIND` (192 rows for 8 representative days × 24 hours, or 8760 for full year).
 
 The representative-days CSV must have columns: `periods`, `weights`, `selected_periods`.
 
@@ -274,7 +274,7 @@ The contract pool clears `g_contract` (MWh) at `λ_contract` (€/MWh). Both VRE
 
 ### Changing Tolerances
 
-The convergence tolerance `epsilon` in the ADMM block controls the base L2 residual threshold for **all five markets** (see `define_results.jl`). In the contracts case, the contract and contract_cap consensus use the same base tolerance. Residual norms are L2 over all time slots (hours × representative days × years), so "per-slot" imbalances are smaller than the raw norms might suggest.
+The convergence tolerance `epsilon` in the ADMM block controls the base L2 residual threshold for `market_exposure` (see `define_results.jl` and DOCUMENTATION.md §5.4). For the contracts case, use `epsilon_contracts` (e.g. 5) for a more relaxed tolerance—the contracts case has more coupled markets and benefits from a higher value. If `epsilon_contracts` is unset, it falls back to `epsilon`. Residual norms are L2 over all time slots (hours × representative days × years), so "per-slot" imbalances are smaller than the raw norms might suggest.
 
 ---
 

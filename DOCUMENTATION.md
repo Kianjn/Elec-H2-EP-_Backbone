@@ -265,6 +265,8 @@ The ADMM part is purely **algorithmic**: it does not change the underlying econo
 #### CVaR formulation (per agent)
 
 For each risk-averse agent (VRES, electrolyzer, green offtaker), CVaR is linearised via:
+
+**Important**: The loss that enters CVaR must be the **full** per-year loss, including the fixed capacity cost (F_cap × cap). If only the operational loss is used, then when γ < 1 the fixed cost appears only in the γ-weighted term, so the effective weight on F_cap becomes γ instead of 1. With nYears = 1 (no scenarios), changing γ would then change the objective, breaking the equivalence between social planner and market exposure. The correct formulation uses `loss_total[y] = loss_operational[y] + F_cap × cap[y]` in the CVaR shortfall constraints. With one scenario, CVaR = loss_total, so the objective reduces to loss_total regardless of γ.
 - `α_i` — VaR proxy (free variable, `≥ 0`)
 - `u_i[jy]` — shortfall per scenario year (`≥ 0`)
 - `cvar_i` — CVaR value (`≥ 0`)
@@ -473,7 +475,10 @@ Each ADMM iteration `k` proceeds as follows:
 
    The primal residual $\|r_k^t\|_2$ measures **how far the market is from clearing**, while the dual residual $\|s_k^t\|_2$ measures **how stable the agents’ net positions are** from one iteration to the next.
 
-4. **Update prices**: `λ^{k+1} = λ^k − η_k × ρ_k × imbalance^k` (gradient ascent on the dual with **residual-aware step size** `η_k ∈ (0,1]` per market). Far from convergence, `η_k = 1` and we recover the standard update. Near convergence (when both primal and dual residuals are within a modest multiple of tolerance), `η_k` is reduced (e.g. 0.3) to damp oscillations in tightly coupled markets while keeping `ρ_k` fixed.
+4. **Update prices**: `λ^{k+1} = λ^k − η_k × ρ_k × imbalance^k` (gradient ascent on the dual with **residual-aware step size** `η_k ∈ (0,1]` per market). The step size `η_k` is chosen per market:
+
+   - **η = 1** when `max(rp, rd) > 10 × ε_abs`: the algorithm is far from convergence; use the full step to make rapid progress.
+   - **η = 0.3** when `max(rp, rd) ≤ 10 × ε_abs`: residuals are small enough that we are near the solution; reduce the step to **damp oscillations** in tightly coupled markets. A full step can overshoot and cause limit cycles when capacity, flows, and prices are mutually dependent. The smaller η lets the algorithm settle into the equilibrium basin without bouncing around it.
 
 5. **Update ρ** (history-aware multi-regime rule): For each market independently:
    - **Regime 1 (rp vs rd imbalanced)**: If `primal > balance_threshold × dual` → increase `ρ` (under-penalised). If `dual > balance_threshold × primal` → decrease `ρ` (over-penalised). Increases are applied only when they have not worsened the recent residual history.
@@ -514,7 +519,9 @@ In addition to these static parameters, the algorithm maintains:
 
 - **Best residuals per market**: `best_primal[key]`, `best_dual[key]` track the smallest primal and dual residuals seen so far. They serve as a *hysteresis anchor* for deciding when a market has truly entered a near-solution region.
 - **A short residual history per market**: `R_hist[key]` stores a short window of `R = rp + rd`. Before increasing ρ, the rule checks whether residuals have improved (or at least not deteriorated) over this window; if they have worsened, the increase is skipped.
-- **Per-market freeze flags**: once a market hits residuals that are both within a modest multiple of tolerance and close to its best-ever residuals, its `ρ` is frozen permanently. Subsequent iterations keep ρ fixed for that market.
+- **Per-market freeze flags**: once a market hits residuals that are both within a modest multiple of tolerance and close to its best-ever residuals, its `ρ` is frozen permanently. Subsequent iterations keep ρ fixed for that market. The freeze threshold is `mid_resid_factor × ε` (e.g. 5×ε); freezing earlier (within a few times ε) prevents later ρ updates from kicking the algorithm out of a good basin.
+
+- **Divergence detection**: if the combined residual `R = rp + rd` has increased for three consecutive iterations, the algorithm is overshooting. ρ is decreased for that market to damp the overshoot and break limit cycles.
 
 This combination yields a robust behaviour:
 
@@ -589,7 +596,30 @@ This has three advantages over a single scalar `epsilon`:
 2. **Robustness to refinement**: If the temporal resolution or the number of representative days changes (n increases), the `sqrt(n)` factor keeps the per-slot accuracy comparable.
 3. **Numerical realism**: Once residuals are small relative to the problem’s own scale (`Scale_*[k]`), the criteria do not force the algorithm to chase tiny numerical oscillations; they recognise that the solution is “good enough” in the sense of Boyd et al.
 
-### 5.5 Contract Pool ADMM (market_exposure_contracts.jl)
+#### Relative tolerance ε_rel
+
+The optional `ε_rel` term adds a scale-relative component. When `ε_rel > 0`, markets with larger typical residual magnitudes get proportionally larger tolerances. Set `epsilon_rel: 0.01` in `data.yaml` to enable a 1% relative tolerance. The default is `0.0`.
+
+#### Choosing ε and recommended values
+
+The choice of `ε_abs` (or `epsilon` in `data.yaml`) trades off convergence speed vs. accuracy. Too small (e.g. 0.1–0.5): the algorithm may never satisfy the stopping rule. **Recommended**: For typical energy-system models with 192 timesteps, **ε = 2** is a practical default for `market_exposure`—yielding ε_pri ≈ 28 per market, convergence in 10–50 iterations when warm-started, and mean prices within 1–5% of the social planner. Rule of thumb: ε_abs ≈ 1–2% of typical flow magnitude. If ADMM does not converge, try increasing ε to 2 or 3.
+
+#### Two epsilon values: `epsilon` vs `epsilon_contracts`
+
+The **contracts case** (`market_exposure_contracts`) has more coupled markets (standard flows + contract energy + contract capacity + capacity consensus) and stronger interdependence (VRES splits pool vs contract; electrolyzer does the same). As a result, convergence is slower and residuals tend to be larger than in `market_exposure`. To avoid running to `max_iter` without declaring convergence when results are already good enough, the contracts case uses a separate tolerance:
+
+- **`epsilon`** — Used by `market_exposure`. Default 2.
+- **`epsilon_contracts`** — Used by `market_exposure_contracts` when set in `data.yaml`. More relaxed (e.g. 5) so that convergence can be declared when residuals are acceptable (~50 iterations), before adaptive ρ or price updates destabilize the system. If `epsilon_contracts` is not set, the contracts case falls back to `epsilon`.
+
+Both cases use the same convergence logic; only the tolerance value differs. The capacity consensus in the contracts case additionally uses `cap_tol_relax` (see §5.6).
+
+### 5.5 Warm-start from Social Planner
+
+Warm-starting ADMM from the social planner solution is **critical** for fast convergence. Without it, agents start with zero consensus targets and zero capacity seeds, which biases them toward suboptimal quantities.
+
+Three warm-start components: (1) **Price (λ)**: Load hourly prices from `Market_Prices.csv`. (2) **Primal (quantities)**: Load from `SP_Primal_Quantities.csv` so iteration 1 has ḡ = SP; without this, ḡ = 0 biases agents toward zero. (3) **Capacity**: Load from `SP_Capacities.csv` and `set_start_value` on capacity variables. Run `social_planner.jl` first, then `market_exposure.jl`. A single message is printed: `ADMM warm-start: λ from SP prices, primal quantities from SP, capacity seeds for N agents`.
+
+### 5.6 Contract Pool ADMM (market_exposure_contracts.jl)
 
 In the contracts case, the ADMM loop (`ADMM_contracts.jl`) extends the standard loop with:
 
@@ -600,9 +630,14 @@ In the contracts case, the ADMM loop (`ADMM_contracts.jl`) extends the standard 
 
 The consensus target for contract_cap uses the net-position convention: VRES stores +contract_cap, electrolyzer stores −contract_cap. The imbalance is the sum of net positions. The `g_bar_contract_cap` update follows the same sharing-ADMM formula as other markets.
 
+**Relaxed tolerances for the contracts case.** Because the contracts case has more coupled markets and stronger interdependence (VRES splits pool vs contract; capacity consensus depends on both `g_bar_elec` and `g_bar_ppa`), two additional parameters relax convergence criteria:
+
+- **`epsilon_contracts`** — More relaxed base tolerance (e.g. 5) for all flow markets. See §5.4 *Two epsilon values*.
+- **`cap_tol_relax`** — Multiplier for the capacity consensus tolerance. Effective cap tolerance = standard (ε_pri, ε_dual) × `cap_tol_relax`. Default 100. This allows convergence when flow markets have cleared even if capacity consensus lags, since capacity is tightly coupled to flows that are still settling.
+
 For a detailed explanation of **how VRES and the electrolyzer decide on the contracted capacity** (economic optimisation plus ADMM consensus, with no separate capacity price), see §2 *Contract pool* → *How contract capacity is determined*.
 
-### 5.6 Sign Convention
+### 5.7 Sign Convention
 
 | Role | Net position sign | Example |
 |---|---|---|
@@ -675,6 +710,8 @@ u_social[y]  ≥ −sw_aux[y] − α_social                          ∀ y ∈ J
 cvar_social  ≥ α_social + (1/(1−β)) × Σ_y P[y] × u_social[y]
 ```
 
+**Important**: `α_social` and `cvar_social` must be **free** (no lower bound). When social welfare is positive, the social loss = −sw_aux is negative. The optimal VaR α for CVaR of a negative loss is negative. With α ≥ 0, cvar_social would be forced ≥ 0, so the objective would become γ·sw_aux instead of sw_aux when γ < 1 — breaking SP/ME equivalence for nYears=1. With α free, CVaR = loss when nYears=1, so the objective reduces to sw_aux regardless of γ.
+
 The objective is also linear:
 
 ```
@@ -684,6 +721,16 @@ max  γ × Σ_y sw_aux[y]  −  (1−γ) × cvar_social
 Since the objective maximises `sw_aux`, the epigraph constraint binds at optimality (`sw_aux[y] = social_welfare[y]`), making the formulation mathematically equivalent to applying CVaR directly to `social_welfare`.
 
 The epigraph constraints are the **only** quadratic constraints in the model. They are in Gurobi's standard convex QC form (PSD Q-matrix on the `≤` side). All other constraints (CVaR, market-clearing, capacity bounds) are purely linear. The dual recovery procedure (§6.2) handles the QCP→LP conversion for price extraction.
+
+### 6.5 Investment Decisions: Social Planner vs. Market Exposure
+
+Both the social planner and market exposure include **endogenous investment** in VRES capacity (`cap_VRES`), electrolyzer H₂ capacity (`cap_H2_y`), and green offtaker EP capacity (`cap_EP_y`). The formulations are structurally identical:
+
+- **Social planner**: Each agent's capacity variables are added to the centralised planner model. The planner optimises all quantities and capacities jointly in a single optimisation. Market-clearing constraints enforce supply = demand. The optimal capacities emerge from the welfare-maximising solution.
+
+- **Market exposure (ADMM)**: Each agent has its own capacity variables in its decentralised model. Agents optimise independently, but they must agree on a **consensus capacity** via an ADMM penalty: each agent minimises `(ρ_cap/2) × (cap − cap_bar)²`, where `cap_bar` is the capacity implied by the flow consensus (e.g. for VRES: `cap_bar[y] = max over (h,d) of g_bar[h,d,y] / AF[h,d,y]`). At convergence, all agents choose the same capacity and `cap_bar` matches the agreed-upon level.
+
+**Why warm-start matters for investment**: Without capacity warm-start from the SP, the first ADMM iteration has `cap_bar` derived from zero flows (ḡ = 0), so `cap_bar = 0`. Agents are then penalised toward zero capacity, which is far from the equilibrium. With SP capacity seeds (`set_start_value`) and primal warm-start (ḡ = SP), `cap_bar` is consistent with SP flows and the capacity penalty pulls agents toward the SP investment levels from the first iteration. This dramatically speeds convergence of the investment consensus.
 
 ---
 
@@ -728,7 +775,9 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 |---|---|---|
 | `rho_initial` | 1.0 | Default penalty weight (neutral starting point) |
 | `max_iter` | 10,000 | Maximum ADMM iterations |
-| `epsilon` | 0.1 | Convergence tolerance (L2 residual norm) |
+| `epsilon` | 2 | Convergence tolerance for `market_exposure`; see §5.4 for choosing ε. Recommended: 2 for typical energy-system models. |
+| `epsilon_contracts` | 5 | [market_exposure_contracts only] More relaxed tolerance for the contracts case (more coupled markets). If unset, falls back to `epsilon`. |
+| `cap_tol_relax` | 100 | [market_exposure_contracts only] Multiplier for capacity consensus tolerance. See §5.6. |
 
 ### 8.3 Market Parameters
 
@@ -780,7 +829,7 @@ Now/
 │   └── data.yaml               # All configuration: agents, markets, ADMM settings
 │
 ├── Input/
-│   ├── timeseries_2021.csv     # Full-year hourly profiles (SOLAR, LOAD_E, LOAD_H, LOAD_EP, WIND_ONSHORE)
+│   ├── timeseries_2021.csv     # Representative-day hourly profiles (SOLAR, LOAD_E, LOAD_H, LOAD_EP, WIND)
 │   ├── timeseries_2022.csv     # (one per year; columns are normalized 0–1 profiles)
 │   ├── ...
 │   ├── output_2021/

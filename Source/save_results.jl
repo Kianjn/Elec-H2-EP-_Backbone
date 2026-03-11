@@ -51,6 +51,8 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
         H2_GC_dual     = ADMM_state["Residuals"]["Dual"]["H2_GC"],
         EP_primal      = ADMM_state["Residuals"]["Primal"]["EP"],
         EP_dual        = ADMM_state["Residuals"]["Dual"]["EP"],
+        cap_primal     = ADMM_state["Residuals"]["Primal"]["cap"],
+        cap_dual       = ADMM_state["Residuals"]["Dual"]["cap"],
     )
     CSV.write(joinpath(results_dir, "ADMM_Convergence.csv"), conv_df)
 
@@ -60,23 +62,28 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     # imbalances evolve across iterations and to diagnose oscillation or
     # divergence. ρ is sliced [1:n_it] because its vector is one element
     # longer than the other per-iteration vectors (see n_it note above).
+    # PriceHistory may have length n_it+1 (initial + 1 per iteration); slice to
+    # [2:end] so we get "price after iteration i" for i=1..n_it.
+    ph(mkt) = ADMM_state["PriceHistory"][mkt]
+    ph_slice(mkt) = length(ph(mkt)) == n_it + 1 ? ph(mkt)[2:end] : ph(mkt)
     diag_df = DataFrame(
         iter             = 1:n_it,
         elec_rho         = ADMM_state["ρ"]["elec"][1:n_it],
-        elec_price_mean  = ADMM_state["PriceHistory"]["elec"],
+        elec_price_mean  = ph_slice("elec"),
         elec_imb_mean    = ADMM_state["ImbalanceMean"]["elec"],
         H2_rho           = ADMM_state["ρ"]["H2"][1:n_it],
-        H2_price_mean    = ADMM_state["PriceHistory"]["H2"],
+        H2_price_mean    = ph_slice("H2"),
         H2_imb_mean      = ADMM_state["ImbalanceMean"]["H2"],
         elec_GC_rho        = ADMM_state["ρ"]["elec_GC"][1:n_it],
-        elec_GC_price_mean = ADMM_state["PriceHistory"]["elec_GC"],
+        elec_GC_price_mean = ph_slice("elec_GC"),
         elec_GC_imb_mean   = ADMM_state["ImbalanceMean"]["elec_GC"],
         H2_GC_rho          = ADMM_state["ρ"]["H2_GC"][1:n_it],
-        H2_GC_price_mean   = ADMM_state["PriceHistory"]["H2_GC"],
+        H2_GC_price_mean   = ph_slice("H2_GC"),
         H2_GC_imb_mean     = ADMM_state["ImbalanceMean"]["H2_GC"],
         EP_rho             = ADMM_state["ρ"]["EP"][1:n_it],
-        EP_price_mean      = ADMM_state["PriceHistory"]["EP"],
+        EP_price_mean      = ph_slice("EP"),
         EP_imb_mean        = ADMM_state["ImbalanceMean"]["EP"],
+        cap_rho            = ADMM_state["ρ"]["cap"][1:n_it],
     )
     CSV.write(joinpath(results_dir, "ADMM_Diagnostics.csv"), diag_df)
 
@@ -95,7 +102,7 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
         df = DataFrame(
             iter       = 1:n_it,
             rho        = ADMM_state["ρ"][key][1:n_it],
-            price_mean = ADMM_state["PriceHistory"][key],
+            price_mean = ph_slice(key),
             imb_mean   = ADMM_state["ImbalanceMean"][key],
             primal_res = ADMM_state["Residuals"]["Primal"][key],
             dual_res   = ADMM_state["Residuals"]["Dual"][key],

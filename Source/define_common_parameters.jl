@@ -161,5 +161,16 @@ function define_common_parameters!(m::String, mod::Model, data::Dict, ts::Dict, 
     mod.ext[:parameters][:g_bar_EP]  = zeros(shp)
     mod.ext[:parameters][:ρ_EP]      = 1.0
 
+    # Investment consensus: agents with endogenous capacity (VRES, H2 producer,
+    # GreenOfftaker) get cap_bar[jy] = capacity needed to support flow consensus,
+    # and ρ_cap for the penalty (ρ_cap/2)*(cap - cap_bar)². Couples investment
+    # to flow ADMM so ME converges to SP when γ=1. Use low initial ρ_cap to
+    # avoid over-constraining early iterations.
+    rho_cap = get(data, "rho_cap_initial", 0.1)
+    if agent_type in ("VRES", "GreenProducer", "GreenOfftaker")
+        mod.ext[:parameters][:cap_bar] = zeros(n_years)
+        mod.ext[:parameters][:ρ_cap]   = rho_cap
+    end
+
     return mod, agents
 end

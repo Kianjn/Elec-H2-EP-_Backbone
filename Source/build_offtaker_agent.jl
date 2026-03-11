@@ -111,6 +111,7 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
 
         # Per-year economic loss (cost − revenue) excluding ADMM penalties.
         loss_G = Dict{Int,JuMP.AffExpr}()
+        loss_total = Dict{Int,JuMP.AffExpr}()
         for jy in JY
             loss_G[jy] = @expression(mod,
                 sum(W[jd, jy] * (
@@ -120,12 +121,13 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
                     - λ_EP[jh, jd, jy]      * ep[jh, jd, jy]
                 ) for jh in JH, jd in JD)
             )
+            loss_total[jy] = @expression(mod, loss_G[jy] + F_cap * cap_EP_y[jy])
         end
         mod.ext[:expressions][:loss_GreenOfftaker] = loss_G
 
-        # Shortfall constraints: u_G[jy] ≥ loss_G[jy] − α_G.
+        # Shortfall constraints: u_G[jy] ≥ loss_total[jy] − α_G (full loss for CVaR).
         mod.ext[:constraints][:CVaR_Green_shortfall] = @constraint(mod, [jy in JY],
-            u_G[jy] >= loss_G[jy] - alpha_G
+            u_G[jy] >= loss_total[jy] - alpha_G
         )
 
         # CVaR definition: CVaR_G ≥ α_G + (1/(1−β)) * Σ P[jy]*u_G[jy].

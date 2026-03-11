@@ -12,7 +12,7 @@
 
 function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_state::Dict,
                                     elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
-                                    H2_GC_market::Dict, EP_market::Dict, contract_market::Dict,
+                                    H2_GC_market::Dict, EP_market::Dict, ppa_market::Dict,
                                     mdict::Dict, agents::Dict, TO::TimerOutput)
     n_ts = data["General"]["nTimesteps"]
     n_rd = data["General"]["nReprDays"]
@@ -66,19 +66,75 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
             mod.ext[:parameters][:ρ_EP]    = ADMM_state["ρ"]["EP"][end]
         end
 
-        # Contract market (energy + capacity) — only for VRES and electrolyzer
-        if get(mod.ext[:parameters], :in_contract_market, false)
-            n_contract = contract_market["nAgents"]
-            prev_contract = isempty(results["contract"][m]) ? zeros_shp : results["contract"][m][end]
-            imb_contract = isempty(ADMM_state["Imbalances"]["contract"]) ? zeros_shp : ADMM_state["Imbalances"]["contract"][end]
-            mod.ext[:parameters][:g_bar_contract] = prev_contract .- (1.0 / (n_contract + 1)) .* imb_contract
-            mod.ext[:parameters][:λ_contract]     = results["λ"]["contract"][end]
-            mod.ext[:parameters][:ρ_contract]     = ADMM_state["ρ"]["contract"][end]
+        # Contract market (per-VRES energy + capacity) — set BEFORE cap_bar so VRES cap_bar can use g_bar_ppa
+        if get(mod.ext[:parameters], :in_ppa_market, false)
+            ppa_vres = get(ppa_market, "ppa_vres", String[])
+            atype = String(get(mod.ext[:parameters], :Type, ""))
+            C = ADMM_state["ppa"]
 
-            prev_net_cap = isempty(results["contract_cap"][m]) ? 0.0 : results["contract_cap"][m][end]
-            imb_cap  = isempty(ADMM_state["Imbalances"]["contract_cap"]) ? 0.0 : ADMM_state["Imbalances"]["contract_cap"][end]
-            mod.ext[:parameters][:g_bar_contract_cap] = prev_net_cap - (1.0 / (n_contract + 1)) * imb_cap
-            mod.ext[:parameters][:ρ_contract_cap]     = ADMM_state["ρ"]["contract_cap"][end]
+            if atype == "VRES"
+                # VRES m: single contract (its own sub-market)
+                n_contract = 2  # VRES + electrolyzer
+                prev_contract = isempty(results["ppa"][m]) ? zeros_shp : results["ppa"][m][end]
+                imb_contract = isempty(C["Imbalances"][m]) ? zeros_shp : C["Imbalances"][m][end]
+                mod.ext[:parameters][:g_bar_ppa] = prev_contract .- (1.0 / (n_contract + 1)) .* imb_contract
+                mod.ext[:parameters][:λ_ppa]     = results["λ_ppa"][m][end]
+                mod.ext[:parameters][:ρ_ppa]     = C["ρ"][m][end]
+
+                prev_net_cap = isempty(results["ppa_cap"][m]) ? 0.0 : results["ppa_cap"][m][end]
+                imb_cap  = isempty(C["Imbalances_cap"][m]) ? 0.0 : C["Imbalances_cap"][m][end]
+                mod.ext[:parameters][:g_bar_ppa_cap] = prev_net_cap - (1.0 / (n_contract + 1)) * imb_cap
+                mod.ext[:parameters][:ρ_ppa_cap]     = C["ρ_cap"][m][end]
+            else
+                # Electrolyzer: per-VRES params
+                for vres_id in ppa_vres
+                    n_contract = 2
+                    prev_contract = isempty(results["ppa_from"][m][vres_id]) ? zeros_shp : results["ppa_from"][m][vres_id][end]
+                    imb_contract = isempty(C["Imbalances"][vres_id]) ? zeros_shp : C["Imbalances"][vres_id][end]
+                    mod.ext[:parameters][:g_bar_ppa][vres_id] = prev_contract .- (1.0 / (n_contract + 1)) .* imb_contract
+                    mod.ext[:parameters][:λ_ppa][vres_id]     = results["λ_ppa"][vres_id][end]
+                    mod.ext[:parameters][:ρ_ppa][vres_id]     = C["ρ"][vres_id][end]
+
+                    prev_net_cap = isempty(results["ppa_cap_from"][m][vres_id]) ? 0.0 : results["ppa_cap_from"][m][vres_id][end]
+                    imb_cap  = isempty(C["Imbalances_cap"][vres_id]) ? 0.0 : C["Imbalances_cap"][vres_id][end]
+                    mod.ext[:parameters][:g_bar_ppa_cap][vres_id] = prev_net_cap - (1.0 / (n_contract + 1)) * imb_cap
+                    mod.ext[:parameters][:ρ_ppa_cap][vres_id]     = C["ρ_cap"][vres_id][end]
+                end
+            end
+        end
+
+        # Investment consensus: cap_bar = capacity needed to support flow consensus (same as base ADMM_subroutine).
+        # For VRES in contracts: total generation = g_EOM + g_ppa, so cap_bar uses g_bar_elec + g_bar_ppa.
+        if haskey(mod.ext[:parameters], :cap_bar)
+            agent_type = String(get(mod.ext[:parameters], :Type, ""))
+            JY = mod.ext[:sets][:JY]
+            cap_bar = zeros(length(JY))
+            if agent_type == "VRES"
+                g_bar = mod.ext[:parameters][:g_bar_elec]
+                AF = mod.ext[:timeseries][:AF]
+                g_bar_ppa = get(mod.ext[:parameters], :g_bar_ppa, zeros_shp)
+                g_bar_total = g_bar .+ g_bar_ppa
+                for (iy, jy) in enumerate(JY)
+                    mx = 0.0
+                    for jh in 1:n_ts, jd in 1:n_rd
+                        af = AF[jh, jd, jy]
+                        mx = max(mx, af > 1e-9 ? max(0.0, g_bar_total[jh, jd, jy] / af) : 0.0)
+                    end
+                    cap_bar[iy] = mx
+                end
+            elseif agent_type == "GreenProducer"
+                g_bar = mod.ext[:parameters][:g_bar_H2]
+                for (iy, jy) in enumerate(JY)
+                    cap_bar[iy] = max(0.0, maximum(g_bar[:, :, jy]))
+                end
+            elseif agent_type == "GreenOfftaker"
+                g_bar = mod.ext[:parameters][:g_bar_EP]
+                for (iy, jy) in enumerate(JY)
+                    cap_bar[iy] = max(0.0, maximum(g_bar[:, :, jy]))
+                end
+            end
+            mod.ext[:parameters][:cap_bar] = cap_bar
+            mod.ext[:parameters][:ρ_cap]  = ADMM_state["ρ"]["cap"][end]
         end
     end
 
@@ -87,9 +143,9 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
     # ------------------------------------------------------------------
     @timeit TO "Solve agent" begin
         if m in agents[:power]
-            solve_power_agent_contracts!(m, mod, elec_market, elec_GC_market, contract_market)
+            solve_power_agent_contracts!(m, mod, elec_market, elec_GC_market, ppa_market)
         elseif m in agents[:H2]
-            solve_H2_agent_contracts!(m, mod, H2_market, H2_GC_market, contract_market)
+            solve_H2_agent_contracts!(m, mod, H2_market, H2_GC_market, ppa_market)
         elseif m in agents[:offtaker]
             solve_offtaker_agent!(m, mod, EP_market, H2_market, H2_GC_market)
         elseif m in agents[:elec_GC_demand]
@@ -122,15 +178,24 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
             push!(results["EP"][m], ep)
         end
 
-        # Contract market quantities
-        if get(mod.ext[:parameters], :in_contract_market, false)
-            g_contract = collect(value.(mod.ext[:expressions][:g_net_contract]))
-            push!(results["contract"][m], g_contract)
-            cap_val = value(mod.ext[:variables][:contract_cap])
-            # Net position: VRES supplies +contract_cap, electrolyzer demands -contract_cap
+        # Contract market quantities (per-VRES)
+        if get(mod.ext[:parameters], :in_ppa_market, false)
             atype = String(get(mod.ext[:parameters], :Type, ""))
-            net_cap = (atype == "VRES") ? cap_val : -cap_val
-            push!(results["contract_cap"][m], net_cap)
+            if atype == "VRES"
+                g_contract = collect(value.(mod.ext[:expressions][:g_net_ppa]))
+                push!(results["ppa"][m], g_contract)
+                cap_val = value(mod.ext[:variables][:ppa_cap])
+                push!(results["ppa_cap"][m], cap_val)  # VRES: +supply
+            else
+                g_contract_from = mod.ext[:expressions][:g_net_ppa_from]
+                ppa_cap_var = mod.ext[:variables][:ppa_cap]
+                for vres_id in keys(g_contract_from)
+                    g_from = collect(value.(g_contract_from[vres_id]))
+                    push!(results["ppa_from"][m][vres_id], g_from)
+                    cap_val = value(ppa_cap_var[vres_id])
+                    push!(results["ppa_cap_from"][m][vres_id], -cap_val)  # Electrolyzer: -demand
+                end
+            end
         end
 
         agent_type = String(get(mod.ext[:parameters], :Type, ""))

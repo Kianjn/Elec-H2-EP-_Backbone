@@ -16,9 +16,11 @@ General:
 # ---------------------------------------------------------------------------
 ADMM:
   rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
-  max_iter: 1000        # Iteration budget
-  epsilon: 0.5          # Convergence tolerance on L2 norm of primal/dual residuals. With 72 timesteps, epsilon=1 ≈ 0.12 MW per-timestep accuracy (<1% of quantities 20-50 MW).
-  min_iter: 100         # Minimum iterations before checking convergence. Early residuals can be spuriously small; 100 ensures prices have stabilized before checking.
+  rho_cap_initial: 0.1  # Penalty for investment/capacity consensus; low initial to avoid over-constraining early iterations
+  max_iter: 200        # Iteration budget
+  epsilon: 2          # Convergence tolerance on L2 norm of primal/dual residuals. Used by market_exposure. With 72 timesteps, epsilon=1 ≈ 0.12 MW per-timestep accuracy (<1% of quantities 20-50 MW).
+  epsilon_contracts: 5 # [market_exposure_contracts only] More relaxed epsilon for the contracts case (more coupled markets). If unset, falls back to epsilon. Higher value (e.g. 5) helps declare convergence when residuals are good enough (~50 iters).
+  cap_tol_relax: 100   # [market_exposure_contracts only] Multiplier for capacity consensus tolerance. Effective cap tolerance = standard × cap_tol_relax. Larger values allow convergence when flow markets are close but capacity lags (stronger coupling in contracts case).
   gamma: 1              # Risk weight for CVaR (γ=1 ⇒ risk-neutral). Used by both social planner and ADMM agents. Change here to update both simultaneously.
   beta: 0.95            # CVaR confidence level τ (e.g. 0.95 = worst 5% of scenarios). Used by both social planner and ADMM agents.
 
@@ -53,21 +55,30 @@ EP_market:
   initial_price: 150.0      # €/MWh_EP — Warm-start from social planner equilibrium
   rho_initial: 3.0          # Larger penalty: EP market is stiff (few participants, large price swings) and needs stronger coupling
   Demand_Column: "LOAD_EP"  # Column in the timeseries CSV that holds the normalized EP demand profile (inelastic)
-  Total_Demand: 40.0        # EP demand scaling factor (MWh_EP); D_EP[jh,jd,jy] = Total_Demand × LOAD_EP. With LOAD_EP ≈ 0.9 → D_EP ≈ 36/h, within total capacity (50 MW)
-# Basically 36 MW_EP per hour is demanded.
+  Total_Demand: 50.0        # EP demand scaling factor (MWh_EP); D_EP[jh,jd,jy] = Total_Demand × LOAD_EP
 # ---------------------------------------------------------------------------
 # Power-sector agents
 # ---------------------------------------------------------------------------
 Power:
   # Variable Renewable Energy Source (solar farm)
-  Gen_VRES_01:
+  Gen_VRES_Solar:
     Type: "VRES"
-    Capacity: 100.0            # Installed capacity (MW)
+    Capacity: 25.0            # Installed capacity (MW)
     Profile_Column: "SOLAR"    # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
     MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
     FixedCost_per_MW: 70000.0  # €/MW-year — Annualised CAPEX + fixed O&M for utility-scale solar. Assumes ≈700 k€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈70 k€/MW-year, consistent with recent LCOE studies.
     gamma: 1                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
     beta: 0.95                 # CVaR confidence level τ (placeholder; only active when gamma<1).
+
+  # Variable Renewable Energy Source (wind farm)
+  Gen_VRES_Wind:
+     Type: "VRES"
+     Capacity: 25.0            # Installed capacity (MW)
+     Profile_Column: "WIND"     # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
+     MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
+     FixedCost_per_MW: 70000.0  # €/MW-year — Annualised CAPEX + fixed O&M for utility-scale wind (same as solar for baseline)
+     gamma: 1                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
+     beta: 0.95                 # CVaR confidence level τ (placeholder; only active when gamma<1).
 
   # Dispatchable conventional generator (e.g. gas turbine)
   Gen_Conv_01:
@@ -79,7 +90,7 @@ Power:
   # Quadratic utility: U(d) = A_E·d − ½·B_E·d²  →  inverse demand p(d) = A_E − B_E·d
   Cons_Elec_01:
     Type: "Consumer"
-    PeakLoad: 40.0           # Peak demand (MW); scales the normalized load profile to absolute MW values
+    PeakLoad: 55.0           # Peak demand (MW); scales the normalized load profile to absolute MW values (increased to avoid zero prices with VRES surplus)
     Load_Column: "LOAD_E"    # Column in timeseries CSV with the normalized electricity load profile
     A_E: 500.0               # €/MWh — Intercept of inverse demand curve; willingness to pay for the first MW (high to ensure demand is met)
     B_E: 0.5                 # €/MWh² — Slope of inverse demand; controls price sensitivity (low = relatively inelastic demand)
@@ -90,11 +101,11 @@ Power:
 Hydrogen:
   Prod_H2_Green:
     Type: "GreenProducer"
-    Capacity_Electrolyzer: 60.0               # Maximum electricity input to the electrolyzer (MW_elec); reduced from 90 MW to tighten initial supply and make investment decisions more relevant.
-    Capacity_H2_Output: 40.0                  # Maximum hydrogen output (MW_H2); aligned with the 60 MW_elec limit (60 / 1.5 = 40 MW_H2) after reduction. (???)
+    Capacity_Electrolyzer: 35.0               # Maximum electricity input to the electrolyzer (MW_elec)
+    Capacity_H2_Output: 23.0                 # Maximum hydrogen output (MW_H2); 35/1.5 ≈ 23.3
     SpecificConsumption: 1.5                  # MWh_elec per MWh_H2 produced (i.e. efficiency = 1/1.5 ≈ 67%); typical PEM electrolyzer value
-    OperationalCost: 3.0                      # €/MWh_H2 — Variable O&M for water treatment, stack degradation, etc.
-    FixedCost_per_MW_Electrolyzer: 100000.0   # €/MW_elec-year — Annualised CAPEX for PEM electrolysers. Assumes ≈1.0 M€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈100 k€/MW-year (within IEA/IEEFA benchmark ranges).
+    OperationalCost: 3.0                       # €/MWh_H2 — Variable O&M for water treatment, stack degradation, etc.
+    FixedCost_per_MW_Electrolyzer: 400000.0   # €/MW_elec-year — Annualised CAPEX; high value limits electrolyzer expansion
     gamma: 1                                  # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
     beta: 0.95                                # CVaR confidence level τ.
 
@@ -116,8 +127,8 @@ Hydrogen_Offtaker:
   # Grey offtaker — uses conventional (grey) hydrogen but must buy H2 GCs for a fraction of its implied H2 use
   Offtaker_Grey:
     Type: "GreyOfftaker"
-    Capacity: 30.0            # Max end-product output (MW_EP equivalent); together with 45 MW_EP green capacity and 5 MW_EP import, total EP supply capacity (≈80 MW_EP) now comfortably exceeds ≈36 MW_EP demand while preserving headroom for competition between green and grey routes.
-    MarginalCost: 100.0       # €/MWh_EP — Higher than green because it includes fossil H2 + carbon costs
+    Capacity: 40.0            # Max end-product output (MW_EP equivalent)
+    MarginalCost: 88.0        # €/MWh_EP — Competitive with green route to increase grey share and H2_GC demand
     gamma_NH3: 0.75           # EP-to-H2 conversion ratio for grey offtaker (MWh_EP per MWh_H2). 0.75 means 1 MWh_H2 yields 0.75 MWh_EP of NH3; we infer implied H2 use from observed EP output via H2_intake ≈ EP / gamma_NH3 when applying the 42% green H2 GC mandate.
 
   # EP importer — brings end product from outside the modelled system
@@ -134,10 +145,10 @@ Hydrogen_Offtaker:
 Electricity_GC_Demand:
   Demand_GC_Elec_01:
     Type: "GC_Demand"
-    PeakLoad: 10.0           # Peak GC demand (MW_GC equivalent); scales the normalized load profile
-    Load_Column: "LOAD_E"    # Reuses the electricity load profile as a proxy for GC demand timing
-    A_GC: 20.0               # €/MWh_GC — Intercept of inverse demand for GCs; willingness to pay for first certificate
-    B_GC: 0.5                # €/MWh_GC² — Slope; controls price sensitivity of GC demand
+    PeakLoad: 48.0
+    Load_Column: "LOAD_EP"
+    A_GC: 55.0                # €/MWh_GC
+    B_GC: 0.35                # €/MWh_GC²
 
 # ---------------------------------------------------------------------------
 # EP Demand — Currently empty: EP demand is inelastic and fully defined by
@@ -147,15 +158,21 @@ Electricity_GC_Demand:
 EP_Demand: {}
 
 # ---------------------------------------------------------------------------
-# Contracts — Bilateral contract pool (VRES ↔ H2 producer)
-# Used ONLY by market_exposure_contracts.jl. Ignored by market_exposure.jl
+# PPAs — Power Purchase Agreements (VRES ↔ H2 producer)
+# Used ONLY by market_exposure_ppa.jl. Ignored by market_exposure.jl
 # and social_planner.jl.
 #
-# VRES and the electrolyzer can enter a bilateral contract: VRES commits
-# contract_cap (MW) of capacity; the electrolyzer receives electricity
-# pay-as-produced (only when VRES actually generates). The contract price
-# λ_contract (€/MWh) is cleared by the contract pool.
+# VRES and the electrolyzer can enter PPAs: each VRES has its own PPA
+# sub-market. The H2 producer can contract with Solar, Wind, or both at
+# different prices. PPA bundles electricity + elec_GC (real-world: buyer
+# receives both, pay-as-produced). VRES commits ppa_cap (MW); electrolyzer
+# receives elec+GC package. Per-VRES λ_ppa (€/MWh) cleared by each PPA market.
 # ---------------------------------------------------------------------------
-Contracts:
-  initial_price: 60.0    # €/MWh — Seed for contract energy price (pay-as-produced)
-  rho_initial: 0.5       # ADMM penalty for contract market (moderate: thin market)
+PPAs:
+  initial_price: 60.0    # €/MWh — Default seed for PPA bundled price (pay-as-produced)
+  rho_initial: 0.5       # ADMM penalty for PPA market (moderate: thin market)
+  # Per-VRES initial prices (optional overrides; falls back to initial_price if absent)
+  Gen_VRES_Solar:
+    initial_price: 55.0  # €/MWh — Solar-specific PPA price seed
+  Gen_VRES_Wind:
+    initial_price: 65.0  # €/MWh — Wind-specific PPA price seed

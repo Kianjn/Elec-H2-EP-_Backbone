@@ -100,6 +100,37 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
             mod.ext[:parameters][:λ_EP]    = results["λ"]["EP"][end]
             mod.ext[:parameters][:ρ_EP]    = ADMM_state["ρ"]["EP"][end]
         end
+
+        # Investment consensus: cap_bar = capacity needed to support flow consensus.
+        if haskey(mod.ext[:parameters], :cap_bar)
+            agent_type = String(get(mod.ext[:parameters], :Type, ""))
+            JY = mod.ext[:sets][:JY]
+            cap_bar = zeros(length(JY))
+            if agent_type == "VRES"
+                g_bar = mod.ext[:parameters][:g_bar_elec]
+                AF = mod.ext[:timeseries][:AF]
+                for (iy, jy) in enumerate(JY)
+                    mx = 0.0
+                    for jh in 1:n_ts, jd in 1:n_rd
+                        af = AF[jh, jd, jy]
+                        mx = max(mx, af > 1e-9 ? max(0.0, g_bar[jh, jd, jy] / af) : 0.0)
+                    end
+                    cap_bar[iy] = mx
+                end
+            elseif agent_type == "GreenProducer"
+                g_bar = mod.ext[:parameters][:g_bar_H2]
+                for (iy, jy) in enumerate(JY)
+                    cap_bar[iy] = max(0.0, maximum(g_bar[:, :, jy]))
+                end
+            elseif agent_type == "GreenOfftaker"
+                g_bar = mod.ext[:parameters][:g_bar_EP]
+                for (iy, jy) in enumerate(JY)
+                    cap_bar[iy] = max(0.0, maximum(g_bar[:, :, jy]))
+                end
+            end
+            mod.ext[:parameters][:cap_bar] = cap_bar
+            mod.ext[:parameters][:ρ_cap]  = ADMM_state["ρ"]["cap"][end]
+        end
     end
 
     # ------------------------------------------------------------------

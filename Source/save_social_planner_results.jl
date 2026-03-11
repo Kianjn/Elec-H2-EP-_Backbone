@@ -105,6 +105,96 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     prices_df = DataFrame(prices_rows)
     CSV.write(joinpath(results_folder, "Market_Prices.csv"), prices_df)
 
+    # ── SP_Primal_Quantities.csv — Per-agent g_net per market for ADMM warm-start ─
+    # One row per (jy, jd, jh) with columns m_elec, m_H2, m_elec_GC, m_H2_GC, m_EP
+    # for each agent m. ME loads this to pre-populate results so iteration 1 has
+    # g_bar = SP solution (prev = SP, imb = 0) and converges immediately.
+    primal_rows = []
+    t_idx = 1
+    for jy in JY, jd in JD, jh in JH
+        row = Dict{Symbol, Any}(:Time => t_idx, :jh => jh, :jd => jd, :jy => jy)
+        for id in agents[:all]
+            g_elec = 0.0
+            g_H2 = 0.0
+            g_elec_GC = 0.0
+            g_H2_GC = 0.0
+            g_EP = 0.0
+            if id in power_consumers
+                d = var_dict[:power_d_E][id]
+                g_elec = -value(d[jh, jd, jy])
+            elseif id in power_vres || id in power_conv
+                q = var_dict[:power_q_E][id]
+                g_elec = value(q[jh, jd, jy])
+                if id in power_vres
+                    g_elec_GC = value(q[jh, jd, jy])
+                end
+            elseif id in H2_producers
+                e_buy = var_dict[:H2_e_buy][id]
+                gc_e = var_dict[:H2_gc_e_buy][id]
+                h_sell = var_dict[:H2_h_sell][id]
+                gc_h = var_dict[:H2_gc_h_sell][id]
+                g_elec = -value(e_buy[jh, jd, jy])
+                g_elec_GC = -value(gc_e[jh, jd, jy])
+                g_H2 = value(h_sell[jh, jd, jy])
+                g_H2_GC = value(gc_h[jh, jd, jy])
+            elseif id in offtaker_green
+                h_buy = var_dict[:offtaker_h_buy][id]
+                gc_buy = var_dict[:offtaker_gc_h_buy][id]
+                ep_sell = var_dict[:offtaker_ep_sell][id]
+                g_H2 = -value(h_buy[jh, jd, jy])
+                g_H2_GC = -value(gc_buy[jh, jd, jy])
+                g_EP = value(ep_sell[jh, jd, jy])
+            elseif id in offtaker_grey
+                ep_sell = var_dict[:offtaker_ep_sell][id]
+                gc_buy = var_dict[:offtaker_gc_h_buy_G][id]
+                g_H2_GC = -value(gc_buy[jh, jd, jy])
+                g_EP = value(ep_sell[jh, jd, jy])
+            elseif id in offtaker_import
+                ep_sell = var_dict[:offtaker_ep_sell_import][id]
+                g_EP = value(ep_sell[jh, jd, jy])
+            elseif id in agents[:elec_GC_demand]
+                dgc = var_dict[:elec_GC_demand_d_GC_E][id]
+                g_elec_GC = -value(dgc[jh, jd, jy])
+            end
+            row[Symbol(id * "_elec")] = g_elec
+            row[Symbol(id * "_H2")] = g_H2
+            row[Symbol(id * "_elec_GC")] = g_elec_GC
+            row[Symbol(id * "_H2_GC")] = g_H2_GC
+            row[Symbol(id * "_EP")] = g_EP
+        end
+        push!(primal_rows, row)
+        t_idx += 1
+    end
+    primal_df = DataFrame(primal_rows)
+    CSV.write(joinpath(results_folder, "SP_Primal_Quantities.csv"), primal_df)
+
+    # ── SP_Capacities.csv — Per-agent per-year capacity for ME warm-start ─
+    # One row per (AgentID, jy) with cap value. ME loads and set_start_value
+    # on capacity variables before first ADMM iteration to seed the solver.
+    cap_rows = []
+    for id in agents[:all]
+        cap_vec = Float64[]
+        if id in power_vres && haskey(var_dict, :power_cap_VRES) && haskey(var_dict[:power_cap_VRES], id)
+            cap_var = var_dict[:power_cap_VRES][id]
+            cap_vec = [value(cap_var[jy]) for jy in JY]
+        elseif id in H2_producers && haskey(var_dict, :H2_cap_elec) && haskey(var_dict[:H2_cap_elec], id)
+            cap_var = var_dict[:H2_cap_elec][id]
+            cap_vec = [value(cap_var[jy]) for jy in JY]
+        elseif id in offtaker_green && haskey(var_dict, :offtaker_cap_EP_green) && haskey(var_dict[:offtaker_cap_EP_green], id)
+            cap_var = var_dict[:offtaker_cap_EP_green][id]
+            cap_vec = [value(cap_var[jy]) for jy in JY]
+        end
+        for (iy, jy) in enumerate(JY)
+            if !isempty(cap_vec)
+                push!(cap_rows, (AgentID = id, jy = jy, cap = cap_vec[iy]))
+            end
+        end
+    end
+    if !isempty(cap_rows)
+        cap_df = DataFrame(cap_rows)
+        CSV.write(joinpath(results_folder, "SP_Capacities.csv"), cap_df)
+    end
+
     # Print equilibrium prices to the output log (same format as market exposure)
     # These duals are the THEORETICAL BENCHMARK: true equilibrium prices from
     # centralized welfare maximization. Run market_exposure.jl to compare ADMM

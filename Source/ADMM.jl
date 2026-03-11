@@ -40,6 +40,11 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
     convergence = 0
     iterations = ProgressBar(1:max_iter)
 
+    # Log initial mean prices (before any iteration) so diagnostics show warm-start.
+    for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+        push!(ADMM_state["PriceHistory"][mkt], mean(results["λ"][mkt][end]))
+    end
+
     for iter in iterations
         # Early exit once convergence has been achieved (flagged at the end of
         # the previous iteration). Breaking here—rather than using a while-loop—
@@ -132,6 +137,31 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
             if scales_pr["EP"] == 0.0 && rp_EP > 0.0
                 scales_pr["EP"] = rp_EP
             end
+
+            # Capacity primal residual: L2 norm of (cap - cap_bar) across all cap agents.
+            cap_agents = get(agents, :cap_agents, String[])
+            rp_cap = 0.0
+            if !isempty(cap_agents)
+                for m in cap_agents
+                    cap_vec = Float64[]
+                    if !isempty(get(results["Cap_VRES"], m, []))
+                        cap_vec = results["Cap_VRES"][m][end]
+                    elseif !isempty(get(results["Cap_Elec_H2"], m, []))
+                        cap_vec = results["Cap_Elec_H2"][m][end]
+                    elseif !isempty(get(results["Cap_EP_Green"], m, []))
+                        cap_vec = results["Cap_EP_Green"][m][end]
+                    end
+                    if !isempty(cap_vec)
+                        cap_bar = get(mdict[m].ext[:parameters], :cap_bar, zeros(length(cap_vec)))
+                        rp_cap += sum((cap_vec[i] - cap_bar[i])^2 for i in eachindex(cap_vec))
+                    end
+                end
+                rp_cap = sqrt(rp_cap)
+            end
+            push!(ADMM_state["Residuals"]["Primal"]["cap"], rp_cap)
+            if ADMM_state["ResidualScale"]["Primal"]["cap"] == 0.0 && rp_cap > 0.0
+                ADMM_state["ResidualScale"]["Primal"]["cap"] = rp_cap
+            end
         end
 
         # ------------------------------------------------------------------
@@ -221,6 +251,34 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
                 if scales_du["EP"] == 0.0 && rd_EP < Inf
                     scales_du["EP"] = rd_EP
                 end
+                # Capacity dual residual: change in cap across iterations.
+                cap_agents = get(agents, :cap_agents, String[])
+                dual_cap = 0.0
+                if !isempty(cap_agents)
+                    ρ_cap = ADMM_state["ρ"]["cap"][end]
+                    for m in cap_agents
+                        cap_new = Float64[]
+                        cap_old = Float64[]
+                        if !isempty(get(results["Cap_VRES"], m, []))
+                            cap_new = results["Cap_VRES"][m][end]
+                            cap_old = length(results["Cap_VRES"][m]) >= 2 ? results["Cap_VRES"][m][end-1] : zeros(length(cap_new))
+                        elseif !isempty(get(results["Cap_Elec_H2"], m, []))
+                            cap_new = results["Cap_Elec_H2"][m][end]
+                            cap_old = length(results["Cap_Elec_H2"][m]) >= 2 ? results["Cap_Elec_H2"][m][end-1] : zeros(length(cap_new))
+                        elseif !isempty(get(results["Cap_EP_Green"], m, []))
+                            cap_new = results["Cap_EP_Green"][m][end]
+                            cap_old = length(results["Cap_EP_Green"][m]) >= 2 ? results["Cap_EP_Green"][m][end-1] : zeros(length(cap_new))
+                        end
+                        if !isempty(cap_new) && length(cap_old) == length(cap_new)
+                            dual_cap += sum((ρ_cap * (cap_new[i] - cap_old[i]))^2 for i in eachindex(cap_new))
+                        end
+                    end
+                    dual_cap = sqrt(dual_cap)
+                end
+                push!(ADMM_state["Residuals"]["Dual"]["cap"], dual_cap)
+                if ADMM_state["ResidualScale"]["Dual"]["cap"] == 0.0 && dual_cap < Inf
+                    ADMM_state["ResidualScale"]["Dual"]["cap"] = dual_cap
+                end
             else
                 # First iteration: no previous iterate exists, so dual residuals
                 # are undefined. Set to Inf to prevent premature convergence.
@@ -229,6 +287,7 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
                 push!(ADMM_state["Residuals"]["Dual"]["elec_GC"], Inf)
                 push!(ADMM_state["Residuals"]["Dual"]["H2_GC"],  Inf)
                 push!(ADMM_state["Residuals"]["Dual"]["EP"],      Inf)
+                push!(ADMM_state["Residuals"]["Dual"]["cap"],     Inf)
             end
         end
 
@@ -243,13 +302,14 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         # oscillations in tightly coupled markets while ρ remains fixed.
         # ------------------------------------------------------------------
         @timeit TO "Update prices" begin
+            # Damp price updates earlier (residuals < 10×ε) to reduce oscillation.
+            # Previously used 2×ε; switching at 10×ε lets η=0.3 kick in while still improving.
+            eta_threshold = 10.0 * ADMM_state["EpsilonAbs"]
             for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
                 rp = ADMM_state["Residuals"]["Primal"][mkt][end]
                 rd = ADMM_state["Residuals"]["Dual"][mkt][end]
-                tol = ADMM_state["Tolerance"][mkt]
                 base = max(rp, rd)
-                mid_resid_factor = 2.0
-                η = base <= mid_resid_factor * tol ? 0.3 : 1.0
+                η = base <= eta_threshold ? 0.3 : 1.0
                 push!(results["λ"][mkt],
                       results["λ"][mkt][end] .- η .* ADMM_state["ρ"][mkt][end] .* ADMM_state["Imbalances"][mkt][end])
             end
@@ -299,38 +359,31 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         # tolerance, the algorithm continues iterating. This ensures that
         # every market has simultaneously cleared (primal) and that agent
         # positions have stabilised (dual) before we declare convergence.
-        #
-        # IMPORTANT: skip convergence check for the first min_iter iterations.
-        # In early iterations, residuals can be spuriously small (agents
-        # haven't diverged from initial conditions yet), leading to premature
-        # convergence with prices far from equilibrium.
         # ------------------------------------------------------------------
-        min_iter = get(data["ADMM"], "min_iter", 500)
-        if iter >= min_iter
-            eps_abs = ADMM_state["EpsilonAbs"]
-            eps_rel = ADMM_state["EpsilonRel"]
-            n_slots = n_ts * n_rd * n_yr
-            sqrt_n = sqrt(n_slots)
-            scale_pr = ADMM_state["ResidualScale"]["Primal"]
-            scale_du = ADMM_state["ResidualScale"]["Dual"]
+        eps_abs = ADMM_state["EpsilonAbs"]
+        eps_rel = ADMM_state["EpsilonRel"]
+        n_slots = n_ts * n_rd * n_yr
+        sqrt_n = sqrt(n_slots)
+        scale_pr = ADMM_state["ResidualScale"]["Primal"]
+        scale_du = ADMM_state["ResidualScale"]["Dual"]
 
-            function within_tol(key::String)
-                rp = ADMM_state["Residuals"]["Primal"][key][end]
-                rd = ADMM_state["Residuals"]["Dual"][key][end]
-                sp = max(scale_pr[key], 1.0)
-                sd = max(scale_du[key], 1.0)
-                eps_pr = eps_abs * sqrt_n + eps_rel * sp
-                eps_du = eps_abs * sqrt_n + eps_rel * sd
-                return (rp <= eps_pr) && (rd <= eps_du)
-            end
+        function within_tol(key::String)
+            rp = ADMM_state["Residuals"]["Primal"][key][end]
+            rd = ADMM_state["Residuals"]["Dual"][key][end]
+            sp = max(scale_pr[key], 1.0)
+            sd = max(scale_du[key], 1.0)
+            eps_pr = eps_abs * sqrt_n + eps_rel * sp
+            eps_du = eps_abs * sqrt_n + eps_rel * sd
+            return (rp <= eps_pr) && (rd <= eps_du)
+        end
 
-            if (within_tol("elec") &&
-                within_tol("H2") &&
-                within_tol("elec_GC") &&
-                within_tol("H2_GC") &&
-                within_tol("EP"))
-                convergence = 1
-            end
+        if (within_tol("elec") &&
+            within_tol("H2") &&
+            within_tol("elec_GC") &&
+            within_tol("H2_GC") &&
+            within_tol("EP") &&
+            within_tol("cap"))
+            convergence = 1
         end
 
         ADMM_state["n_iter"] = iter
@@ -363,6 +416,10 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         @printf("  %-14s  primal = %.3e,  dual = %.3e,  price_mean = %.6f\n",
                 market_labels[key], primal, dual, price)
     end
+    primal_cap = ADMM_state["Residuals"]["Primal"]["cap"][end]
+    dual_cap   = ADMM_state["Residuals"]["Dual"]["cap"][end]
+    @printf("  %-14s  primal = %.3e,  dual = %.3e  (capacity consensus)\n",
+            "Capacity", primal_cap, dual_cap)
 
     return nothing
 end

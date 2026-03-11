@@ -6,21 +6,21 @@
 #   Extends define_results! with the bilateral contract pool. Used ONLY by
 #   market_exposure_contracts.jl.
 #
-#   SINGLE CONTRACT POOL: g_contract cleared at λ_contract (€/MWh), pay-as-produced.
-#   contract_cap is a consensus variable (both agree via penalty); no separate price.
-#
-#   Adds: results["contract"], results["contract_cap"], results["λ"]["contract"],
-#   ADMM state for contract (price) and contract_cap (consensus only).
+#   PER-VRES CONTRACT MARKETS: Each VRES has its own bilateral contract sub-market
+#   with the electrolyzer. results["λ_contract"] is Dict(vres_id => [3D arrays]).
+#   (Separate from results["λ"] to avoid Dict/Vector type conflict.)
+#   results["contract_from"]: electrolyzer demand per VRES.
 #
 # ==============================================================================
 
 function define_results_contracts!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dict,
                                   elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
-                                  H2_GC_market::Dict, EP_market::Dict, contract_market::Dict;
-                                  sp_prices_file::String = "")
-    # Call base define_results! for the five standard markets
+                                  H2_GC_market::Dict, EP_market::Dict, ppa_market::Dict;
+                                  sp_prices_file::String = "", sp_primal_file::String = "", use_primal_warmstart::Bool = true)
+    # Call base define_results! for the five standard markets (same warm-start as market_exposure)
     define_results!(admm_data, results, ADMM, agents, elec_market, H2_market,
-                    elec_GC_market, H2_GC_market, EP_market; sp_prices_file=sp_prices_file)
+                    elec_GC_market, H2_GC_market, EP_market;
+                    sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, use_primal_warmstart=use_primal_warmstart)
 
     n_ts = admm_data["nTimesteps"]
     n_rd = admm_data["nReprDays"]
@@ -28,52 +28,63 @@ function define_results_contracts!(admm_data::Dict, results::Dict, ADMM::Dict, a
     shp  = (n_ts, n_rd, n_yr)
 
     # Add contract market to results["markets"]
-    results["markets"]["contract"] = contract_market
+    results["markets"]["ppa"] = ppa_market
 
-    # Contract pool: one price λ_contract (€/MWh) for g_contract. No separate capacity price.
-    init_price = contract_market["initial_price"]
-    results["λ"]["contract"] = [fill(init_price, shp...)]
+    # Per-VRES PPA sub-markets
+    ppa_vres = collect(keys(get(ppa_market, "per_vres", Dict())))
+    if isempty(ppa_vres)
+        # Fallback: no VRES in PPA market (e.g. no VRES agents)
+        ppa_vres = get(agents, :ppa_vres, String[])
+    end
 
-    # Per-agent quantity buffers for contract markets
-    results["contract"]     = Dict(m => [] for m in agents[:all])
-    results["contract_cap"] = Dict(m => [] for m in agents[:all])
+    # results["λ_ppa"]: Dict(vres_id => [3D arrays]) — separate key to avoid type conflict with results["λ"]
+    results["λ_ppa"] = Dict{String, Vector}()
+    for vres_id in ppa_vres
+        pv = get(ppa_market["per_vres"], vres_id, Dict())
+        init_price = get(pv, "initial_price", ppa_market["initial_price"])
+        results["λ_ppa"][vres_id] = [fill(init_price, shp...)]
+    end
 
-    # ADMM state for contract markets
-    ADMM["ρ"]["contract"]     = [contract_market["rho_initial"]]
-    ADMM["ρ"]["contract_cap"] = [contract_market["rho_initial"]]
+    # Per-agent quantity buffers: VRES supply in results["ppa"], electrolyzer demand in results["ppa_from"]
+    # ppa_cap: VRES stores +cap; electrolyzer stores per-VRES in results["ppa_cap_from"]
+    results["ppa"]        = Dict(m => [] for m in agents[:all])
+    results["ppa_cap"]    = Dict(m => [] for m in agents[:all])
+    results["ppa_from"]   = Dict(m => Dict(v => [] for v in ppa_vres) for m in agents[:H2])
+    results["ppa_cap_from"] = Dict(m => Dict(v => [] for v in ppa_vres) for m in agents[:H2])
 
-    ADMM["Imbalances"]["contract"]     = Any[]
-    ADMM["Imbalances"]["contract_cap"] = Any[]
-
-    ADMM["PriceHistory"]["contract"] = Float64[]
-
-    ADMM["ImbalanceMean"]["contract"]     = Float64[]
-    ADMM["ImbalanceMean"]["contract_cap"] = Float64[]
-
-    ADMM["Residuals"]["Primal"]["contract"]     = Float64[]
-    ADMM["Residuals"]["Primal"]["contract_cap"] = Float64[]
-    ADMM["Residuals"]["Dual"]["contract"]       = Float64[]
-    ADMM["Residuals"]["Dual"]["contract_cap"]   = Float64[]
-
-    ADMM["BestResidual"]["Primal"]["contract"]     = Inf
-    ADMM["BestResidual"]["Dual"]["contract"]       = Inf
-    ADMM["BestResidual"]["Primal"]["contract_cap"] = Inf
-    ADMM["BestResidual"]["Dual"]["contract_cap"]   = Inf
-
-    ADMM["ρ_frozen"]["contract"]     = false
-    ADMM["ρ_frozen"]["contract_cap"] = false
-
-    ADMM["R_hist"]["contract"]     = Float64[]
-    ADMM["R_hist"]["contract_cap"] = Float64[]
-
-    ADMM["ResidualScale"]["Primal"]["contract"]     = 0.0
-    ADMM["ResidualScale"]["Primal"]["contract_cap"] = 0.0
-    ADMM["ResidualScale"]["Dual"]["contract"]       = 0.0
-    ADMM["ResidualScale"]["Dual"]["contract_cap"]   = 0.0
-
+    # ADMM state: per-VRES — use separate ADMM["ppa"] to avoid Dict/Vector type conflict
     base_tol = get(admm_data, "epsilon", 1.0)
-    ADMM["Tolerance"]["contract"]     = base_tol
-    ADMM["Tolerance"]["contract_cap"] = base_tol
+    rho_init = ppa_market["rho_initial"]
+    ADMM["ppa"] = Dict(
+        "Imbalances"     => Dict(v => Any[] for v in ppa_vres),
+        "Imbalances_cap" => Dict(v => Any[] for v in ppa_vres),
+        "ρ"              => Dict(v => [get(get(ppa_market["per_vres"], v, Dict()), "rho_initial", rho_init)] for v in ppa_vres),
+        "ρ_cap"          => Dict(v => [get(get(ppa_market["per_vres"], v, Dict()), "rho_initial", rho_init)] for v in ppa_vres),
+        "PriceHistory"   => Dict(v => Float64[] for v in ppa_vres),
+        "ImbalanceMean"  => Dict(v => Float64[] for v in ppa_vres),
+        "ImbalanceMean_cap" => Dict(v => Float64[] for v in ppa_vres),
+        "Primal"         => Dict(v => Float64[] for v in ppa_vres),
+        "Primal_cap"     => Dict(v => Float64[] for v in ppa_vres),
+        "Dual"           => Dict(v => Float64[] for v in ppa_vres),
+        "Dual_cap"       => Dict(v => Float64[] for v in ppa_vres),
+        "BestPrimal"     => Dict(v => Inf for v in ppa_vres),
+        "BestDual"       => Dict(v => Inf for v in ppa_vres),
+        "BestPrimal_cap" => Dict(v => Inf for v in ppa_vres),
+        "BestDual_cap"   => Dict(v => Inf for v in ppa_vres),
+        "ρ_frozen"       => Dict(v => false for v in ppa_vres),
+        "ρ_frozen_cap"   => Dict(v => false for v in ppa_vres),
+        "R_hist"         => Dict(v => Float64[] for v in ppa_vres),
+        "R_hist_cap"     => Dict(v => Float64[] for v in ppa_vres),
+        "ResidualScale_Primal"     => Dict(v => 0.0 for v in ppa_vres),
+        "ResidualScale_Primal_cap" => Dict(v => 0.0 for v in ppa_vres),
+        "ResidualScale_Dual"       => Dict(v => 0.0 for v in ppa_vres),
+        "ResidualScale_Dual_cap"   => Dict(v => 0.0 for v in ppa_vres),
+        "Tolerance"      => Dict(v => base_tol for v in ppa_vres),
+        "Tolerance_cap"  => Dict(v => base_tol for v in ppa_vres),
+    )
+
+    # Store ppa_vres for use in ADMM and solve modules
+    ppa_market["ppa_vres"] = ppa_vres
 
     return results, ADMM
 end

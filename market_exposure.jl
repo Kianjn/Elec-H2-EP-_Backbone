@@ -289,6 +289,9 @@ for m in agents[:elec_GC_demand]
     define_elec_GC_demand_parameters!(m, mdict[m], merge(data["General"], data["Electricity_GC_Demand"][m]), ts, repr_days)
 end
 
+# Agents with endogenous capacity (VRES, H2 producer, GreenOfftaker) for investment consensus.
+agents[:cap_agents] = [m for m in agents[:all] if haskey(mdict[m].ext[:parameters], :cap_bar)]
+
 # Set market participant counts used in ADMM (consensus denominator n+1).
 elec_market["nAgents"]    = length(agents[:elec_market])
 H2_market["nAgents"]     = length(agents[:H2_market])
@@ -317,6 +320,43 @@ for m in agents[:elec_GC_demand]
 end
 
 # ------------------------------------------------------------------------------
+# SECTION 11b: CAPACITY WARM-START FROM SP (optional)
+# ------------------------------------------------------------------------------
+# If SP_Capacities.csv exists, set start values on capacity variables so the
+# solver begins near the SP solution. Helps investment consensus converge.
+n_cap_warmstart = 0
+sp_cap_file = joinpath(home_dir, "social_planner_results", "SP_Capacities.csv")
+if isfile(sp_cap_file)
+    try
+        sp_cap_df = CSV.read(sp_cap_file, DataFrame)
+        jy_set = collect(mdict[agents[:all][1]].ext[:sets][:JY])
+        for m in agents[:cap_agents]
+            mod = mdict[m]
+            agent_type = String(get(mod.ext[:parameters], :Type, ""))
+            cap_var = nothing
+            if agent_type == "VRES" && haskey(mod.ext[:variables], :cap_VRES)
+                cap_var = mod.ext[:variables][:cap_VRES]
+            elseif agent_type == "GreenProducer" && haskey(mod.ext[:variables], :cap_H2_y)
+                cap_var = mod.ext[:variables][:cap_H2_y]
+            elseif agent_type == "GreenOfftaker" && haskey(mod.ext[:variables], :cap_EP_y)
+                cap_var = mod.ext[:variables][:cap_EP_y]
+            end
+            if cap_var !== nothing
+                for jy in jy_set
+                    row = sp_cap_df[(sp_cap_df.AgentID .== m) .& (sp_cap_df.jy .== jy), :]
+                    if nrow(row) >= 1
+                        set_start_value(cap_var[jy], row.cap[1])
+                    end
+                end
+                n_cap_warmstart += 1
+            end
+        end
+    catch e
+        @warn "Could not load SP capacities ($sp_cap_file): $e"
+    end
+end
+
+# ------------------------------------------------------------------------------
 # SECTION 12: RUN ADMM
 # ------------------------------------------------------------------------------
 
@@ -329,7 +369,21 @@ TO = TimerOutput()
 # If the social planner has been run, warm-start ADMM λ from its hourly prices;
 # otherwise fall back to uniform scalar initial_price from data.yaml.
 sp_prices_file = joinpath(home_dir, "social_planner_results", "Market_Prices.csv")
-define_results!(merge(data["General"], data["ADMM"]), results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market; sp_prices_file=sp_prices_file)
+sp_primal_file = joinpath(home_dir, "social_planner_results", "SP_Primal_Quantities.csv")
+# Primal warm-start: pre-populate g_bar with SP quantities so iter 1 agents solve
+# with λ=SP and g_bar=SP → zero imbalance → prices stay at SP. Without it, g_bar=0
+# biases agents toward zero and causes immediate price drift.
+define_results!(merge(data["General"], data["ADMM"]), results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market; sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, use_primal_warmstart=true)
+
+# Single consolidated warm-start message
+ws = results["warmstart"]
+parts = String[]
+ws["λ"] && push!(parts, "λ from SP prices")
+ws["primal"] && push!(parts, "primal quantities from SP")
+n_cap_warmstart > 0 && push!(parts, "capacity seeds for $n_cap_warmstart agents")
+if !isempty(parts)
+    @info "ADMM warm-start: $(join(parts, ", "))"
+end
 
 # Run the coordination loop: each iteration solves all agents, aggregates
 # imbalances, updates prices and ρ, and checks convergence.

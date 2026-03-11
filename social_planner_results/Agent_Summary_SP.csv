@@ -1,9 +1,0 @@
-AgentID;Group;Type;elec_net_sum;H2_net_sum;elec_GC_net_sum;H2_GC_net_sum;EP_net_sum;Capacity_Final_MW;Investment_Total_MW;Objective_Value
-Cons_Elec_01;power;PowerCons;-5365.200001;0;0;0;0;0;0;-1.12E+08
-Gen_Conv_01;power;PowerGen;4996.577766;0;0;0;0;0;0;5.41E-10
-Gen_VRES_01;power;PowerGen;6294.303452;0;6294.303452;0;0;157.2413798;57.24137985;3.73E-09
-Prod_H2_Green;H2;H2Prod;-5925.681217;3950.454144;-5791.561317;3950.454144;0;39.99999989;-1.14E-07;5.12E-09
-Offtaker_Green;offtaker;Offtaker;0;-3950.454144;0;-1645.219041;2962.840608;29.99999991;-8.54E-08;-2.79E-09
-Offtaker_Grey;offtaker;Offtaker;0;0;0;-2305.235103;3949.159392;0;0;6.38E-10
-Offtaker_Import;offtaker;Offtaker;0;0;0;0;0;0;0;0
-Demand_GC_Elec_01;elec_GC_demand;GC_Demand;0;0;-502.7421351;0;0;0;0;749370.9125

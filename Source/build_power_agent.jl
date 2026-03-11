@@ -116,28 +116,29 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
 
         # Per-year economic loss (cost − revenue) excluding ADMM penalties; prices
         # λ are updated each ADMM iteration via mod.ext[:parameters][:λ_*].
+        # loss_total = loss_VRES + F_cap·cap: CVaR must use FULL loss so that with
+        # nYears=1, changing γ has no effect (SP/ME equivalence).
         loss_VRES = Dict{Int,JuMP.AffExpr}()
+        loss_total = Dict{Int,JuMP.AffExpr}()
         for jy in JY
             loss_VRES[jy] = @expression(mod,
                 sum(W[jd, jy] * (MC * g[jh, jd, jy]
                     - λ_elec[jh, jd, jy] * g[jh, jd, jy]
                     - λ_elec_GC[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD)
             )
+            loss_total[jy] = @expression(mod, loss_VRES[jy] + F_cap * cap_VRES[jy])
         end
         mod.ext[:expressions][:loss_VRES] = loss_VRES
 
-        # CVaR shortfall constraints: u_VRES[jy] ≥ loss_VRES[jy] − α.
+        # CVaR shortfall constraints: u_VRES[jy] ≥ loss_total[jy] − α.
         mod.ext[:constraints][:CVaR_VRES_shortfall] = @constraint(mod, [jy in JY],
-           u_VRES[jy] >= loss_VRES[jy] - alpha_VRES
-       
+           u_VRES[jy] >= loss_total[jy] - alpha_VRES
         )
 
         # CVaR definition: CVaR_VRES ≥ α_VRES + (1/(1−β)) * Σ P[jy]*u_VRES[jy].
         one_minus_beta = max(1e-6, 1.0 - beta_conf)
         mod.ext[:constraints][:CVaR_VRES_link] = @constraint(mod,
-            cvar_VRES >= alpha_VRES + (1 / one_minus_beta) * sum(P[jy] * u_VRES[jy] for jy in JY)
-       
-        )
+            cvar_VRES >= alpha_VRES + (1 / one_minus_beta) * sum(P[jy] * u_VRES[jy] for jy in JY))
 
         # Objective:
         #   min  Σ_{h,d,y} W[d,y]·( MC·g − λ_elec·g − λ_GC·g )       ← (1)

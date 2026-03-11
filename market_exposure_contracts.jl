@@ -1,31 +1,31 @@
 # ==============================================================================
-# MARKET EXPOSURE (CONTRACTS) SCRIPT: ADMM WITH BILATERAL VRES–ELECTROLYZER CONTRACTS
+# MARKET EXPOSURE (PPA) SCRIPT: ADMM WITH BILATERAL VRES–ELECTROLYZER PPAs
 # By Kian Jafarinejad - PhD Researcher at TU Delft (K.Jafarinejad@tudelft.nl)
 # ==============================================================================
 #
 # PURPOSE:
 #   Third entry point alongside market_exposure.jl and social_planner.jl.
 #   Identical to market_exposure.jl except that VRES and the electrolyzer can
-#   enter a bilateral contract:
+#   enter Power Purchase Agreements (PPAs):
 #
-#   - VRES commits contract_cap (MW) of capacity; that capacity is REMOVED
-#     from the electricity market (EOM). VRES sells only g_EOM to the pool.
-#   - The electrolyzer buys that capacity pay-as-produced: receives g_contract
-#     at each timestep, pays λ_contract per MWh actually delivered.
-#   - When VRES has no output (e.g. night for solar), g_contract = 0, so
-#     nothing is delivered and nothing is paid.
-#   - A contract pool clears both contract energy (3D) and contract capacity
-#     (scalar) via ADMM.
+#   - VRES commits ppa_cap (MW) of capacity; that capacity is REMOVED from
+#     BOTH the electricity market (EOM) and elec_GC market. Real-world PPAs
+#     bundle electricity + elec_GC — buyer receives both as a package.
+#   - The electrolyzer buys that capacity pay-as-produced: receives g_ppa
+#     at each timestep, pays λ_ppa per MWh actually delivered (bundled price).
+#   - When VRES has no output (e.g. night for solar), g_ppa = 0, so nothing
+#     delivered and nothing paid.
+#   - A PPA pool clears both PPA energy (3D) and PPA capacity (scalar) via ADMM.
 #
-#   social_planner.jl and market_exposure.jl are UNCHANGED. This script uses contract-specific
-#   build/solve/ADMM/save modules.
+#   social_planner.jl and market_exposure.jl are UNCHANGED. This script uses
+#   PPA-specific build/solve/ADMM/save modules.
 #
 # HOW TO RUN:
-#   From the project root:  julia market_exposure_contracts.jl
+#   From the project root:  julia market_exposure_ppa.jl
 #
 # OUTPUT:
-#   market_exposure_contracts_results/ — same major ADMM CSVs as market_exposure_results
-#   plus Contracts.csv, Green_Agents_Detail.csv, and contract columns in convergence/
+#   market_exposure_ppa_results/ — same major ADMM CSVs as market_exposure_results
+#   plus PPAs.csv, Green_Agents_Detail.csv, and PPA columns in convergence/
 #   diagnostics CSVs.
 #
 # ==============================================================================
@@ -75,7 +75,7 @@ include(joinpath(home_dir, "Source", "define_offtaker_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_elec_GC_demand_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_EP_demand_parameters.jl"))
 
-# Contract-specific: adds in_contract_market, λ_contract, g_bar_contract, etc.
+# PPA-specific: adds in_ppa_market, λ_ppa, g_bar_ppa, etc.
 include(joinpath(home_dir, "Source", "define_contract_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_contract_market_parameters.jl"))
 
@@ -86,7 +86,7 @@ include(joinpath(home_dir, "Source", "define_electricity_GC_market_parameters.jl
 include(joinpath(home_dir, "Source", "define_H2_GC_market_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_EP_market_parameters.jl"))
 
-# Model building: use CONTRACTS versions for power and H2 (VRES/electrolyzer)
+# Model building: use PPA versions for power and H2 (VRES/electrolyzer)
 include(joinpath(home_dir, "Source", "build_power_agent.jl"))
 include(joinpath(home_dir, "Source", "build_power_agent_contracts.jl"))
 include(joinpath(home_dir, "Source", "build_H2_agent.jl"))
@@ -95,7 +95,7 @@ include(joinpath(home_dir, "Source", "build_offtaker_agent.jl"))
 include(joinpath(home_dir, "Source", "build_elec_GC_demand_agent.jl"))
 include(joinpath(home_dir, "Source", "build_EP_demand_agent.jl"))
 
-# ADMM and solving: CONTRACTS versions (include contract market)
+# ADMM and solving: PPA versions (include PPA market)
 include(joinpath(home_dir, "Source", "define_results.jl"))
 include(joinpath(home_dir, "Source", "define_results_contracts.jl"))
 include(joinpath(home_dir, "Source", "ADMM.jl"))
@@ -139,8 +139,8 @@ end
 # SECTION 6: RESULTS FOLDER
 # ------------------------------------------------------------------------------
 
-if !isdir(joinpath(home_dir, "market_exposure_contracts_results"))
-    mkdir(joinpath(home_dir, "market_exposure_contracts_results"))
+if !isdir(joinpath(home_dir, "market_exposure_ppa_results"))
+    mkdir(joinpath(home_dir, "market_exposure_ppa_results"))
 end
 
 # ------------------------------------------------------------------------------
@@ -161,8 +161,8 @@ agents[:H2_market] = []
 agents[:elec_GC_market] = []
 agents[:H2_GC_market] = []
 agents[:EP_market] = []
-# Contract market: VRES and electrolyzer only (populated by define_contract_parameters!)
-agents[:contract_market] = []
+# PPA market: VRES and electrolyzer only (populated by define_contract_parameters!)
+agents[:ppa_market] = []
 
 mdict = Dict(i => Model(Gurobi.Optimizer) for i in agents[:all])
 
@@ -179,7 +179,7 @@ H2_market = Dict{String,Any}()
 elec_GC_market = Dict{String,Any}()
 H2_GC_market = Dict{String,Any}()
 EP_market = Dict{String,Any}()
-contract_market = Dict{String,Any}()
+ppa_market = Dict{String,Any}()
 
 elec_market["nAgents"] = length(agents[:elec_market])
 H2_market["nAgents"] = length(agents[:H2_market])
@@ -193,9 +193,8 @@ define_electricity_GC_market_parameters!(elec_GC_market, merge(data["General"], 
 define_H2_GC_market_parameters!(H2_GC_market, merge(data["General"], data["ADMM"], data["H2_GC_market"]), ts, repr_days)
 define_EP_market_parameters!(EP_market, merge(data["General"], data["ADMM"], data["EP_market"]), ts, repr_days)
 
-# Contract market: initial price and rho from data.yaml Contracts block
-contract_data = haskey(data, "Contracts") ? merge(data["General"], data["ADMM"], data["Contracts"]) : merge(data["General"], data["ADMM"], Dict("initial_price" => 60.0, "rho_initial" => 0.5))
-define_contract_market_parameters!(contract_market, contract_data)
+# PPA market: per-VRES initial prices and rho from data.yaml PPAs block
+define_contract_market_parameters!(ppa_market, data, agents)
 
 # ------------------------------------------------------------------------------
 # SECTION 9: AGENT PARAMETER DEFINITION
@@ -223,25 +222,28 @@ for m in agents[:elec_GC_demand]
     define_elec_GC_demand_parameters!(m, mdict[m], merge(data["General"], data["Electricity_GC_Demand"][m]), ts, repr_days)
 end
 
+# Agents with endogenous capacity (VRES, H2 producer, GreenOfftaker) for investment consensus.
+agents[:cap_agents] = [m for m in agents[:all] if haskey(mdict[m].ext[:parameters], :cap_bar)]
+
 # Set market participant counts
 elec_market["nAgents"]    = length(agents[:elec_market])
 H2_market["nAgents"]     = length(agents[:H2_market])
 elec_GC_market["nAgents"] = length(agents[:elec_GC_market])
 H2_GC_market["nAgents"]  = length(agents[:H2_GC_market])
 EP_market["nAgents"]     = length(agents[:offtaker])
-contract_market["nAgents"] = length(agents[:contract_market])
+ppa_market["nAgents"] = length(agents[:ppa_market])
 
 # ------------------------------------------------------------------------------
 # SECTION 10: BUILD OPTIMIZATION MODELS
 # ------------------------------------------------------------------------------
 
-# Use CONTRACTS build for power and H2 (VRES and electrolyzer get contract variables)
+# Use PPA build for power and H2 (VRES and electrolyzer get PPA variables)
 for m in agents[:power]
-    build_power_agent_contracts!(m, mdict[m], elec_market, elec_GC_market, contract_market)
+    build_power_agent_contracts!(m, mdict[m], elec_market, elec_GC_market, ppa_market)
 end
 
 for m in agents[:H2]
-    build_H2_agent_contracts!(m, mdict[m], H2_market, H2_GC_market, contract_market)
+    build_H2_agent_contracts!(m, mdict[m], H2_market, H2_GC_market, ppa_market)
 end
 
 for m in agents[:offtaker]
@@ -253,7 +255,42 @@ for m in agents[:elec_GC_demand]
 end
 
 # ------------------------------------------------------------------------------
-# SECTION 11: RUN ADMM (CONTRACTS VERSION)
+# SECTION 10b: CAPACITY WARM-START FROM SP (optional, same as market_exposure)
+# ------------------------------------------------------------------------------
+n_cap_warmstart = 0
+sp_cap_file = joinpath(home_dir, "social_planner_results", "SP_Capacities.csv")
+if isfile(sp_cap_file)
+    try
+        sp_cap_df = CSV.read(sp_cap_file, DataFrame)
+        jy_set = collect(mdict[agents[:all][1]].ext[:sets][:JY])
+        for m in agents[:cap_agents]
+            mod = mdict[m]
+            agent_type = String(get(mod.ext[:parameters], :Type, ""))
+            cap_var = nothing
+            if agent_type == "VRES" && haskey(mod.ext[:variables], :cap_VRES)
+                cap_var = mod.ext[:variables][:cap_VRES]
+            elseif agent_type == "GreenProducer" && haskey(mod.ext[:variables], :cap_H2_y)
+                cap_var = mod.ext[:variables][:cap_H2_y]
+            elseif agent_type == "GreenOfftaker" && haskey(mod.ext[:variables], :cap_EP_y)
+                cap_var = mod.ext[:variables][:cap_EP_y]
+            end
+            if cap_var !== nothing
+                for jy in jy_set
+                    row = sp_cap_df[(sp_cap_df.AgentID .== m) .& (sp_cap_df.jy .== jy), :]
+                    if nrow(row) >= 1
+                        set_start_value(cap_var[jy], row.cap[1])
+                    end
+                end
+                global n_cap_warmstart += 1
+            end
+        end
+    catch e
+        @warn "Could not load SP capacities ($sp_cap_file): $e"
+    end
+end
+
+# ------------------------------------------------------------------------------
+# SECTION 11: RUN ADMM (PPA VERSION)
 # ------------------------------------------------------------------------------
 
 results = Dict()
@@ -261,16 +298,32 @@ ADMM = Dict()
 TO = TimerOutput()
 
 sp_prices_file = joinpath(home_dir, "social_planner_results", "Market_Prices.csv")
-define_results_contracts!(merge(data["General"], data["ADMM"]), results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, contract_market; sp_prices_file=sp_prices_file)
+sp_primal_file = joinpath(home_dir, "social_planner_results", "SP_Primal_Quantities.csv")
+# Use epsilon_contracts if set (more relaxed for higher complexity); else same epsilon as market_exposure.
+admm_data = merge(data["General"], data["ADMM"])
+if haskey(data["ADMM"], "epsilon_contracts")
+    admm_data = merge(admm_data, Dict("epsilon" => data["ADMM"]["epsilon_contracts"], "epsilon_abs" => data["ADMM"]["epsilon_contracts"]))
+end
+define_results_contracts!(admm_data, results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, ppa_market; sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, use_primal_warmstart=true)
 
-ADMM_contracts!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, contract_market, mdict, agents, data, TO)
+# Single consolidated warm-start message (same as market_exposure)
+ws = results["warmstart"]
+parts = String[]
+ws["λ"] && push!(parts, "λ from SP prices")
+ws["primal"] && push!(parts, "primal quantities from SP")
+n_cap_warmstart > 0 && push!(parts, "capacity seeds for $n_cap_warmstart agents")
+if !isempty(parts)
+    @info "ADMM warm-start: $(join(parts, ", "))"
+end
+
+ADMM_contracts!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, ppa_market, mdict, agents, data, TO)
 
 ADMM["walltime"] = TimerOutputs.tottime(TO) * 10^-9 / 60
 
 # ------------------------------------------------------------------------------
-# SECTION 12: SAVE RESULTS (CONTRACTS VERSION)
+# SECTION 12: SAVE RESULTS (PPA VERSION)
 # ------------------------------------------------------------------------------
 
-save_results_contracts!(mdict, elec_market, H2_market, elec_GC_market, H2_GC_market, contract_market, ADMM, results, agents)
+save_results_contracts!(mdict, elec_market, H2_market, elec_GC_market, H2_GC_market, ppa_market, ADMM, results, agents)
 
-YAML.write_file(joinpath(home_dir, "market_exposure_contracts_results", "TimerOutput.yaml"), TO)
+YAML.write_file(joinpath(home_dir, "market_exposure_ppa_results", "TimerOutput.yaml"), TO)

@@ -44,7 +44,7 @@
 
 function update_rho!(ADMM_state::Dict, iter::Int)
     mod(iter, 1) == 0 || return
-    for key in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+    for key in ("elec", "H2", "elec_GC", "H2_GC", "EP", "cap")
         isempty(ADMM_state["Residuals"]["Primal"][key]) && continue
         isempty(ADMM_state["Residuals"]["Dual"][key]) && continue
         rp = ADMM_state["Residuals"]["Primal"][key][end]
@@ -83,6 +83,11 @@ function update_rho!(ADMM_state::Dict, iter::Int)
             inc_factor = 1.05
             dec_factor = 1.0 / 1.05
             ρ_max = 100.0
+        elseif key == "cap"
+            # Capacity consensus: moderate adaptation (investment coupled to flows).
+            inc_factor = 1.05
+            dec_factor = 1.0 / 1.05
+            ρ_max = 100.0
         else  # H2, EP
             inc_factor = 1.01
             dec_factor = 1.0 / 1.01
@@ -95,24 +100,33 @@ function update_rho!(ADMM_state::Dict, iter::Int)
         # regime (1) "normal Boyd updates".
         balance_threshold = 1.2
         # When BOTH rp and rd are below this multiple of tol, we consider
-        # the market to be in the near-convergence stability zone.
-        mid_resid_factor = 2.0
+        # the market to be in the near-convergence stability zone and freeze ρ.
+        # Increased from 2.0 to 5.0 so we freeze earlier (within ~5×ε) and avoid
+        # ρ updates that can kick the algorithm out of a good basin.
+        mid_resid_factor = 5.0
         # When BOTH rp and rd are above this multiple of tol, and roughly
         # balanced, we apply the gentle push (regime (2)).
         high_resid_factor = 2.0
 
         # Window length and tolerance for deciding whether increasing ρ has
         # recently helped or hurt residuals.
-        window_len = 5
-        improve_tol = 1.05
+        window_len = 10
+        improve_tol = 1.02
+
+        # Divergence detection: if R has increased for 3+ consecutive iters,
+        # we are overshooting. Force a ρ decrease to break the cycle.
+        R_hist = ADMM_state["R_hist"][key]
+        diverging = length(R_hist) >= 3 && R_hist[end] > R_hist[end-1] > R_hist[end-2]
 
         # === Regime (1): normal Boyd updates when rp and rd are imbalanced ===
-        if rp > balance_threshold * rd
+        if diverging
+            # Residuals increasing: overshooting. Decrease ρ to damp.
+            push!(ADMM_state["ρ"][key], max(1e-4, dec_factor * ρ))
+        elseif rp > balance_threshold * rd
             # Primal >> dual: increase ρ to enforce feasibility more strongly,
             # but only if doing so has not been worsening residuals over the
             # recent history window.
             can_increase = true
-            R_hist = ADMM_state["R_hist"][key]
             if length(R_hist) >= window_len
                 R_now = R_hist[end]
                 R_past = R_hist[end - window_len + 1]
@@ -146,9 +160,9 @@ function update_rho!(ADMM_state::Dict, iter::Int)
                 # We are clearly far from convergence (both residuals large) but
                 # the classic Boyd rule sees them as "balanced" and would freeze
                 # ρ. To avoid a true stall, we nudge ρ upward only slightly.
+                # Skip increase if R has been worsening (prevents improve→stall→diverge).
                 mild_inc = 1.01
                 can_increase = true
-                R_hist = ADMM_state["R_hist"][key]
                 if length(R_hist) >= window_len
                     R_now = R_hist[end]
                     R_past = R_hist[end - window_len + 1]
@@ -156,7 +170,7 @@ function update_rho!(ADMM_state::Dict, iter::Int)
                         can_increase = false
                     end
                 end
-                if can_increase
+                if can_increase && !diverging
                     push!(ADMM_state["ρ"][key], min(ρ_max, mild_inc * ρ))
                 else
                     push!(ADMM_state["ρ"][key], ρ)

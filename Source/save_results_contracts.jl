@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   Writes to market_exposure_contracts_results/. Keeps the same major ADMM CSVs
+#   Writes to market_exposure_ppa_results/. Keeps the same major ADMM CSVs
 #   as market_exposure (ADMM_Convergence, ADMM_Diagnostics, 5× Market_History,
 #   Agent_Summary, Market_Prices) plus contract columns where relevant.
 #   Adds focal contract outputs:
@@ -13,65 +13,83 @@
 #
 # ARGUMENTS:
 #   mdict, elec_market, H2_market, elec_GC_market, H2_GC_market — Same as save_results.
-#   contract_market — Contract market dict (initial_price, rho_initial).
-#   ADMM_state — ADMM state with contract/contract_cap keys.
-#   results — Results with contract, contract_cap, λ["contract"].
-#   agents — Agent lists including agents[:contract_market].
+#   ppa_market — PPA market dict (initial_price, rho_initial).
+#   ADMM_state — ADMM state with ppa/ppa_cap keys.
+#   results — Results with ppa, ppa_cap, λ["ppa"].
+#   agents — Agent lists including agents[:ppa_market].
 #
 # ==============================================================================
 
 function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict,
                                  elec_GC_market::Dict, H2_GC_market::Dict,
-                                 contract_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict)
-    results_dir = joinpath(@__DIR__, "..", "market_exposure_contracts_results")
+                                 ppa_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict)
+    results_dir = joinpath(@__DIR__, "..", "market_exposure_ppa_results")
     isdir(results_dir) || mkdir(results_dir)
 
     n_it = length(ADMM_state["Imbalances"]["elec"])
+    ppa_vres = get(ppa_market, "ppa_vres", String[])
+    C = get(ADMM_state, "ppa", Dict())
 
-    # ── ADMM_Convergence.csv (with contract columns) ─────────────────────────
-    conv_df = DataFrame(
-        iter          = 1:n_it,
-        elec_primal   = ADMM_state["Residuals"]["Primal"]["elec"],
-        elec_dual     = ADMM_state["Residuals"]["Dual"]["elec"],
-        H2_primal     = ADMM_state["Residuals"]["Primal"]["H2"],
-        H2_dual       = ADMM_state["Residuals"]["Dual"]["H2"],
-        elec_GC_primal = ADMM_state["Residuals"]["Primal"]["elec_GC"],
-        elec_GC_dual   = ADMM_state["Residuals"]["Dual"]["elec_GC"],
-        H2_GC_primal   = ADMM_state["Residuals"]["Primal"]["H2_GC"],
-        H2_GC_dual     = ADMM_state["Residuals"]["Dual"]["H2_GC"],
-        EP_primal      = ADMM_state["Residuals"]["Primal"]["EP"],
-        EP_dual        = ADMM_state["Residuals"]["Dual"]["EP"],
-        contract_primal      = ADMM_state["Residuals"]["Primal"]["contract"],
-        contract_dual        = ADMM_state["Residuals"]["Dual"]["contract"],
-        contract_cap_primal  = ADMM_state["Residuals"]["Primal"]["contract_cap"],
-        contract_cap_dual    = ADMM_state["Residuals"]["Dual"]["contract_cap"],
+    # PriceHistory may have length n_it+1 (initial + 1 per iteration); slice to [2:end]
+    # so all diagnostic columns have length n_it (same as save_results.jl).
+    ph(mkt) = ADMM_state["PriceHistory"][mkt]
+    ph_slice(mkt) = length(ph(mkt)) == n_it + 1 ? ph(mkt)[2:end] : ph(mkt)
+
+    # ── ADMM_Convergence.csv (with per-VRES contract columns) ─────────────────
+    conv_cols = Dict(
+        :iter => 1:n_it,
+        :elec_primal => ADMM_state["Residuals"]["Primal"]["elec"],
+        :elec_dual => ADMM_state["Residuals"]["Dual"]["elec"],
+        :H2_primal => ADMM_state["Residuals"]["Primal"]["H2"],
+        :H2_dual => ADMM_state["Residuals"]["Dual"]["H2"],
+        :elec_GC_primal => ADMM_state["Residuals"]["Primal"]["elec_GC"],
+        :elec_GC_dual => ADMM_state["Residuals"]["Dual"]["elec_GC"],
+        :H2_GC_primal => ADMM_state["Residuals"]["Primal"]["H2_GC"],
+        :H2_GC_dual => ADMM_state["Residuals"]["Dual"]["H2_GC"],
+        :EP_primal => ADMM_state["Residuals"]["Primal"]["EP"],
+        :EP_dual => ADMM_state["Residuals"]["Dual"]["EP"],
     )
+    C = get(ADMM_state, "ppa", Dict())
+    for vres_id in ppa_vres
+        haskey(C, "Primal") || break
+        conv_cols[Symbol("ppa_$(vres_id)_primal")] = C["Primal"][vres_id]
+        conv_cols[Symbol("ppa_$(vres_id)_dual")] = C["Dual"][vres_id]
+        conv_cols[Symbol("ppa_cap_$(vres_id)_primal")] = C["Primal_cap"][vres_id]
+        conv_cols[Symbol("ppa_cap_$(vres_id)_dual")] = C["Dual_cap"][vres_id]
+    end
+    conv_df = DataFrame(conv_cols)
     CSV.write(joinpath(results_dir, "ADMM_Convergence.csv"), conv_df)
 
-    # ── ADMM_Diagnostics.csv (with contract columns) ───────────────────────
-    diag_df = DataFrame(
-        iter             = 1:n_it,
-        elec_rho         = ADMM_state["ρ"]["elec"][1:n_it],
-        elec_price_mean  = ADMM_state["PriceHistory"]["elec"],
-        elec_imb_mean    = ADMM_state["ImbalanceMean"]["elec"],
-        H2_rho           = ADMM_state["ρ"]["H2"][1:n_it],
-        H2_price_mean    = ADMM_state["PriceHistory"]["H2"],
-        H2_imb_mean      = ADMM_state["ImbalanceMean"]["H2"],
-        elec_GC_rho        = ADMM_state["ρ"]["elec_GC"][1:n_it],
-        elec_GC_price_mean = ADMM_state["PriceHistory"]["elec_GC"],
-        elec_GC_imb_mean   = ADMM_state["ImbalanceMean"]["elec_GC"],
-        H2_GC_rho          = ADMM_state["ρ"]["H2_GC"][1:n_it],
-        H2_GC_price_mean   = ADMM_state["PriceHistory"]["H2_GC"],
-        H2_GC_imb_mean     = ADMM_state["ImbalanceMean"]["H2_GC"],
-        EP_rho             = ADMM_state["ρ"]["EP"][1:n_it],
-        EP_price_mean      = ADMM_state["PriceHistory"]["EP"],
-        EP_imb_mean        = ADMM_state["ImbalanceMean"]["EP"],
-        contract_rho         = ADMM_state["ρ"]["contract"][1:n_it],
-        contract_price_mean = ADMM_state["PriceHistory"]["contract"],
-        contract_imb_mean   = ADMM_state["ImbalanceMean"]["contract"],
-        contract_cap_rho         = ADMM_state["ρ"]["contract_cap"][1:n_it],
-        contract_cap_imb_mean   = ADMM_state["ImbalanceMean"]["contract_cap"],
+    # ── ADMM_Diagnostics.csv (with per-VRES contract columns) ─────────────────
+    ph_ppa(vid) = C["PriceHistory"][vid]
+    ph_ppa_slice(vid) = length(ph_ppa(vid)) == n_it + 1 ? ph_ppa(vid)[2:end] : ph_ppa(vid)
+    diag_cols = Dict(
+        :iter => 1:n_it,
+        :elec_rho => ADMM_state["ρ"]["elec"][1:n_it],
+        :elec_price_mean => ph_slice("elec"),
+        :elec_imb_mean => ADMM_state["ImbalanceMean"]["elec"],
+        :H2_rho => ADMM_state["ρ"]["H2"][1:n_it],
+        :H2_price_mean => ph_slice("H2"),
+        :H2_imb_mean => ADMM_state["ImbalanceMean"]["H2"],
+        :elec_GC_rho => ADMM_state["ρ"]["elec_GC"][1:n_it],
+        :elec_GC_price_mean => ph_slice("elec_GC"),
+        :elec_GC_imb_mean => ADMM_state["ImbalanceMean"]["elec_GC"],
+        :H2_GC_rho => ADMM_state["ρ"]["H2_GC"][1:n_it],
+        :H2_GC_price_mean => ph_slice("H2_GC"),
+        :H2_GC_imb_mean => ADMM_state["ImbalanceMean"]["H2_GC"],
+        :EP_rho => ADMM_state["ρ"]["EP"][1:n_it],
+        :EP_price_mean => ph_slice("EP"),
+        :EP_imb_mean => ADMM_state["ImbalanceMean"]["EP"],
     )
+    for vres_id in ppa_vres
+        haskey(C, "ρ") || break
+        diag_cols[Symbol("ppa_$(vres_id)_rho")] = C["ρ"][vres_id][1:n_it]
+        diag_cols[Symbol("ppa_$(vres_id)_price_mean")] = ph_ppa_slice(vres_id)
+        diag_cols[Symbol("ppa_$(vres_id)_imb_mean")] = C["ImbalanceMean"][vres_id]
+        diag_cols[Symbol("ppa_cap_$(vres_id)_rho")] = C["ρ_cap"][vres_id][1:n_it]
+        diag_cols[Symbol("ppa_cap_$(vres_id)_imb_mean")] = C["ImbalanceMean_cap"][vres_id]
+    end
+    diag_df = DataFrame(diag_cols)
     CSV.write(joinpath(results_dir, "ADMM_Diagnostics.csv"), diag_df)
 
     # ── Per-market history (5 base markets only; contract focal info in Contracts.csv) ─
@@ -86,7 +104,7 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         df = DataFrame(
             iter       = 1:n_it,
             rho        = ADMM_state["ρ"][key][1:n_it],
-            price_mean = ADMM_state["PriceHistory"][key],
+            price_mean = ph_slice(key),
             imb_mean   = ADMM_state["ImbalanceMean"][key],
             primal_res = ADMM_state["Residuals"]["Primal"][key],
             dual_res   = ADMM_state["Residuals"]["Dual"][key],
@@ -94,41 +112,53 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         CSV.write(joinpath(results_dir, string(name, "_Market_History.csv")), df)
     end
 
-    # ── Contracts.csv — Single focal output: capacity contracted, energy transferred, price ─
-    # ── Green_Agents_Detail.csv — VRES and electrolyzer breakdown: capacity, contract vs pool ─
-    contract_agents = get(agents, :contract_market, String[])
-    λ_contract_final = isempty(contract_agents) ? nothing : results["λ"]["contract"][end]
-    λ_elec_final = isempty(contract_agents) ? nothing : results["λ"]["elec"][end]
-    λ_contract_mean = λ_contract_final === nothing ? 0.0 : mean(λ_contract_final)
+    # ── PPAs.csv — One row per VRES: capacity contracted, energy transferred, bundled price (elec+elec_GC) ─
+    # ── Green_Agents_Detail.csv — VRES and electrolyzer breakdown with per-VRES PPA columns ─
+    ppa_agents = get(agents, :ppa_market, String[])
+    λ_elec_final = isempty(ppa_agents) ? nothing : results["λ"]["elec"][end]
     λ_elec_mean = λ_elec_final === nothing ? 0.0 : mean(λ_elec_final)
 
-    vres_contract = [id for id in contract_agents if String(mdict[id].ext[:parameters][:Type]) == "VRES"]
-    if !isempty(vres_contract)
-        vres_id = first(vres_contract)
-        cap_list = results["contract_cap"][vres_id]
-        g_list = results["contract"][vres_id]
-        cap_MW = isempty(cap_list) ? 0.0 : abs(cap_list[end])
-        energy_MWh = isempty(g_list) ? 0.0 : abs(sum(g_list[end]))
-        contracts_df = DataFrame(
-            capacity_contracted_MW = [cap_MW],
-            energy_transferred_MWh = [energy_MWh],
-            contract_price_EUR_per_MWh = [λ_contract_mean],
+    vres_ppa = [id for id in ppa_agents if String(mdict[id].ext[:parameters][:Type]) == "VRES"]
+    if !isempty(vres_ppa)
+        vres_ids = String[]
+        cap_MWs = Float64[]
+        energy_MWhs = Float64[]
+        prices_EUR = Float64[]
+        for vres_id in vres_ppa
+            push!(vres_ids, vres_id)
+            cap_list = get(results["ppa_cap"], vres_id, [])
+            g_list = get(results["ppa"], vres_id, [])
+            cap_MW = isempty(cap_list) ? 0.0 : abs(cap_list[end])
+            energy_MWh = isempty(g_list) ? 0.0 : abs(sum(g_list[end]))
+            λ_vres = get(results["λ_ppa"], vres_id, [fill(0.0, 1, 1, 1)])
+            price_mean = isempty(λ_vres) ? 0.0 : mean(λ_vres[end])
+            push!(cap_MWs, cap_MW)
+            push!(energy_MWhs, energy_MWh)
+            push!(prices_EUR, price_mean)
+        end
+        ppas_df = DataFrame(
+            VRES_AgentID = vres_ids,
+            capacity_contracted_MW = cap_MWs,
+            energy_transferred_MWh = energy_MWhs,
+            ppa_price_EUR_per_MWh = prices_EUR,  # bundled elec + elec_GC
         )
-        CSV.write(joinpath(results_dir, "Contracts.csv"), contracts_df)
+        CSV.write(joinpath(results_dir, "PPAs.csv"), ppas_df)
     end
 
-    # Green agents detail: VRES (total cap, contracted share, pool share) and electrolyzer (same)
-    if !isempty(contract_agents)
+    # Green agents detail: VRES (total cap, PPA share, pool share) and electrolyzer (per-VRES breakdown)
+    if !isempty(ppa_agents)
         detail_ids = String[]
         detail_types = String[]
         total_capacity = Float64[]
-        contracted_capacity_MW = Float64[]
-        energy_from_contract_MWh = Float64[]
+        ppa_capacity_MW = Float64[]
+        energy_from_ppa_MWh = Float64[]
         energy_from_pool_MWh = Float64[]
-        contract_price_EUR_per_MWh = Float64[]
+        ppa_price_EUR_per_MWh = Float64[]
         electricity_price_EUR_per_MWh = Float64[]
+        # Per-VRES columns for electrolyzer (energy_from_ppa_Gen_VRES_Solar_MWh, etc.)
+        vres_energy_cols = Dict(v => Float64[] for v in ppa_vres)
 
-        for id in contract_agents
+        for id in ppa_agents
             m = mdict[id]
             atype = String(get(m.ext[:parameters], :Type, ""))
             push!(detail_ids, id)
@@ -144,33 +174,68 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
             end
             push!(total_capacity, cap_tot)
 
-            cc = get(results["contract_cap"], id, [])
-            cap_contracted = isempty(cc) ? 0.0 : abs(cc[end])
-            push!(contracted_capacity_MW, cap_contracted)
-
-            gc = get(results["contract"], id, [])
-            g_contract_sum = isempty(gc) ? 0.0 : abs(sum(gc[end]))
-            push!(energy_from_contract_MWh, g_contract_sum)
+            if atype == "VRES"
+                cc = get(results["ppa_cap"], id, [])
+                cap_contracted = isempty(cc) ? 0.0 : abs(cc[end])
+                gc = get(results["ppa"], id, [])
+                g_contract_sum = isempty(gc) ? 0.0 : abs(sum(gc[end]))
+                λ_mean = haskey(results["λ_ppa"], id) && !isempty(results["λ_ppa"][id]) ?
+                    mean(results["λ_ppa"][id][end]) : 0.0
+                for v in ppa_vres
+                    push!(vres_energy_cols[v], v == id ? g_contract_sum : 0.0)
+                end
+            else
+                # Electrolyzer: sum over VRES for total; per-VRES from contract_from
+                cap_contracted = 0.0
+                g_contract_sum = 0.0
+                cf = get(results["ppa_from"], id, Dict())
+                ccf = get(results["ppa_cap_from"], id, Dict())
+                for v in ppa_vres
+                    gv = get(cf, v, [])
+                    ev = isempty(gv) ? 0.0 : abs(sum(gv[end]))
+                    push!(vres_energy_cols[v], ev)
+                    g_contract_sum += ev
+                    capv = get(ccf, v, [])
+                    cap_contracted += isempty(capv) ? 0.0 : abs(capv[end])
+                end
+                λ_mean = 0.0
+                if g_contract_sum > 0 && !isempty(ppa_vres)
+                    wsum = 0.0
+                    for v in ppa_vres
+                        ev = vres_energy_cols[v][end]
+                        if ev > 0 && haskey(results["λ_ppa"], v) && !isempty(results["λ_ppa"][v])
+                            λ_mean += ev * mean(results["λ_ppa"][v][end])
+                            wsum += ev
+                        end
+                    end
+                    λ_mean = wsum > 0 ? λ_mean / wsum : 0.0
+                end
+            end
+            push!(ppa_capacity_MW, cap_contracted)
+            push!(energy_from_ppa_MWh, g_contract_sum)
+            push!(ppa_price_EUR_per_MWh, λ_mean)
 
             g_elec = get(results["g"], id, [])
             g_pool_sum = isempty(g_elec) ? 0.0 : (atype == "VRES" ? sum(g_elec[end]) : -sum(g_elec[end]))
             push!(energy_from_pool_MWh, max(0.0, g_pool_sum))
-
-            push!(contract_price_EUR_per_MWh, λ_contract_mean)
             push!(electricity_price_EUR_per_MWh, λ_elec_mean)
         end
 
-        # For VRES: total_capacity = cap_VRES (MW). For Electrolyzer: total_capacity = cap_H2_y (MW_H2 output).
-        detail_df = DataFrame(
-            AgentID = detail_ids,
-            Type = detail_types,
-            total_capacity_MW = total_capacity,
-            contracted_capacity_MW = contracted_capacity_MW,
-            energy_from_contract_MWh = energy_from_contract_MWh,
-            energy_from_pool_MWh = energy_from_pool_MWh,
-            contract_price_EUR_per_MWh = contract_price_EUR_per_MWh,
-            electricity_price_EUR_per_MWh = electricity_price_EUR_per_MWh,
+        # Build detail_df with per-VRES energy columns
+        detail_cols = Dict(
+            :AgentID => detail_ids,
+            :Type => detail_types,
+            :total_capacity_MW => total_capacity,
+            :ppa_capacity_MW => ppa_capacity_MW,
+            :energy_from_ppa_MWh => energy_from_ppa_MWh,
+            :energy_from_pool_MWh => energy_from_pool_MWh,
+            :ppa_price_EUR_per_MWh => ppa_price_EUR_per_MWh,
+            :electricity_price_EUR_per_MWh => electricity_price_EUR_per_MWh,
         )
+        for v in ppa_vres
+            detail_cols[Symbol("energy_from_ppa_$(v)_MWh")] = vres_energy_cols[v]
+        end
+        detail_df = DataFrame(detail_cols)
         CSV.write(joinpath(results_dir, "Green_Agents_Detail.csv"), detail_df)
     end
 
@@ -217,23 +282,16 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         end
     end
 
-    contract_market_agents = get(agents, :contract_market, String[])
+    ppa_market_agents = get(agents, :ppa_market, String[])
 
-    # ── Prices (including contract) ───────────────────────────────────────
+    # ── Base prices (λ_contract is per-VRES, built per-agent in _admm_objective_economic) ─
     λ_elec_final    = results["λ"]["elec"][end]
     λ_H2_final      = results["λ"]["H2"][end]
     λ_elec_GC_final = results["λ"]["elec_GC"][end]
     λ_H2_GC_final   = results["λ"]["H2_GC"][end]
     λ_EP_final      = results["λ"]["EP"][end]
-    λ_contract_final = results["λ"]["contract"][end]
 
-    prices = Dict(
-        :λ_elec => λ_elec_final, :λ_H2 => λ_H2_final, :λ_elec_GC => λ_elec_GC_final,
-        :λ_H2_GC => λ_H2_GC_final, :λ_EP => λ_EP_final,
-        :λ_contract => λ_contract_final,
-    )
-
-    # ── _admm_objective_economic (contract-aware) ───────────────────────────
+    # ── _admm_objective_economic (contract-aware, per-VRES prices) ───────────
     function _admm_objective_economic(id::String)
         m = mdict[id]
         p = m.ext[:parameters]
@@ -245,17 +303,24 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         JY = sets[:JY]
         params = merge(Dict(:W => W), Dict(k => v for (k, v) in p))
         quantities = Dict{Symbol, Any}()
+        # Build agent-specific prices (λ_ppa: VRES gets 3D array; electrolyzer gets Dict{vres_id => 3D array})
+        prices = Dict{Symbol, Any}(
+            :λ_elec => λ_elec_final, :λ_H2 => λ_H2_final, :λ_elec_GC => λ_elec_GC_final,
+            :λ_H2_GC => λ_H2_GC_final, :λ_EP => λ_EP_final,
+        )
 
         if id in power_consumers
             quantities[:d] = [value(vars[:d][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:power_consumer, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in power_vres
-            if id in contract_market_agents && haskey(vars, :g_EOM)
+            if id in ppa_market_agents && haskey(vars, :g_EOM)
                 quantities[:g_EOM] = [value(vars[:g_EOM][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-                quantities[:g_contract] = [value(vars[:g_contract][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-                quantities[:contract_cap] = value(vars[:contract_cap])
+                quantities[:g_ppa] = [value(vars[:g_ppa][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                quantities[:ppa_cap] = value(vars[:ppa_cap])
                 quantities[:cap_VRES] = [value(vars[:cap_VRES][jy]) for jy in JY]
-                return compute_agent_objective_economic(:power_vres_contracts, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+                prices[:λ_ppa] = haskey(results["λ_ppa"], id) && !isempty(results["λ_ppa"][id]) ?
+                    results["λ_ppa"][id][end] : zeros(length(sets[:JH]), length(sets[:JD]), length(sets[:JY]))
+                return compute_agent_objective_economic(:power_vres_ppa, quantities, prices, params; JH=JH, JD=JD, JY=JY)
             else
                 quantities[:g] = [value(vars[:g][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
                 if haskey(vars, :cap_VRES)
@@ -267,15 +332,17 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
             quantities[:g] = [value(vars[:g][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:power_conv, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in H2_producers
-            if id in contract_market_agents && haskey(vars, :e_in_pool)
+            if id in ppa_market_agents && haskey(vars, :e_in_pool)
                 quantities[:e_in_pool] = [value(vars[:e_in_pool][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-                quantities[:g_contract] = [value(vars[:g_contract][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+                g_cf = vars[:g_ppa_from]
+                quantities[:g_ppa_from] = Dict(v => [value(g_cf[v][jh, jd, jy]) for jh in JH, jd in JD, jy in JY] for v in keys(g_cf))
                 quantities[:q_elec_gc] = [value(vars[:q_elec_gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
                 quantities[:h2_out] = [value(vars[:h2_out][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
                 quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-                quantities[:contract_cap] = value(vars[:contract_cap])
                 quantities[:cap_H2_y] = [value(vars[:cap_H2_y][jy]) for jy in JY]
-                return compute_agent_objective_economic(:H2_producer_contracts, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+                prices[:λ_ppa] = Dict(v => (haskey(results["λ_ppa"], v) && !isempty(results["λ_ppa"][v]) ?
+                    results["λ_ppa"][v][end] : zeros(length(JH), length(JD), length(JY))) for v in keys(g_cf))
+                return compute_agent_objective_economic(:H2_producer_ppa, quantities, prices, params; JH=JH, JD=JD, JY=JY)
             else
                 quantities[:e_in] = [value(vars[:e_in][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
                 quantities[:q_elec_gc] = [value(vars[:q_elec_gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
@@ -430,13 +497,13 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
     )
     CSV.write(joinpath(results_dir, "Agent_Summary.csv"), agents_df)
 
-    # ── Market_Prices.csv (with Contract_Price) ──────────────────────────────
+    # ── Market_Prices.csv (with per-VRES Contract_Price columns) ─────────────
     λ_elec    = results["λ"]["elec"][end]
     λ_H2      = results["λ"]["H2"][end]
     λ_elec_GC = results["λ"]["elec_GC"][end]
     λ_H2_GC   = results["λ"]["H2_GC"][end]
     λ_EP      = results["λ"]["EP"][end]
-    λ_contract = results["λ"]["contract"][end]
+    λ_ppa_dict = get(results, "λ_ppa", Dict{String, Vector}())
 
     shp = size(λ_elec)
     n_ts, n_rd, n_yr = shp[1], shp[2], shp[3]
@@ -444,15 +511,19 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
     prices_rows = []
     t_index = 1
     for jy in 1:n_yr, jd in 1:n_rd, jh in 1:n_ts
-        push!(prices_rows, (
-            Time = t_index,
-            Elec_Price = λ_elec[jh, jd, jy],
-            H2_Price = λ_H2[jh, jd, jy],
-            Elec_GC_Price = λ_elec_GC[jh, jd, jy],
-            H2_GC_Price = λ_H2_GC[jh, jd, jy],
-            EP_Price = λ_EP[jh, jd, jy],
-            Contract_Price = λ_contract[jh, jd, jy],
-        ))
+        row = Dict{Symbol, Any}(
+            :Time => t_index,
+            :Elec_Price => λ_elec[jh, jd, jy],
+            :H2_Price => λ_H2[jh, jd, jy],
+            :Elec_GC_Price => λ_elec_GC[jh, jd, jy],
+            :H2_GC_Price => λ_H2_GC[jh, jd, jy],
+            :EP_Price => λ_EP[jh, jd, jy],
+        )
+        for vres_id in ppa_vres
+            λv = get(λ_ppa_dict, vres_id, [])
+            row[Symbol("Contract_Price_$(vres_id)")] = isempty(λv) ? 0.0 : λv[end][jh, jd, jy]
+        end
+        push!(prices_rows, row)
         t_index += 1
     end
     prices_df = DataFrame(prices_rows)
@@ -465,7 +536,11 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
     println("  Electricity_GC  mean = ", round(mean(λ_elec_GC), digits=6))
     println("  H2_GC           mean = ", round(mean(λ_H2_GC), digits=6))
     println("  End_Product     mean = ", round(mean(λ_EP), digits=6))
-    println("  Contract        mean = ", round(mean(λ_contract), digits=6))
+    for vres_id in ppa_vres
+        λv = get(λ_ppa_dict, vres_id, [])
+        m = isempty(λv) ? 0.0 : mean(λv[end])
+        println("  Contract_$(vres_id) mean = ", round(m, digits=6))
+    end
 
     return nothing
 end

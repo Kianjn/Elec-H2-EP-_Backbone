@@ -1,3 +1,0 @@
-AgentID;Type;total_capacity_MW;contracted_capacity_MW;energy_from_contract_MWh;energy_from_pool_MWh;contract_price_EUR_per_MWh;electricity_price_EUR_per_MWh
-Gen_VRES_01;VRES;146.0522049;74.92687696;2914.513589;3147.520305;66.67567729;50.7576392
-Prod_H2_Green;Electrolyzer;40;74.92689383;2912.309233;3094.67505;66.67567729;50.7576392

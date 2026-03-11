@@ -159,21 +159,21 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
             obj += W[jd, jy] * (λ_EP[jh, jd, jy] * d_EP[jh, jd, jy] - (A_EP * d_EP[jh, jd, jy] - B_EP/2 * d_EP[jh, jd, jy]^2))
         end
 
-    # ── Contract variants (used only by market_exposure_contracts) ─────────
-    elseif agent_type == :power_vres_contracts
+    # ── PPA variants (used only by market_exposure_contracts) ─────────
+    elseif agent_type == :power_vres_ppa
         g_EOM = quantities[:g_EOM]
-        g_contract = quantities[:g_contract]
+        g_ppa = quantities[:g_ppa]
         λ_elec = prices[:λ_elec]
         λ_elec_GC = prices[:λ_elec_GC]
-        λ_contract = prices[:λ_contract]
+        λ_ppa = prices[:λ_ppa]
         MC = get(params, :MarginalCost, 0.0)
         F_cap = get(params, :FixedCost_per_MW, 0.0)
         for jh in JH, jd in JD, jy in JY
             obj += W[jd, jy] * (
-                MC * (g_EOM[jh, jd, jy] + g_contract[jh, jd, jy])
+                MC * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
                 - λ_elec[jh, jd, jy] * g_EOM[jh, jd, jy]
-                - λ_elec_GC[jh, jd, jy] * (g_EOM[jh, jd, jy] + g_contract[jh, jd, jy])
-                - λ_contract[jh, jd, jy] * g_contract[jh, jd, jy]
+                - λ_elec_GC[jh, jd, jy] * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
+                - λ_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
             )
         end
         if haskey(quantities, :cap_VRES)
@@ -182,24 +182,28 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
             end
         end
 
-    elseif agent_type == :H2_producer_contracts
+    elseif agent_type == :H2_producer_ppa
         e_in_pool = quantities[:e_in_pool]
-        g_contract = quantities[:g_contract]
+        g_ppa_from = quantities[:g_ppa_from]
         q_elec_gc = quantities[:q_elec_gc]
         h2_out = quantities[:h2_out]
         q_h2gc = quantities[:q_h2gc]
         λ_elec = prices[:λ_elec]
         λ_elec_GC = prices[:λ_elec_GC]
-        λ_contract = prices[:λ_contract]
+        λ_ppa = prices[:λ_ppa]  # Dict(vres_id => 3D array)
         λ_H2 = prices[:λ_H2]
         λ_H2_GC = prices[:λ_H2_GC]
         op_cost = get(params, :OperationalCost, 0.0)
         F_cap = get(params, :FixedCost_per_MW_Electrolyzer, 0.0)
         for jh in JH, jd in JD, jy in JY
+            contract_term = 0.0
+            for v in keys(g_ppa_from)
+                contract_term += λ_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy]
+            end
             obj += W[jd, jy] * (
                 λ_elec[jh, jd, jy] * e_in_pool[jh, jd, jy]
                 + λ_elec_GC[jh, jd, jy] * q_elec_gc[jh, jd, jy]
-                + λ_contract[jh, jd, jy] * g_contract[jh, jd, jy]
+                + contract_term
                 + op_cost * h2_out[jh, jd, jy]
                 - λ_H2[jh, jd, jy] * h2_out[jh, jd, jy]
                 - λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy]
@@ -341,40 +345,44 @@ function compute_agent_objective_contributions(agent_type::Symbol, quantities::D
             contrib[ih, id, iy] = λ_EP[jh, jd, jy] * d_EP[jh, jd, jy] - (A_EP * d_EP[jh, jd, jy] - B_EP/2 * d_EP[jh, jd, jy]^2)
         end
 
-    # ── Contract variants (used only by market_exposure_contracts) ─────────
-    elseif agent_type == :power_vres_contracts
+    # ── PPA variants (used only by market_exposure_contracts) ─────────
+    elseif agent_type == :power_vres_ppa
         g_EOM = quantities[:g_EOM]
-        g_contract = quantities[:g_contract]
+        g_ppa = quantities[:g_ppa]
         λ_elec = prices_dict[:λ_elec]
         λ_elec_GC = prices_dict[:λ_elec_GC]
-        λ_contract = prices_dict[:λ_contract]
+        λ_ppa = prices_dict[:λ_ppa]
         MC = get(params, :MarginalCost, 0.0)
         for (iy, jy) in enumerate(JY_vec), (id, jd) in enumerate(JD_vec), (ih, jh) in enumerate(JH_vec)
             contrib[ih, id, iy] = (
-                MC * (g_EOM[jh, jd, jy] + g_contract[jh, jd, jy])
+                MC * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
                 - λ_elec[jh, jd, jy] * g_EOM[jh, jd, jy]
-                - λ_elec_GC[jh, jd, jy] * (g_EOM[jh, jd, jy] + g_contract[jh, jd, jy])
-                - λ_contract[jh, jd, jy] * g_contract[jh, jd, jy]
+                - λ_elec_GC[jh, jd, jy] * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
+                - λ_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
             )
         end
 
-    elseif agent_type == :H2_producer_contracts
+    elseif agent_type == :H2_producer_ppa
         e_in_pool = quantities[:e_in_pool]
-        g_contract = quantities[:g_contract]
+        g_ppa_from = quantities[:g_ppa_from]
         q_elec_gc = quantities[:q_elec_gc]
         h2_out = quantities[:h2_out]
         q_h2gc = quantities[:q_h2gc]
         λ_elec = prices_dict[:λ_elec]
         λ_elec_GC = prices_dict[:λ_elec_GC]
-        λ_contract = prices_dict[:λ_contract]
+        λ_ppa = prices_dict[:λ_ppa]  # Dict(vres_id => 3D array)
         λ_H2 = prices_dict[:λ_H2]
         λ_H2_GC = prices_dict[:λ_H2_GC]
         op_cost = get(params, :OperationalCost, 0.0)
         for (iy, jy) in enumerate(JY_vec), (id, jd) in enumerate(JD_vec), (ih, jh) in enumerate(JH_vec)
+            contract_term = 0.0
+            for v in keys(g_ppa_from)
+                contract_term += λ_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy]
+            end
             contrib[ih, id, iy] = (
                 λ_elec[jh, jd, jy] * e_in_pool[jh, jd, jy]
                 + λ_elec_GC[jh, jd, jy] * q_elec_gc[jh, jd, jy]
-                + λ_contract[jh, jd, jy] * g_contract[jh, jd, jy]
+                + contract_term
                 + op_cost * h2_out[jh, jd, jy]
                 - λ_H2[jh, jd, jy] * h2_out[jh, jd, jy]
                 - λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy]

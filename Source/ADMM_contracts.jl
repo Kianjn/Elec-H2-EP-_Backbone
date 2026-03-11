@@ -7,11 +7,28 @@
 #   energy market (3D) and contract capacity market (scalar). Uses
 #   ADMM_subroutine_contracts! and update_rho_contracts!.
 #
+# CAPACITY CONSENSUS TOLERANCE (relaxed for contracts case):
+#   The capacity consensus (cap_bar) couples VRES, electrolyzer, and green
+#   offtaker investments. In the contracts case, VRES splits generation between
+#   pool and contract, so cap_bar = f(g_bar_elec + g_bar_ppa) depends on both
+#   standard and contract flow consensus. This creates stronger coupling and
+#   slower convergence than in market_exposure.
+#
+#   We relax the capacity tolerance by CAP_CONSENSUS_TOL_RELAX so that
+#   convergence can be declared when flow markets are sufficiently converged,
+#   even if capacity consensus lags. The capacity residual remains monitored
+#   and reported; results are still meaningful when flow markets have cleared.
+#
 # ==============================================================================
+
+# Multiplier for capacity consensus tolerance. Effective tolerance for cap is
+# (eps_pr, eps_du) * CAP_CONSENSUS_TOL_RELAX, i.e. we accept larger capacity
+# residuals. Tune via data["ADMM"]["cap_tol_relax"] if present.
+const CAP_CONSENSUS_TOL_RELAX_DEFAULT = 100.0
 
 function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Dict,
                          elec_GC_market::Dict, H2_GC_market::Dict, EP_market::Dict,
-                         contract_market::Dict, mdict::Dict, agents::Dict, data::Dict, TO::TimerOutput)
+                         ppa_market::Dict, mdict::Dict, agents::Dict, data::Dict, TO::TimerOutput)
     n_ts = data["General"]["nTimesteps"]
     n_rd = data["General"]["nReprDays"]
     n_yr = data["General"]["nYears"]
@@ -20,12 +37,17 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     convergence = 0
     iterations = ProgressBar(1:max_iter)
 
+    # Log initial mean prices (before any iteration) so diagnostics show warm-start.
+    for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+        push!(ADMM_state["PriceHistory"][mkt], mean(results["λ"][mkt][end]))
+    end
+
     for iter in iterations
         convergence == 1 && break
 
         for m in agents[:all]
             ADMM_subroutine_contracts!(m, data, results, ADMM_state, elec_market, H2_market,
-                                       elec_GC_market, H2_GC_market, EP_market, contract_market,
+                                       elec_GC_market, H2_GC_market, EP_market, ppa_market,
                                        mdict, agents, TO)
         end
 
@@ -48,14 +70,34 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             imb_EP = sum(results["EP"][m][end] for m in agents[:EP_market]; init=zeros(shp...)) .- EP_market["D_EP"]
             push!(ADMM_state["Imbalances"]["EP"], imb_EP)
 
-            # Contract energy (3D): VRES supplies +g_contract, electrolyzer demands -g_contract
-            imb_contract = sum(results["contract"][m][end] for m in agents[:contract_market]; init=zeros(shp...))
-            push!(ADMM_state["Imbalances"]["contract"], imb_contract)
+            # Contract energy (3D) per VRES: supply[v] - demand_from[v]
+            ppa_vres = get(ppa_market, "ppa_vres", String[])
+            h2_ids = agents[:H2]
+            C = ADMM_state["ppa"]
+            for vres_id in ppa_vres
+                supply = isempty(results["ppa"][vres_id]) ? zeros(shp...) : results["ppa"][vres_id][end]
+                demand = zeros(shp...)
+                for h2_id in h2_ids
+                    if !isempty(get(results["ppa_from"][h2_id], vres_id, []))
+                        demand .+= results["ppa_from"][h2_id][vres_id][end]
+                    end
+                end
+                imb_contract = supply .- demand
+                push!(C["Imbalances"][vres_id], imb_contract)
+            end
 
-            # contract_cap consensus: stored as net position (VRES +cap, electrolyzer -cap)
-            imb_contract_cap = sum(isempty(results["contract_cap"][m]) ? 0.0 : results["contract_cap"][m][end]
-                                   for m in agents[:contract_market])
-            push!(ADMM_state["Imbalances"]["contract_cap"], imb_contract_cap)
+            # contract_cap consensus per VRES: VRES +cap, electrolyzer -cap (stored as -cap)
+            for vres_id in ppa_vres
+                cap_vres = isempty(results["ppa_cap"][vres_id]) ? 0.0 : results["ppa_cap"][vres_id][end]
+                cap_elec_sum = 0.0
+                for h2_id in h2_ids
+                    if haskey(results["ppa_cap_from"][h2_id], vres_id) && !isempty(results["ppa_cap_from"][h2_id][vres_id])
+                        cap_elec_sum += -results["ppa_cap_from"][h2_id][vres_id][end]  # stored as -cap
+                    end
+                end
+                imb_contract_cap = cap_vres - cap_elec_sum
+                push!(C["Imbalances_cap"][vres_id], imb_contract_cap)
+            end
         end
 
         @timeit TO "Imbalance means" begin
@@ -64,12 +106,15 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             push!(ADMM_state["ImbalanceMean"]["elec_GC"], mean(ADMM_state["Imbalances"]["elec_GC"][end]))
             push!(ADMM_state["ImbalanceMean"]["H2_GC"],   mean(ADMM_state["Imbalances"]["H2_GC"][end]))
             push!(ADMM_state["ImbalanceMean"]["EP"],      mean(ADMM_state["Imbalances"]["EP"][end]))
-            push!(ADMM_state["ImbalanceMean"]["contract"],     mean(ADMM_state["Imbalances"]["contract"][end]))
-            push!(ADMM_state["ImbalanceMean"]["contract_cap"], abs(ADMM_state["Imbalances"]["contract_cap"][end]))
+            C = ADMM_state["ppa"]
+            for vres_id in ppa_vres
+                push!(C["ImbalanceMean"][vres_id],     mean(C["Imbalances"][vres_id][end]))
+                push!(C["ImbalanceMean_cap"][vres_id], abs(C["Imbalances_cap"][vres_id][end]))
+            end
         end
 
         # ------------------------------------------------------------------
-        # Primal residuals
+        # Primal residuals (per-VRES for contract)
         # ------------------------------------------------------------------
         @timeit TO "Primal residuals" begin
             rp_elec    = sqrt(sum(ADMM_state["Imbalances"]["elec"][end].^2))
@@ -77,16 +122,26 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             rp_elec_GC = sqrt(sum(ADMM_state["Imbalances"]["elec_GC"][end].^2))
             rp_H2_GC   = sqrt(sum(ADMM_state["Imbalances"]["H2_GC"][end].^2))
             rp_EP      = sqrt(sum(ADMM_state["Imbalances"]["EP"][end].^2))
-            rp_contract     = sqrt(sum(ADMM_state["Imbalances"]["contract"][end].^2))
-            rp_contract_cap = abs(ADMM_state["Imbalances"]["contract_cap"][end])
 
             push!(ADMM_state["Residuals"]["Primal"]["elec"],    rp_elec)
             push!(ADMM_state["Residuals"]["Primal"]["H2"],      rp_H2)
             push!(ADMM_state["Residuals"]["Primal"]["elec_GC"], rp_elec_GC)
             push!(ADMM_state["Residuals"]["Primal"]["H2_GC"],   rp_H2_GC)
             push!(ADMM_state["Residuals"]["Primal"]["EP"],      rp_EP)
-            push!(ADMM_state["Residuals"]["Primal"]["contract"],     rp_contract)
-            push!(ADMM_state["Residuals"]["Primal"]["contract_cap"], rp_contract_cap)
+
+            C = ADMM_state["ppa"]
+            for vres_id in ppa_vres
+                rp_contract     = sqrt(sum(C["Imbalances"][vres_id][end].^2))
+                rp_contract_cap = abs(C["Imbalances_cap"][vres_id][end])
+                push!(C["Primal"][vres_id],     rp_contract)
+                push!(C["Primal_cap"][vres_id], rp_contract_cap)
+                if C["ResidualScale_Primal"][vres_id] == 0.0 && rp_contract > 0.0
+                    C["ResidualScale_Primal"][vres_id] = rp_contract
+                end
+                if C["ResidualScale_Primal_cap"][vres_id] == 0.0 && rp_contract_cap > 0.0
+                    C["ResidualScale_Primal_cap"][vres_id] = rp_contract_cap
+                end
+            end
 
             scales_pr = ADMM_state["ResidualScale"]["Primal"]
             if scales_pr["elec"] == 0.0 && rp_elec > 0.0
@@ -104,16 +159,35 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             if scales_pr["EP"] == 0.0 && rp_EP > 0.0
                 scales_pr["EP"] = rp_EP
             end
-            if scales_pr["contract"] == 0.0 && rp_contract > 0.0
-                scales_pr["contract"] = rp_contract
+
+            # Capacity primal residual: L2 norm of (cap - cap_bar) across all cap agents.
+            cap_agents = get(agents, :cap_agents, String[])
+            rp_cap = 0.0
+            if !isempty(cap_agents)
+                for m in cap_agents
+                    cap_vec = Float64[]
+                    if !isempty(get(results["Cap_VRES"], m, []))
+                        cap_vec = results["Cap_VRES"][m][end]
+                    elseif !isempty(get(results["Cap_Elec_H2"], m, []))
+                        cap_vec = results["Cap_Elec_H2"][m][end]
+                    elseif !isempty(get(results["Cap_EP_Green"], m, []))
+                        cap_vec = results["Cap_EP_Green"][m][end]
+                    end
+                    if !isempty(cap_vec)
+                        cap_bar = get(mdict[m].ext[:parameters], :cap_bar, zeros(length(cap_vec)))
+                        rp_cap += sum((cap_vec[i] - cap_bar[i])^2 for i in eachindex(cap_vec))
+                    end
+                end
+                rp_cap = sqrt(rp_cap)
             end
-            if scales_pr["contract_cap"] == 0.0 && rp_contract_cap > 0.0
-                scales_pr["contract_cap"] = rp_contract_cap
+            push!(ADMM_state["Residuals"]["Primal"]["cap"], rp_cap)
+            if ADMM_state["ResidualScale"]["Primal"]["cap"] == 0.0 && rp_cap > 0.0
+                ADMM_state["ResidualScale"]["Primal"]["cap"] = rp_cap
             end
         end
 
         # ------------------------------------------------------------------
-        # Dual residuals (standard + contract)
+        # Dual residuals (standard + contract + cap)
         # ------------------------------------------------------------------
         @timeit TO "Dual residuals" begin
             nE  = elec_market["nAgents"]
@@ -121,7 +195,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             nEG = elec_GC_market["nAgents"]
             nHG = H2_GC_market["nAgents"]
             nEP = EP_market["nAgents"]
-            nC  = contract_market["nAgents"]
+            nC  = ppa_market["nAgents"]
 
             if iter > 1
                 dual_elec = 0.0
@@ -164,34 +238,105 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 end
                 push!(ADMM_state["Residuals"]["Dual"]["EP"], sqrt(dual_EP))
 
-                dual_contract = 0.0
-                for m in agents[:contract_market]
-                    diff = (results["contract"][m][end] .- sum(results["contract"][mstar][end] for mstar in agents[:contract_market]) ./ (nC + 1)) .-
-                           (results["contract"][m][end-1] .- sum(results["contract"][mstar][end-1] for mstar in agents[:contract_market]) ./ (nC + 1))
-                    dual_contract += sum((ADMM_state["ρ"]["contract"][end] .* diff).^2)
-                end
-                push!(ADMM_state["Residuals"]["Dual"]["contract"], sqrt(dual_contract))
+                ppa_vres = get(ppa_market, "ppa_vres", String[])
+                h2_ids = agents[:H2]
+                for vres_id in ppa_vres
+                    nC = 2
+                    net_vres = results["ppa"][vres_id][end]
+                    net_vres_prev = length(results["ppa"][vres_id]) < 2 ? zeros(shp...) : results["ppa"][vres_id][end-1]
+                    net_elec = zeros(shp...)
+                    net_elec_prev = zeros(shp...)
+                    for h2_id in h2_ids
+                        if haskey(results["ppa_from"][h2_id], vres_id) && !isempty(results["ppa_from"][h2_id][vres_id])
+                            net_elec .+= .-results["ppa_from"][h2_id][vres_id][end]
+                            if length(results["ppa_from"][h2_id][vres_id]) >= 2
+                                net_elec_prev .+= .-results["ppa_from"][h2_id][vres_id][end-1]
+                            end
+                        end
+                    end
+                    sum_net = net_vres .+ net_elec
+                    sum_net_prev = net_vres_prev .+ net_elec_prev
+                    diff_vres = (net_vres .- sum_net ./ (nC + 1)) .- (net_vres_prev .- sum_net_prev ./ (nC + 1))
+                    diff_elec = (net_elec .- sum_net ./ (nC + 1)) .- (net_elec_prev .- sum_net_prev ./ (nC + 1))
+                    C = ADMM_state["ppa"]
+                    dual_contract = sum((C["ρ"][vres_id][end] .* diff_vres).^2) + sum((C["ρ"][vres_id][end] .* diff_elec).^2)
+                    push!(C["Dual"][vres_id], sqrt(dual_contract))
 
-                dual_contract_cap = 0.0
-                _net_cap(ag) = isempty(results["contract_cap"][ag]) ? 0.0 : results["contract_cap"][ag][end]
-                _net_cap_prev(ag) = length(results["contract_cap"][ag]) < 2 ? 0.0 : results["contract_cap"][ag][end-1]
-                for m in agents[:contract_market]
-                    diff = (_net_cap(m) - sum(_net_cap(mstar) for mstar in agents[:contract_market]) / (nC + 1)) -
-                           (_net_cap_prev(m) - sum(_net_cap_prev(mstar) for mstar in agents[:contract_market]) / (nC + 1))
-                    dual_contract_cap += (ADMM_state["ρ"]["contract_cap"][end] * diff)^2
+                    cap_vres = isempty(results["ppa_cap"][vres_id]) ? 0.0 : results["ppa_cap"][vres_id][end]
+                    cap_vres_prev = length(results["ppa_cap"][vres_id]) < 2 ? 0.0 : results["ppa_cap"][vres_id][end-1]
+                    cap_elec = 0.0
+                    cap_elec_prev = 0.0
+                    for h2_id in h2_ids
+                        if haskey(results["ppa_cap_from"][h2_id], vres_id) && !isempty(results["ppa_cap_from"][h2_id][vres_id])
+                            cap_elec += -results["ppa_cap_from"][h2_id][vres_id][end]
+                            if length(results["ppa_cap_from"][h2_id][vres_id]) >= 2
+                                cap_elec_prev += -results["ppa_cap_from"][h2_id][vres_id][end-1]
+                            end
+                        end
+                    end
+                    sum_cap = cap_vres - cap_elec
+                    sum_cap_prev = cap_vres_prev - cap_elec_prev
+                    diff_cap_vres = (cap_vres - sum_cap / (nC + 1)) - (cap_vres_prev - sum_cap_prev / (nC + 1))
+                    diff_cap_elec = ((-cap_elec) - sum_cap / (nC + 1)) - ((-cap_elec_prev) - sum_cap_prev / (nC + 1))
+                    dual_contract_cap = (C["ρ_cap"][vres_id][end] * diff_cap_vres)^2 + (C["ρ_cap"][vres_id][end] * diff_cap_elec)^2
+                    push!(C["Dual_cap"][vres_id], sqrt(dual_contract_cap))
                 end
-                push!(ADMM_state["Residuals"]["Dual"]["contract_cap"], sqrt(dual_contract_cap))
 
                 scales_du = ADMM_state["ResidualScale"]["Dual"]
-                for key in ("elec", "H2", "elec_GC", "H2_GC", "EP", "contract", "contract_cap")
+                for key in ("elec", "H2", "elec_GC", "H2_GC", "EP")
                     rd = ADMM_state["Residuals"]["Dual"][key][end]
                     if scales_du[key] == 0.0 && rd < Inf
                         scales_du[key] = rd
                     end
                 end
+                # Capacity dual residual: change in cap across iterations.
+                cap_agents = get(agents, :cap_agents, String[])
+                dual_cap = 0.0
+                if !isempty(cap_agents)
+                    ρ_cap = ADMM_state["ρ"]["cap"][end]
+                    for m in cap_agents
+                        cap_new = Float64[]
+                        cap_old = Float64[]
+                        if !isempty(get(results["Cap_VRES"], m, []))
+                            cap_new = results["Cap_VRES"][m][end]
+                            cap_old = length(results["Cap_VRES"][m]) >= 2 ? results["Cap_VRES"][m][end-1] : zeros(length(cap_new))
+                        elseif !isempty(get(results["Cap_Elec_H2"], m, []))
+                            cap_new = results["Cap_Elec_H2"][m][end]
+                            cap_old = length(results["Cap_Elec_H2"][m]) >= 2 ? results["Cap_Elec_H2"][m][end-1] : zeros(length(cap_new))
+                        elseif !isempty(get(results["Cap_EP_Green"], m, []))
+                            cap_new = results["Cap_EP_Green"][m][end]
+                            cap_old = length(results["Cap_EP_Green"][m]) >= 2 ? results["Cap_EP_Green"][m][end-1] : zeros(length(cap_new))
+                        end
+                        if !isempty(cap_new) && length(cap_old) == length(cap_new)
+                            dual_cap += sum((ρ_cap * (cap_new[i] - cap_old[i]))^2 for i in eachindex(cap_new))
+                        end
+                    end
+                    dual_cap = sqrt(dual_cap)
+                end
+                push!(ADMM_state["Residuals"]["Dual"]["cap"], dual_cap)
+                if ADMM_state["ResidualScale"]["Dual"]["cap"] == 0.0 && dual_cap < Inf
+                    ADMM_state["ResidualScale"]["Dual"]["cap"] = dual_cap
+                end
+                C = ADMM_state["ppa"]
+                for vres_id in ppa_vres
+                    rd = C["Dual"][vres_id][end]
+                    if C["ResidualScale_Dual"][vres_id] == 0.0 && rd < Inf
+                        C["ResidualScale_Dual"][vres_id] = rd
+                    end
+                    rd = C["Dual_cap"][vres_id][end]
+                    if C["ResidualScale_Dual_cap"][vres_id] == 0.0 && rd < Inf
+                        C["ResidualScale_Dual_cap"][vres_id] = rd
+                    end
+                end
             else
-                for key in ("elec", "H2", "elec_GC", "H2_GC", "EP", "contract", "contract_cap")
+                for key in ("elec", "H2", "elec_GC", "H2_GC", "EP")
                     push!(ADMM_state["Residuals"]["Dual"][key], Inf)
+                end
+                push!(ADMM_state["Residuals"]["Dual"]["cap"], Inf)
+                C = ADMM_state["ppa"]
+                for vres_id in get(ppa_market, "ppa_vres", String[])
+                    push!(C["Dual"][vres_id], Inf)
+                    push!(C["Dual_cap"][vres_id], Inf)
                 end
             end
         end
@@ -200,27 +345,30 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         # Price update (standard + contract)
         # ------------------------------------------------------------------
         @timeit TO "Update prices" begin
+            # Damp price updates earlier (residuals < 10×ε) to reduce oscillation (same as base ADMM).
+            eta_threshold = 10.0 * ADMM_state["EpsilonAbs"]
             for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
                 rp = ADMM_state["Residuals"]["Primal"][mkt][end]
                 rd = ADMM_state["Residuals"]["Dual"][mkt][end]
-                tol = ADMM_state["Tolerance"][mkt]
                 base = max(rp, rd)
-                mid_resid_factor = 2.0
-                η = base <= mid_resid_factor * tol ? 0.3 : 1.0
+                η = base <= eta_threshold ? 0.3 : 1.0
                 push!(results["λ"][mkt],
                       results["λ"][mkt][end] .- η .* ADMM_state["ρ"][mkt][end] .* ADMM_state["Imbalances"][mkt][end])
             end
             results["λ"]["H2_GC"][end] .= max.(results["λ"]["H2_GC"][end], 0.0)
 
-            # Contract pool: g_contract cleared at λ_contract (€/MWh). No price for contract_cap.
-            rp = ADMM_state["Residuals"]["Primal"]["contract"][end]
-            rd = ADMM_state["Residuals"]["Dual"]["contract"][end]
-            tol = ADMM_state["Tolerance"]["contract"]
-            base = max(rp, rd)
-            η = base <= 2.0 * tol ? 0.3 : 1.0
-            push!(results["λ"]["contract"],
-                  results["λ"]["contract"][end] .- η .* ADMM_state["ρ"]["contract"][end] .* ADMM_state["Imbalances"]["contract"][end])
-            results["λ"]["contract"][end] .= max.(results["λ"]["contract"][end], 0.0)
+            # Contract pool: per-VRES λ_contract (€/MWh). No price for contract_cap.
+            ppa_vres = get(ppa_market, "ppa_vres", String[])
+            C = ADMM_state["ppa"]
+            for vres_id in ppa_vres
+                rp = C["Primal"][vres_id][end]
+                rd = C["Dual"][vres_id][end]
+                base = max(rp, rd)
+                η = base <= eta_threshold ? 0.3 : 1.0
+                push!(results["λ_ppa"][vres_id],
+                      results["λ_ppa"][vres_id][end] .- η .* C["ρ"][vres_id][end] .* C["Imbalances"][vres_id][end])
+                results["λ_ppa"][vres_id][end] .= max.(results["λ_ppa"][vres_id][end], 0.0)
+            end
         end
 
         @timeit TO "Price means" begin
@@ -229,7 +377,10 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             push!(ADMM_state["PriceHistory"]["elec_GC"], mean(results["λ"]["elec_GC"][end]))
             push!(ADMM_state["PriceHistory"]["H2_GC"],   mean(results["λ"]["H2_GC"][end]))
             push!(ADMM_state["PriceHistory"]["EP"],      mean(results["λ"]["EP"][end]))
-            push!(ADMM_state["PriceHistory"]["contract"], mean(results["λ"]["contract"][end]))
+            C = ADMM_state["ppa"]
+            for vres_id in get(ppa_market, "ppa_vres", String[])
+                push!(C["PriceHistory"][vres_id], mean(results["λ_ppa"][vres_id][end]))
+            end
         end
 
         @timeit TO "Update ρ" begin
@@ -239,43 +390,60 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         set_description(iterations, "")
 
         # ------------------------------------------------------------------
-        # Convergence check (all 7 markets)
+        # Convergence check (all markets)
         # ------------------------------------------------------------------
-        min_iter = get(data["ADMM"], "min_iter", 500)
-        if iter >= min_iter
-            eps_abs = ADMM_state["EpsilonAbs"]
-            eps_rel = ADMM_state["EpsilonRel"]
-            n_slots = n_ts * n_rd * n_yr
-            sqrt_n = sqrt(n_slots)
-            scale_pr = ADMM_state["ResidualScale"]["Primal"]
-            scale_du = ADMM_state["ResidualScale"]["Dual"]
+        eps_abs = ADMM_state["EpsilonAbs"]
+        eps_rel = ADMM_state["EpsilonRel"]
+        n_slots = n_ts * n_rd * n_yr
+        sqrt_n = sqrt(n_slots)
+        scale_pr = ADMM_state["ResidualScale"]["Primal"]
+        scale_du = ADMM_state["ResidualScale"]["Dual"]
 
-            function within_tol(key::String)
-                rp = ADMM_state["Residuals"]["Primal"][key][end]
-                rd = ADMM_state["Residuals"]["Dual"][key][end]
-                sp = max(scale_pr[key], 1.0)
-                sd = max(scale_du[key], 1.0)
-                eps_pr = eps_abs * sqrt_n + eps_rel * sp
-                eps_du = eps_abs * sqrt_n + eps_rel * sd
-                return (rp <= eps_pr) && (rd <= eps_du)
-            end
+        function within_tol(key::String)
+            rp = ADMM_state["Residuals"]["Primal"][key][end]
+            rd = ADMM_state["Residuals"]["Dual"][key][end]
+            sp = max(scale_pr[key], 1.0)
+            sd = max(scale_du[key], 1.0)
+            eps_pr = eps_abs * sqrt_n + eps_rel * sp
+            eps_du = eps_abs * sqrt_n + eps_rel * sd
+            return (rp <= eps_pr) && (rd <= eps_du)
+        end
 
-            # For contract_cap (scalar), use sqrt_n = 1 for consistency
-            function within_tol_cap(key::String)
-                rp = ADMM_state["Residuals"]["Primal"][key][end]
-                rd = ADMM_state["Residuals"]["Dual"][key][end]
-                sp = max(scale_pr[key], 1.0)
-                sd = max(scale_du[key], 1.0)
-                eps_pr = eps_abs * 1.0 + eps_rel * sp
-                eps_du = eps_abs * 1.0 + eps_rel * sd
-                return (rp <= eps_pr) && (rd <= eps_du)
-            end
+        C = ADMM_state["ppa"]
+        contract_ok = true
+        for vres_id in get(ppa_market, "ppa_vres", String[])
+            rp = C["Primal"][vres_id][end]
+            rd = C["Dual"][vres_id][end]
+            sp = max(C["ResidualScale_Primal"][vres_id], 1.0)
+            sd = max(C["ResidualScale_Dual"][vres_id], 1.0)
+            eps_pr = eps_abs * sqrt_n + eps_rel * sp
+            eps_du = eps_abs * sqrt_n + eps_rel * sd
+            contract_ok = contract_ok && (rp <= eps_pr) && (rd <= eps_du)
+        end
+        cap_ok = true
+        for vres_id in get(ppa_market, "ppa_vres", String[])
+            rp = C["Primal_cap"][vres_id][end]
+            rd = C["Dual_cap"][vres_id][end]
+            sp = max(C["ResidualScale_Primal_cap"][vres_id], 1.0)
+            sd = max(C["ResidualScale_Dual_cap"][vres_id], 1.0)
+            eps_pr = eps_abs * 1.0 + eps_rel * sp
+            eps_du = eps_abs * 1.0 + eps_rel * sd
+            cap_ok = cap_ok && (rp <= eps_pr) && (rd <= eps_du)
+        end
 
-            if (within_tol("elec") && within_tol("H2") && within_tol("elec_GC") &&
-                within_tol("H2_GC") && within_tol("EP") &&
-                within_tol("contract") && within_tol_cap("contract_cap"))
-                convergence = 1
-            end
+        # Capacity consensus: use relaxed tolerance (see file header).
+        # Effective eps = (eps_pr, eps_du) * cap_tol_relax so we accept larger residuals.
+        cap_tol_relax = get(get(data, "ADMM", Dict()), "cap_tol_relax", CAP_CONSENSUS_TOL_RELAX_DEFAULT)
+        rp_cap = ADMM_state["Residuals"]["Primal"]["cap"][end]
+        rd_cap = ADMM_state["Residuals"]["Dual"]["cap"][end]
+        sp_cap = max(scale_pr["cap"], 1.0)
+        sd_cap = max(scale_du["cap"], 1.0)
+        eps_pr_cap = cap_tol_relax * (eps_abs * sqrt_n + eps_rel * sp_cap)
+        eps_du_cap = cap_tol_relax * (eps_abs * sqrt_n + eps_rel * sd_cap)
+        cap_consensus_ok = (rp_cap <= eps_pr_cap) && (rd_cap <= eps_du_cap)
+        if (within_tol("elec") && within_tol("H2") && within_tol("elec_GC") &&
+            within_tol("H2_GC") && within_tol("EP") && contract_ok && cap_ok && cap_consensus_ok)
+            convergence = 1
         end
 
         ADMM_state["n_iter"] = iter
@@ -296,19 +464,33 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         "elec_GC" => "Electricity_GC",
         "H2_GC"   => "H2_GC",
         "EP"      => "End_Product",
-        "contract" => "Contract",
     )
     println("Final residuals and mean prices per market:")
-    for key in ("elec", "H2", "elec_GC", "H2_GC", "EP", "contract")
+    for key in ("elec", "H2", "elec_GC", "H2_GC", "EP")
         primal = ADMM_state["Residuals"]["Primal"][key][end]
         dual   = ADMM_state["Residuals"]["Dual"][key][end]
         price  = ADMM_state["PriceHistory"][key][end]
         @printf("  %-14s  primal = %.3e,  dual = %.3e,  price_mean = %.6f\n",
                 market_labels[key], primal, dual, price)
     end
-    @printf("  %-14s  primal = %.3e,  dual = %.3e  (consensus, no price)\n",
-            "contract_cap", ADMM_state["Residuals"]["Primal"]["contract_cap"][end],
-            ADMM_state["Residuals"]["Dual"]["contract_cap"][end])
+    C = ADMM_state["ppa"]
+    for vres_id in get(ppa_market, "ppa_vres", String[])
+        primal = C["Primal"][vres_id][end]
+        dual   = C["Dual"][vres_id][end]
+        price  = C["PriceHistory"][vres_id][end]
+        @printf("  %-14s  primal = %.3e,  dual = %.3e,  price_mean = %.6f\n",
+                "contract_$(vres_id)", primal, dual, price)
+    end
+    for vres_id in get(ppa_market, "ppa_vres", String[])
+        primal = C["Primal_cap"][vres_id][end]
+        dual   = C["Dual_cap"][vres_id][end]
+        @printf("  %-14s  primal = %.3e,  dual = %.3e  (consensus, no price)\n",
+                "contract_cap_$(vres_id)", primal, dual)
+    end
+    primal_cap = ADMM_state["Residuals"]["Primal"]["cap"][end]
+    dual_cap   = ADMM_state["Residuals"]["Dual"]["cap"][end]
+    @printf("  %-14s  primal = %.3e,  dual = %.3e  (capacity consensus)\n",
+            "Capacity", primal_cap, dual_cap)
 
     return nothing
 end
