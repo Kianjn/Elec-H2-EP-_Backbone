@@ -3,32 +3,44 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   Writes to market_exposure_ppa_results/. Keeps the same major ADMM CSVs
+#   Writes to market_exposure_contracts_results/. Keeps the same major ADMM CSVs
 #   as market_exposure (ADMM_Convergence, ADMM_Diagnostics, 5× Market_History,
 #   Agent_Summary, Market_Prices) plus contract columns where relevant.
 #   Adds focal contract outputs:
-#   - Contracts.csv: capacity_contracted_MW, energy_transferred_MWh, contract_price_EUR_per_MWh
-#   - Green_Agents_Detail.csv: per-agent breakdown (VRES, electrolyzer) — total capacity,
-#     contracted vs pool energy, and prices
+#   - PPAs.csv: per-VRES contracted capacity/energy/price
+#   - HPAs.csv: per-GreenProducer contracted capacity/energy/price
+#   - Green_Agents_Detail.csv: detailed PPA breakdown for VRES + GreenProducer
 #
 # ARGUMENTS:
 #   mdict, elec_market, H2_market, elec_GC_market, H2_GC_market — Same as save_results.
-#   ppa_market — PPA market dict (initial_price, rho_initial).
-#   ADMM_state — ADMM state with ppa/ppa_cap keys.
-#   results — Results with ppa, ppa_cap, λ["ppa"].
-#   agents — Agent lists including agents[:ppa_market].
+#   ppa_market, hpa_market — Contract market dicts.
+#   ADMM_state — ADMM state with ppa/hpa sub-dicts.
+#   results — Results including ppa/hpa quantities and λ_ppa/λ_hpa.
+#   agents — Agent lists including contract participants.
 #
 # ==============================================================================
 
 function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict,
                                  elec_GC_market::Dict, H2_GC_market::Dict,
-                                 ppa_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict)
-    results_dir = joinpath(@__DIR__, "..", "market_exposure_ppa_results")
+                                 ppa_market::Dict, hpa_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict)
+    results_dir = joinpath(@__DIR__, "..", "market_exposure_contracts_results")
     isdir(results_dir) || mkdir(results_dir)
 
     n_it = length(ADMM_state["Imbalances"]["elec"])
     ppa_vres = get(ppa_market, "ppa_vres", String[])
+    hpa_h2 = get(hpa_market, "hpa_h2", String[])
     C = get(ADMM_state, "ppa", Dict())
+    C_hpa = get(ADMM_state, "hpa", Dict())
+
+    # Ensure deterministic column order with iteration/time first.
+    function _move_first!(df::DataFrame, col::Symbol)
+        cols = Symbol.(names(df))
+        if col in cols
+            ordered = vcat([col], [c for c in cols if c != col])
+            select!(df, ordered)
+        end
+        return df
+    end
 
     # PriceHistory may have length n_it+1 (initial + 1 per iteration); slice to [2:end]
     # so all diagnostic columns have length n_it (same as save_results.jl).
@@ -57,12 +69,22 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         conv_cols[Symbol("ppa_cap_$(vres_id)_primal")] = C["Primal_cap"][vres_id]
         conv_cols[Symbol("ppa_cap_$(vres_id)_dual")] = C["Dual_cap"][vres_id]
     end
+    for h2_id in hpa_h2
+        haskey(C_hpa, "Primal") || break
+        conv_cols[Symbol("hpa_$(h2_id)_primal")] = C_hpa["Primal"][h2_id]
+        conv_cols[Symbol("hpa_$(h2_id)_dual")] = C_hpa["Dual"][h2_id]
+        conv_cols[Symbol("hpa_cap_$(h2_id)_primal")] = C_hpa["Primal_cap"][h2_id]
+        conv_cols[Symbol("hpa_cap_$(h2_id)_dual")] = C_hpa["Dual_cap"][h2_id]
+    end
     conv_df = DataFrame(conv_cols)
+    _move_first!(conv_df, :iter)
     CSV.write(joinpath(results_dir, "ADMM_Convergence.csv"), conv_df)
 
     # ── ADMM_Diagnostics.csv (with per-VRES contract columns) ─────────────────
     ph_ppa(vid) = C["PriceHistory"][vid]
     ph_ppa_slice(vid) = length(ph_ppa(vid)) == n_it + 1 ? ph_ppa(vid)[2:end] : ph_ppa(vid)
+    ph_hpa(vid) = C_hpa["PriceHistory"][vid]
+    ph_hpa_slice(vid) = length(ph_hpa(vid)) == n_it + 1 ? ph_hpa(vid)[2:end] : ph_hpa(vid)
     diag_cols = Dict(
         :iter => 1:n_it,
         :elec_rho => ADMM_state["ρ"]["elec"][1:n_it],
@@ -89,10 +111,19 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         diag_cols[Symbol("ppa_cap_$(vres_id)_rho")] = C["ρ_cap"][vres_id][1:n_it]
         diag_cols[Symbol("ppa_cap_$(vres_id)_imb_mean")] = C["ImbalanceMean_cap"][vres_id]
     end
+    for h2_id in hpa_h2
+        haskey(C_hpa, "ρ") || break
+        diag_cols[Symbol("hpa_$(h2_id)_rho")] = C_hpa["ρ"][h2_id][1:n_it]
+        diag_cols[Symbol("hpa_$(h2_id)_price_mean")] = ph_hpa_slice(h2_id)
+        diag_cols[Symbol("hpa_$(h2_id)_imb_mean")] = C_hpa["ImbalanceMean"][h2_id]
+        diag_cols[Symbol("hpa_cap_$(h2_id)_rho")] = C_hpa["ρ_cap"][h2_id][1:n_it]
+        diag_cols[Symbol("hpa_cap_$(h2_id)_imb_mean")] = C_hpa["ImbalanceMean_cap"][h2_id]
+    end
     diag_df = DataFrame(diag_cols)
+    _move_first!(diag_df, :iter)
     CSV.write(joinpath(results_dir, "ADMM_Diagnostics.csv"), diag_df)
 
-    # ── Per-market history (5 base markets only; contract focal info in Contracts.csv) ─
+    # ── Per-market history (5 base markets only; contract focal info in PPAs/HPAs CSVs) ─
     markets = Dict(
         "elec"    => "Electricity",
         "H2"      => "Hydrogen",
@@ -109,6 +140,7 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
             primal_res = ADMM_state["Residuals"]["Primal"][key],
             dual_res   = ADMM_state["Residuals"]["Dual"][key],
         )
+        _move_first!(df, :iter)
         CSV.write(joinpath(results_dir, string(name, "_Market_History.csv")), df)
     end
 
@@ -143,6 +175,33 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
             ppa_price_EUR_per_MWh = prices_EUR,  # bundled elec + elec_GC
         )
         CSV.write(joinpath(results_dir, "PPAs.csv"), ppas_df)
+    end
+
+    # ── HPAs.csv — One row per GreenProducer: contracted H2 capacity, transferred H2, bundled H2+H2_GC price ─
+    if !isempty(hpa_h2)
+        h2_ids = String[]
+        cap_MWs = Float64[]
+        energy_MWhs = Float64[]
+        prices_EUR = Float64[]
+        for h2_id in hpa_h2
+            push!(h2_ids, h2_id)
+            cap_list = get(results["hpa_cap"], h2_id, [])
+            g_list = get(results["hpa"], h2_id, [])
+            cap_MW = isempty(cap_list) ? 0.0 : abs(cap_list[end])
+            energy_MWh = isempty(g_list) ? 0.0 : abs(sum(g_list[end]))
+            λ_h = get(results["λ_hpa"], h2_id, [fill(0.0, 1, 1, 1)])
+            price_mean = isempty(λ_h) ? 0.0 : mean(λ_h[end])
+            push!(cap_MWs, cap_MW)
+            push!(energy_MWhs, energy_MWh)
+            push!(prices_EUR, price_mean)
+        end
+        hpas_df = DataFrame(
+            H2_Producer_AgentID = h2_ids,
+            capacity_contracted_MW = cap_MWs,
+            energy_transferred_MWh = energy_MWhs,
+            hpa_price_EUR_per_MWh = prices_EUR,
+        )
+        CSV.write(joinpath(results_dir, "HPAs.csv"), hpas_df)
     end
 
     # Green agents detail: VRES (total cap, PPA share, pool share) and electrolyzer (per-VRES breakdown)
@@ -284,7 +343,7 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
 
     ppa_market_agents = get(agents, :ppa_market, String[])
 
-    # ── Base prices (λ_contract is per-VRES, built per-agent in _admm_objective_economic) ─
+    # ── Base prices (contract λ handled per sub-market in _admm_objective_economic) ─
     λ_elec_final    = results["λ"]["elec"][end]
     λ_H2_final      = results["λ"]["H2"][end]
     λ_elec_GC_final = results["λ"]["elec_GC"][end]
@@ -357,7 +416,13 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
             quantities[:d_H] = [value(vars[:d_H][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:H2_consumer, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in offtaker_green
-            quantities[:h2_in] = [value(vars[:h2_in][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            if haskey(vars, :h2_in)
+                quantities[:h2_in] = [value(vars[:h2_in][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            elseif haskey(vars, :h2_in_pool)
+                quantities[:h2_in] = [value(vars[:h2_in_pool][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            else
+                quantities[:h2_in] = zeros(length(JH), length(JD), length(JY))
+            end
             quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             quantities[:ep] = [value(vars[:ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(vars, :cap_EP_y)
@@ -379,7 +444,7 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         end
     end
 
-    # ── _final_net_quantities (base markets only; contract info in Contracts.csv) ─
+    # ── _final_net_quantities (base markets only; contract info in PPAs/HPAs CSVs) ─
     function _final_net_quantities(id::String)
         g_list   = results["g"][id]
         h2_list  = results["h2"][id]
@@ -504,6 +569,7 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
     λ_H2_GC   = results["λ"]["H2_GC"][end]
     λ_EP      = results["λ"]["EP"][end]
     λ_ppa_dict = get(results, "λ_ppa", Dict{String, Vector}())
+    λ_hpa_dict = get(results, "λ_hpa", Dict{String, Vector}())
 
     shp = size(λ_elec)
     n_ts, n_rd, n_yr = shp[1], shp[2], shp[3]
@@ -523,10 +589,15 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
             λv = get(λ_ppa_dict, vres_id, [])
             row[Symbol("Contract_Price_$(vres_id)")] = isempty(λv) ? 0.0 : λv[end][jh, jd, jy]
         end
+        for h2_id in hpa_h2
+            λh = get(λ_hpa_dict, h2_id, [])
+            row[Symbol("HPA_Price_$(h2_id)")] = isempty(λh) ? 0.0 : λh[end][jh, jd, jy]
+        end
         push!(prices_rows, row)
         t_index += 1
     end
     prices_df = DataFrame(prices_rows)
+    _move_first!(prices_df, :Time)
     CSV.write(joinpath(results_dir, "Market_Prices.csv"), prices_df)
 
     println()
@@ -540,6 +611,11 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         λv = get(λ_ppa_dict, vres_id, [])
         m = isempty(λv) ? 0.0 : mean(λv[end])
         println("  Contract_$(vres_id) mean = ", round(m, digits=6))
+    end
+    for h2_id in hpa_h2
+        λh = get(λ_hpa_dict, h2_id, [])
+        m = isempty(λh) ? 0.0 : mean(λh[end])
+        println("  HPA_$(h2_id) mean = ", round(m, digits=6))
     end
 
     return nothing

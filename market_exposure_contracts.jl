@@ -1,32 +1,37 @@
 # ==============================================================================
-# MARKET EXPOSURE (PPA) SCRIPT: ADMM WITH BILATERAL VRES–ELECTROLYZER PPAs
+# MARKET EXPOSURE (CONTRACTS) SCRIPT: ADMM WITH BILATERAL PPA + HPA
 # By Kian Jafarinejad - PhD Researcher at TU Delft (K.Jafarinejad@tudelft.nl)
 # ==============================================================================
 #
 # PURPOSE:
 #   Third entry point alongside market_exposure.jl and social_planner.jl.
-#   Identical to market_exposure.jl except that VRES and the electrolyzer can
-#   enter Power Purchase Agreements (PPAs):
+#   Identical to market_exposure.jl except that it adds two bilateral
+#   pay-as-produced contract pools:
 #
-#   - VRES commits ppa_cap (MW) of capacity; that capacity is REMOVED from
+#   - PPA (VRES -> GreenProducer electricity+elec_GC):
+#     VRES commits ppa_cap (MW) of capacity; that capacity is REMOVED from
 #     BOTH the electricity market (EOM) and elec_GC market. Real-world PPAs
 #     bundle electricity + elec_GC — buyer receives both as a package.
-#   - The electrolyzer buys that capacity pay-as-produced: receives g_ppa
+#     The electrolyzer buys that capacity pay-as-produced: receives g_ppa
 #     at each timestep, pays λ_ppa per MWh actually delivered (bundled price).
 #   - When VRES has no output (e.g. night for solar), g_ppa = 0, so nothing
 #     delivered and nothing paid.
-#   - A PPA pool clears both PPA energy (3D) and PPA capacity (scalar) via ADMM.
+#   - HPA (GreenProducer -> GreenOfftaker hydrogen+H2_GC equivalent):
+#     GreenProducer commits hpa_cap (MW_H2) and delivers h2_hpa
+#     pay-as-produced at λ_hpa per MWh_H2 delivered.
+#     Contracted H2 capacity is removed from pool H2/H2_GC sales.
+#   - ADMM clears both energy (3D) and capacity (scalar consensus) for each pool.
 #
 #   social_planner.jl and market_exposure.jl are UNCHANGED. This script uses
-#   PPA-specific build/solve/ADMM/save modules.
+#   PPA/HPA-specific build/solve/ADMM/save modules.
 #
 # HOW TO RUN:
-#   From the project root:  julia market_exposure_ppa.jl
+#   From the project root:  julia market_exposure_contracts.jl
 #
 # OUTPUT:
-#   market_exposure_ppa_results/ — same major ADMM CSVs as market_exposure_results
-#   plus PPAs.csv, Green_Agents_Detail.csv, and PPA columns in convergence/
-#   diagnostics CSVs.
+#   market_exposure_contracts_results/ — same major ADMM CSVs as market_exposure_results
+#   plus PPAs.csv, HPAs.csv, Green_Agents_Detail.csv, and contract columns in
+#   convergence/diagnostics CSVs.
 #
 # ==============================================================================
 
@@ -75,7 +80,7 @@ include(joinpath(home_dir, "Source", "define_offtaker_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_elec_GC_demand_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_EP_demand_parameters.jl"))
 
-# PPA-specific: adds in_ppa_market, λ_ppa, g_bar_ppa, etc.
+# Contracts-specific: adds PPA/HPA flags and placeholders
 include(joinpath(home_dir, "Source", "define_contract_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_contract_market_parameters.jl"))
 
@@ -86,16 +91,17 @@ include(joinpath(home_dir, "Source", "define_electricity_GC_market_parameters.jl
 include(joinpath(home_dir, "Source", "define_H2_GC_market_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_EP_market_parameters.jl"))
 
-# Model building: use PPA versions for power and H2 (VRES/electrolyzer)
+# Model building: use contracts versions for power/H2/offtaker where needed
 include(joinpath(home_dir, "Source", "build_power_agent.jl"))
 include(joinpath(home_dir, "Source", "build_power_agent_contracts.jl"))
 include(joinpath(home_dir, "Source", "build_H2_agent.jl"))
 include(joinpath(home_dir, "Source", "build_H2_agent_contracts.jl"))
 include(joinpath(home_dir, "Source", "build_offtaker_agent.jl"))
+include(joinpath(home_dir, "Source", "build_offtaker_agent_contracts.jl"))
 include(joinpath(home_dir, "Source", "build_elec_GC_demand_agent.jl"))
 include(joinpath(home_dir, "Source", "build_EP_demand_agent.jl"))
 
-# ADMM and solving: PPA versions (include PPA market)
+# ADMM and solving: contracts versions (include PPA + HPA markets)
 include(joinpath(home_dir, "Source", "define_results.jl"))
 include(joinpath(home_dir, "Source", "define_results_contracts.jl"))
 include(joinpath(home_dir, "Source", "ADMM.jl"))
@@ -107,6 +113,7 @@ include(joinpath(home_dir, "Source", "solve_power_agent_contracts.jl"))
 include(joinpath(home_dir, "Source", "solve_H2_agent.jl"))
 include(joinpath(home_dir, "Source", "solve_H2_agent_contracts.jl"))
 include(joinpath(home_dir, "Source", "solve_offtaker_agent.jl"))
+include(joinpath(home_dir, "Source", "solve_offtaker_agent_contracts.jl"))
 include(joinpath(home_dir, "Source", "solve_elec_GC_demand_agent.jl"))
 include(joinpath(home_dir, "Source", "solve_EP_demand_agent.jl"))
 include(joinpath(home_dir, "Source", "update_rho.jl"))
@@ -139,8 +146,8 @@ end
 # SECTION 6: RESULTS FOLDER
 # ------------------------------------------------------------------------------
 
-if !isdir(joinpath(home_dir, "market_exposure_ppa_results"))
-    mkdir(joinpath(home_dir, "market_exposure_ppa_results"))
+if !isdir(joinpath(home_dir, "market_exposure_contracts_results"))
+    mkdir(joinpath(home_dir, "market_exposure_contracts_results"))
 end
 
 # ------------------------------------------------------------------------------
@@ -163,6 +170,7 @@ agents[:H2_GC_market] = []
 agents[:EP_market] = []
 # PPA market: VRES and electrolyzer only (populated by define_contract_parameters!)
 agents[:ppa_market] = []
+agents[:hpa_market] = []
 
 mdict = Dict(i => Model(Gurobi.Optimizer) for i in agents[:all])
 
@@ -180,6 +188,7 @@ elec_GC_market = Dict{String,Any}()
 H2_GC_market = Dict{String,Any}()
 EP_market = Dict{String,Any}()
 ppa_market = Dict{String,Any}()
+hpa_market = Dict{String,Any}()
 
 elec_market["nAgents"] = length(agents[:elec_market])
 H2_market["nAgents"] = length(agents[:H2_market])
@@ -193,8 +202,8 @@ define_electricity_GC_market_parameters!(elec_GC_market, merge(data["General"], 
 define_H2_GC_market_parameters!(H2_GC_market, merge(data["General"], data["ADMM"], data["H2_GC_market"]), ts, repr_days)
 define_EP_market_parameters!(EP_market, merge(data["General"], data["ADMM"], data["EP_market"]), ts, repr_days)
 
-# PPA market: per-VRES initial prices and rho from data.yaml PPAs block
-define_contract_market_parameters!(ppa_market, data, agents)
+# PPA/HPA markets: per-asset initial prices and rho from data.yaml PPAs/HPAs blocks
+define_contract_market_parameters!(ppa_market, hpa_market, data, agents)
 
 # ------------------------------------------------------------------------------
 # SECTION 9: AGENT PARAMETER DEFINITION
@@ -215,6 +224,7 @@ end
 for m in agents[:offtaker]
     define_common_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m], data["ADMM"]), ts, repr_days, agents)
     define_offtaker_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m]), ts, repr_days)
+    define_contract_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m]), agents)
 end
 
 for m in agents[:elec_GC_demand]
@@ -232,6 +242,7 @@ elec_GC_market["nAgents"] = length(agents[:elec_GC_market])
 H2_GC_market["nAgents"]  = length(agents[:H2_GC_market])
 EP_market["nAgents"]     = length(agents[:offtaker])
 ppa_market["nAgents"] = length(agents[:ppa_market])
+hpa_market["nAgents"] = length(agents[:hpa_market])
 
 # ------------------------------------------------------------------------------
 # SECTION 10: BUILD OPTIMIZATION MODELS
@@ -247,7 +258,7 @@ for m in agents[:H2]
 end
 
 for m in agents[:offtaker]
-    build_offtaker_agent!(m, mdict[m], EP_market, H2_market, H2_GC_market)
+    build_offtaker_agent_contracts!(m, mdict[m], EP_market, H2_market, H2_GC_market, hpa_market)
 end
 
 for m in agents[:elec_GC_demand]
@@ -304,7 +315,7 @@ admm_data = merge(data["General"], data["ADMM"])
 if haskey(data["ADMM"], "epsilon_contracts")
     admm_data = merge(admm_data, Dict("epsilon" => data["ADMM"]["epsilon_contracts"], "epsilon_abs" => data["ADMM"]["epsilon_contracts"]))
 end
-define_results_contracts!(admm_data, results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, ppa_market; sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, use_primal_warmstart=true)
+define_results_contracts!(admm_data, results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, ppa_market, hpa_market; sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, use_primal_warmstart=true)
 
 # Single consolidated warm-start message (same as market_exposure)
 ws = results["warmstart"]
@@ -316,7 +327,7 @@ if !isempty(parts)
     @info "ADMM warm-start: $(join(parts, ", "))"
 end
 
-ADMM_contracts!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, ppa_market, mdict, agents, data, TO)
+ADMM_contracts!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, ppa_market, hpa_market, mdict, agents, data, TO)
 
 ADMM["walltime"] = TimerOutputs.tottime(TO) * 10^-9 / 60
 
@@ -324,6 +335,6 @@ ADMM["walltime"] = TimerOutputs.tottime(TO) * 10^-9 / 60
 # SECTION 12: SAVE RESULTS (PPA VERSION)
 # ------------------------------------------------------------------------------
 
-save_results_contracts!(mdict, elec_market, H2_market, elec_GC_market, H2_GC_market, ppa_market, ADMM, results, agents)
+save_results_contracts!(mdict, elec_market, H2_market, elec_GC_market, H2_GC_market, ppa_market, hpa_market, ADMM, results, agents)
 
-YAML.write_file(joinpath(home_dir, "market_exposure_ppa_results", "TimerOutput.yaml"), TO)
+YAML.write_file(joinpath(home_dir, "market_exposure_contracts_results", "TimerOutput.yaml"), TO)

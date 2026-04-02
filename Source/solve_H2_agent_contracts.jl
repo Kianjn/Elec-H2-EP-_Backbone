@@ -35,14 +35,21 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
     g_bar_ppa_cap = mod.ext[:parameters][:g_bar_ppa_cap]
     ρ_ppa_cap     = mod.ext[:parameters][:ρ_ppa_cap]
     ppa_vres = collect(keys(λ_ppa))
+    λ_hpa     = mod.ext[:parameters][:λ_hpa]
+    g_bar_hpa = mod.ext[:parameters][:g_bar_hpa]
+    ρ_hpa     = mod.ext[:parameters][:ρ_hpa]
+    g_bar_hpa_cap = mod.ext[:parameters][:g_bar_hpa_cap]
+    ρ_hpa_cap     = mod.ext[:parameters][:ρ_hpa_cap]
 
     e_in_pool       = mod.ext[:variables][:e_in_pool]
     g_ppa_from = mod.ext[:variables][:g_ppa_from]
+    h2_hpa     = mod.ext[:variables][:h2_hpa]
     h2_out          = mod.ext[:variables][:h2_out]
     q_elec_gc       = mod.ext[:variables][:q_elec_gc]
     q_h2gc          = mod.ext[:variables][:q_h2gc]
     cap_H2_y        = mod.ext[:variables][:cap_H2_y]
     ppa_cap    = mod.ext[:variables][:ppa_cap]
+    hpa_cap    = mod.ext[:variables][:hpa_cap]
 
     gamma     = get(mod.ext[:parameters], :γ, 1.0)
     F_cap     = get(mod.ext[:parameters], :FixedCost_per_MW_Electrolyzer, 0.0)
@@ -62,8 +69,9 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
                 + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
                 + sum(λ_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
                 + op_cost * h2_out[jh, jd, jy]
-                - λ_H2[jh, jd, jy]       * h2_out[jh, jd, jy]
+                - λ_H2[jh, jd, jy]       * (h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
+                - λ_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
         loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y[jy])
@@ -75,15 +83,18 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
         + (ρ_ppa_cap[v]/2) * ((-ppa_cap[v]) - g_bar_ppa_cap[v])^2
         for v in ppa_vres
     )
+    obj_hpa = sum(ρ_hpa/2 * W[jd, jy] * (h2_hpa[jh, jd, jy] - g_bar_hpa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY) +
+              (ρ_hpa_cap/2) * (hpa_cap - g_bar_hpa_cap)^2
 
     mod.ext[:objective] = @objective(mod, Min,
         gamma * sum(loss_total[jy] for jy in JY)
         + (1 - gamma) * cvar_H2
         + sum(ρ_elec/2 * W[jd, jy] * ((-e_in_pool[jh, jd, jy])      - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-        + sum(ρ_H2/2 * W[jd, jy] * (h2_out[jh, jd, jy]         - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+        + sum(ρ_H2/2 * W[jd, jy] * ((h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy]) - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2_GC/2 * W[jd, jy] * (q_h2gc[jh, jd, jy]      - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + obj_ppa
+        + obj_hpa
     )
 
     for jy in JY

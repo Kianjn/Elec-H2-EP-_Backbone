@@ -3,16 +3,15 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   Extends ADMM_subroutine! for market_exposure_contracts. For VRES and
-#   electrolyzer: updates contract market params (λ_contract, g_bar_contract,
-#   g_bar_contract_cap), calls solve_*_contracts!, and
-#   extracts contract and contract_cap quantities.
+#   Extends ADMM_subroutine! for market_exposure_contracts.
+#   Updates PPA/HPA market params (λ_ppa/λ_hpa, g_bar_*, g_bar_*_cap),
+#   calls contracts solvers, and extracts contract energy/capacity quantities.
 #
 # ==============================================================================
 
 function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_state::Dict,
                                     elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
-                                    H2_GC_market::Dict, EP_market::Dict, ppa_market::Dict,
+                                    H2_GC_market::Dict, EP_market::Dict, ppa_market::Dict, hpa_market::Dict,
                                     mdict::Dict, agents::Dict, TO::TimerOutput)
     n_ts = data["General"]["nTimesteps"]
     n_rd = data["General"]["nReprDays"]
@@ -89,7 +88,8 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
                 # Electrolyzer: per-VRES params
                 for vres_id in ppa_vres
                     n_contract = 2
-                    prev_contract = isempty(results["ppa_from"][m][vres_id]) ? zeros_shp : results["ppa_from"][m][vres_id][end]
+                    # Buyer net position is negative of demanded contract flow.
+                    prev_contract = isempty(results["ppa_from"][m][vres_id]) ? zeros_shp : .-results["ppa_from"][m][vres_id][end]
                     imb_contract = isempty(C["Imbalances"][vres_id]) ? zeros_shp : C["Imbalances"][vres_id][end]
                     mod.ext[:parameters][:g_bar_ppa][vres_id] = prev_contract .- (1.0 / (n_contract + 1)) .* imb_contract
                     mod.ext[:parameters][:λ_ppa][vres_id]     = results["λ_ppa"][vres_id][end]
@@ -99,6 +99,42 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
                     imb_cap  = isempty(C["Imbalances_cap"][vres_id]) ? 0.0 : C["Imbalances_cap"][vres_id][end]
                     mod.ext[:parameters][:g_bar_ppa_cap][vres_id] = prev_net_cap - (1.0 / (n_contract + 1)) * imb_cap
                     mod.ext[:parameters][:ρ_ppa_cap][vres_id]     = C["ρ_cap"][vres_id][end]
+                end
+            end
+        end
+
+        # HPA market (per-GreenProducer energy + capacity)
+        if get(mod.ext[:parameters], :in_hpa_market, false)
+            hpa_h2 = get(hpa_market, "hpa_h2", String[])
+            atype = String(get(mod.ext[:parameters], :Type, ""))
+            C_hpa = ADMM_state["hpa"]
+
+            if atype == "GreenProducer"
+                n_contract = 2  # GreenProducer + GreenOfftaker
+                prev_contract = isempty(results["hpa"][m]) ? zeros_shp : results["hpa"][m][end]
+                imb_contract = isempty(C_hpa["Imbalances"][m]) ? zeros_shp : C_hpa["Imbalances"][m][end]
+                mod.ext[:parameters][:g_bar_hpa] = prev_contract .- (1.0 / (n_contract + 1)) .* imb_contract
+                mod.ext[:parameters][:λ_hpa] = results["λ_hpa"][m][end]
+                mod.ext[:parameters][:ρ_hpa] = C_hpa["ρ"][m][end]
+
+                prev_net_cap = isempty(results["hpa_cap"][m]) ? 0.0 : results["hpa_cap"][m][end]
+                imb_cap = isempty(C_hpa["Imbalances_cap"][m]) ? 0.0 : C_hpa["Imbalances_cap"][m][end]
+                mod.ext[:parameters][:g_bar_hpa_cap] = prev_net_cap - (1.0 / (n_contract + 1)) * imb_cap
+                mod.ext[:parameters][:ρ_hpa_cap] = C_hpa["ρ_cap"][m][end]
+            elseif atype == "GreenOfftaker"
+                for h2_id in hpa_h2
+                    n_contract = 2
+                    # Buyer net position is negative of demanded contract flow.
+                    prev_contract = isempty(results["hpa_from"][m][h2_id]) ? zeros_shp : .-results["hpa_from"][m][h2_id][end]
+                    imb_contract = isempty(C_hpa["Imbalances"][h2_id]) ? zeros_shp : C_hpa["Imbalances"][h2_id][end]
+                    mod.ext[:parameters][:g_bar_hpa][h2_id] = prev_contract .- (1.0 / (n_contract + 1)) .* imb_contract
+                    mod.ext[:parameters][:λ_hpa][h2_id] = results["λ_hpa"][h2_id][end]
+                    mod.ext[:parameters][:ρ_hpa][h2_id] = C_hpa["ρ"][h2_id][end]
+
+                    prev_net_cap = isempty(results["hpa_cap_from"][m][h2_id]) ? 0.0 : results["hpa_cap_from"][m][h2_id][end]
+                    imb_cap = isempty(C_hpa["Imbalances_cap"][h2_id]) ? 0.0 : C_hpa["Imbalances_cap"][h2_id][end]
+                    mod.ext[:parameters][:g_bar_hpa_cap][h2_id] = prev_net_cap - (1.0 / (n_contract + 1)) * imb_cap
+                    mod.ext[:parameters][:ρ_hpa_cap][h2_id] = C_hpa["ρ_cap"][h2_id][end]
                 end
             end
         end
@@ -123,9 +159,12 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
                     cap_bar[iy] = mx
                 end
             elseif agent_type == "GreenProducer"
+                # Total H2 production uses both pool and HPA streams.
                 g_bar = mod.ext[:parameters][:g_bar_H2]
+                g_bar_hpa = get(mod.ext[:parameters], :g_bar_hpa, zeros_shp)
+                g_bar_total = g_bar .+ g_bar_hpa
                 for (iy, jy) in enumerate(JY)
-                    cap_bar[iy] = max(0.0, maximum(g_bar[:, :, jy]))
+                    cap_bar[iy] = max(0.0, maximum(g_bar_total[:, :, jy]))
                 end
             elseif agent_type == "GreenOfftaker"
                 g_bar = mod.ext[:parameters][:g_bar_EP]
@@ -147,7 +186,7 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
         elseif m in agents[:H2]
             solve_H2_agent_contracts!(m, mod, H2_market, H2_GC_market, ppa_market)
         elseif m in agents[:offtaker]
-            solve_offtaker_agent!(m, mod, EP_market, H2_market, H2_GC_market)
+            solve_offtaker_agent_contracts!(m, mod, EP_market, H2_market, H2_GC_market, hpa_market)
         elseif m in agents[:elec_GC_demand]
             solve_elec_GC_demand_agent!(m, mod, elec_GC_market)
         end
@@ -194,6 +233,25 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
                     push!(results["ppa_from"][m][vres_id], g_from)
                     cap_val = value(ppa_cap_var[vres_id])
                     push!(results["ppa_cap_from"][m][vres_id], -cap_val)  # Electrolyzer: -demand
+                end
+            end
+        end
+
+        if get(mod.ext[:parameters], :in_hpa_market, false)
+            atype = String(get(mod.ext[:parameters], :Type, ""))
+            if atype == "GreenProducer"
+                g_contract = collect(value.(mod.ext[:expressions][:g_net_hpa]))
+                push!(results["hpa"][m], g_contract)
+                cap_val = value(mod.ext[:variables][:hpa_cap])
+                push!(results["hpa_cap"][m], cap_val)
+            elseif atype == "GreenOfftaker"
+                g_contract_from = mod.ext[:expressions][:g_net_hpa_from]
+                hpa_cap_var = mod.ext[:variables][:hpa_cap]
+                for h2_id in keys(g_contract_from)
+                    g_from = collect(value.(g_contract_from[h2_id]))
+                    push!(results["hpa_from"][m][h2_id], g_from)
+                    cap_val = value(hpa_cap_var[h2_id])
+                    push!(results["hpa_cap_from"][m][h2_id], -cap_val)
                 end
             end
         end

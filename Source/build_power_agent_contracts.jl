@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   Builds power-sector agents for the market_exposure_ppa entry point.
+#   Builds power-sector agents for the market_exposure_contracts entry point.
 #   For VRES: extends the model with PPA variables and constraints.
 #   For Conventional and Consumer: delegates to build_power_agent! (unchanged).
 #
@@ -81,8 +81,8 @@ function build_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
 
     # ── Generation split: EOM (pool) vs contract ────────────────────────────
     # g_EOM     = electricity sold to the day-ahead / spot market (MWh)
-    # g_contract = electricity delivered under bilateral contract (MWh)
-    # Total generation = g_EOM + g_contract
+    # g_ppa = electricity delivered under bilateral PPA (MWh)
+    # Total generation = g_EOM + g_ppa
     g_EOM     = mod.ext[:variables][:g_EOM]     = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gen_EOM")
     g_ppa = mod.ext[:variables][:g_ppa] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gen_ppa")
 
@@ -118,7 +118,7 @@ function build_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
     cvar_VRES  = mod.ext[:variables][:CVaR_VRES]  = @variable(mod, lower_bound=0, base_name="CVaR_VRES_$(m)")
     u_VRES     = mod.ext[:variables][:u_VRES]     = @variable(mod, [jy in JY], lower_bound=0, base_name="u_VRES_$(m)")
 
-    # Per-year loss: cost − revenue. PPA is bundled (elec+GC); λ_contract is the
+    # Per-year loss: cost − revenue. PPA is bundled (elec+GC); λ_ppa is the
     # bundled price. Pool revenue: λ_elec * g_EOM, λ_elec_GC * g_EOM only
     # (PPA flow removed from both markets).
     loss_VRES = Dict{Int,JuMP.AffExpr}()

@@ -17,9 +17,9 @@ General:
 ADMM:
   rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
   rho_cap_initial: 0.1  # Penalty for investment/capacity consensus; low initial to avoid over-constraining early iterations
-  max_iter: 200        # Iteration budget
+  max_iter: 200        # Iteration budget (contracts case may need higher due stronger coupling)
   epsilon: 2          # Convergence tolerance on L2 norm of primal/dual residuals. Used by market_exposure. With 72 timesteps, epsilon=1 ≈ 0.12 MW per-timestep accuracy (<1% of quantities 20-50 MW).
-  epsilon_contracts: 5 # [market_exposure_contracts only] More relaxed epsilon for the contracts case (more coupled markets). If unset, falls back to epsilon. Higher value (e.g. 5) helps declare convergence when residuals are good enough (~50 iters).
+  epsilon_contracts: 10 # [market_exposure_contracts only] More relaxed epsilon for the contracts case (more coupled markets). If unset, falls back to epsilon. Higher value (e.g. 5) helps declare convergence when residuals are good enough (~50 iters).
   cap_tol_relax: 100   # [market_exposure_contracts only] Multiplier for capacity consensus tolerance. Effective cap tolerance = standard × cap_tol_relax. Larger values allow convergence when flow markets are close but capacity lags (stronger coupling in contracts case).
   gamma: 1              # Risk weight for CVaR (γ=1 ⇒ risk-neutral). Used by both social planner and ADMM agents. Change here to update both simultaneously.
   beta: 0.95            # CVaR confidence level τ (e.g. 0.95 = worst 5% of scenarios). Used by both social planner and ADMM agents.

@@ -28,7 +28,7 @@ const CAP_CONSENSUS_TOL_RELAX_DEFAULT = 100.0
 
 function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Dict,
                          elec_GC_market::Dict, H2_GC_market::Dict, EP_market::Dict,
-                         ppa_market::Dict, mdict::Dict, agents::Dict, data::Dict, TO::TimerOutput)
+                         ppa_market::Dict, hpa_market::Dict, mdict::Dict, agents::Dict, data::Dict, TO::TimerOutput)
     n_ts = data["General"]["nTimesteps"]
     n_rd = data["General"]["nReprDays"]
     n_yr = data["General"]["nYears"]
@@ -47,7 +47,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
 
         for m in agents[:all]
             ADMM_subroutine_contracts!(m, data, results, ADMM_state, elec_market, H2_market,
-                                       elec_GC_market, H2_GC_market, EP_market, ppa_market,
+                                       elec_GC_market, H2_GC_market, EP_market, ppa_market, hpa_market,
                                        mdict, agents, TO)
         end
 
@@ -98,6 +98,35 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 imb_contract_cap = cap_vres - cap_elec_sum
                 push!(C["Imbalances_cap"][vres_id], imb_contract_cap)
             end
+
+            # HPA energy (3D) per GreenProducer: supply[h2] - demand_from[h2]
+            hpa_h2 = get(hpa_market, "hpa_h2", String[])
+            offtaker_ids = agents[:offtaker]
+            C_hpa = ADMM_state["hpa"]
+            for h2_id in hpa_h2
+                supply = isempty(results["hpa"][h2_id]) ? zeros(shp...) : results["hpa"][h2_id][end]
+                demand = zeros(shp...)
+                for off_id in offtaker_ids
+                    if !isempty(get(results["hpa_from"][off_id], h2_id, []))
+                        demand .+= results["hpa_from"][off_id][h2_id][end]
+                    end
+                end
+                imb_contract = supply .- demand
+                push!(C_hpa["Imbalances"][h2_id], imb_contract)
+            end
+
+            # hpa_cap consensus per GreenProducer: producer +cap, offtaker -cap (stored as -cap)
+            for h2_id in hpa_h2
+                cap_h2 = isempty(results["hpa_cap"][h2_id]) ? 0.0 : results["hpa_cap"][h2_id][end]
+                cap_off_sum = 0.0
+                for off_id in offtaker_ids
+                    if haskey(results["hpa_cap_from"][off_id], h2_id) && !isempty(results["hpa_cap_from"][off_id][h2_id])
+                        cap_off_sum += -results["hpa_cap_from"][off_id][h2_id][end]
+                    end
+                end
+                imb_contract_cap = cap_h2 - cap_off_sum
+                push!(C_hpa["Imbalances_cap"][h2_id], imb_contract_cap)
+            end
         end
 
         @timeit TO "Imbalance means" begin
@@ -110,6 +139,11 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             for vres_id in ppa_vres
                 push!(C["ImbalanceMean"][vres_id],     mean(C["Imbalances"][vres_id][end]))
                 push!(C["ImbalanceMean_cap"][vres_id], abs(C["Imbalances_cap"][vres_id][end]))
+            end
+            C_hpa = ADMM_state["hpa"]
+            for h2_id in get(hpa_market, "hpa_h2", String[])
+                push!(C_hpa["ImbalanceMean"][h2_id],     mean(C_hpa["Imbalances"][h2_id][end]))
+                push!(C_hpa["ImbalanceMean_cap"][h2_id], abs(C_hpa["Imbalances_cap"][h2_id][end]))
             end
         end
 
@@ -140,6 +174,19 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 end
                 if C["ResidualScale_Primal_cap"][vres_id] == 0.0 && rp_contract_cap > 0.0
                     C["ResidualScale_Primal_cap"][vres_id] = rp_contract_cap
+                end
+            end
+            C_hpa = ADMM_state["hpa"]
+            for h2_id in get(hpa_market, "hpa_h2", String[])
+                rp_contract = sqrt(sum(C_hpa["Imbalances"][h2_id][end].^2))
+                rp_contract_cap = abs(C_hpa["Imbalances_cap"][h2_id][end])
+                push!(C_hpa["Primal"][h2_id], rp_contract)
+                push!(C_hpa["Primal_cap"][h2_id], rp_contract_cap)
+                if C_hpa["ResidualScale_Primal"][h2_id] == 0.0 && rp_contract > 0.0
+                    C_hpa["ResidualScale_Primal"][h2_id] = rp_contract
+                end
+                if C_hpa["ResidualScale_Primal_cap"][h2_id] == 0.0 && rp_contract_cap > 0.0
+                    C_hpa["ResidualScale_Primal_cap"][h2_id] = rp_contract_cap
                 end
             end
 
@@ -282,6 +329,50 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                     push!(C["Dual_cap"][vres_id], sqrt(dual_contract_cap))
                 end
 
+                hpa_h2 = get(hpa_market, "hpa_h2", String[])
+                off_ids = agents[:offtaker]
+                C_hpa = ADMM_state["hpa"]
+                for h2_id in hpa_h2
+                    nC = 2
+                    net_h2 = results["hpa"][h2_id][end]
+                    net_h2_prev = length(results["hpa"][h2_id]) < 2 ? zeros(shp...) : results["hpa"][h2_id][end-1]
+                    net_off = zeros(shp...)
+                    net_off_prev = zeros(shp...)
+                    for off_id in off_ids
+                        if haskey(results["hpa_from"][off_id], h2_id) && !isempty(results["hpa_from"][off_id][h2_id])
+                            net_off .+= .-results["hpa_from"][off_id][h2_id][end]
+                            if length(results["hpa_from"][off_id][h2_id]) >= 2
+                                net_off_prev .+= .-results["hpa_from"][off_id][h2_id][end-1]
+                            end
+                        end
+                    end
+                    sum_net = net_h2 .+ net_off
+                    sum_net_prev = net_h2_prev .+ net_off_prev
+                    diff_h2 = (net_h2 .- sum_net ./ (nC + 1)) .- (net_h2_prev .- sum_net_prev ./ (nC + 1))
+                    diff_off = (net_off .- sum_net ./ (nC + 1)) .- (net_off_prev .- sum_net_prev ./ (nC + 1))
+                    dual_contract = sum((C_hpa["ρ"][h2_id][end] .* diff_h2).^2) + sum((C_hpa["ρ"][h2_id][end] .* diff_off).^2)
+                    push!(C_hpa["Dual"][h2_id], sqrt(dual_contract))
+
+                    cap_h2 = isempty(results["hpa_cap"][h2_id]) ? 0.0 : results["hpa_cap"][h2_id][end]
+                    cap_h2_prev = length(results["hpa_cap"][h2_id]) < 2 ? 0.0 : results["hpa_cap"][h2_id][end-1]
+                    cap_off = 0.0
+                    cap_off_prev = 0.0
+                    for off_id in off_ids
+                        if haskey(results["hpa_cap_from"][off_id], h2_id) && !isempty(results["hpa_cap_from"][off_id][h2_id])
+                            cap_off += -results["hpa_cap_from"][off_id][h2_id][end]
+                            if length(results["hpa_cap_from"][off_id][h2_id]) >= 2
+                                cap_off_prev += -results["hpa_cap_from"][off_id][h2_id][end-1]
+                            end
+                        end
+                    end
+                    sum_cap = cap_h2 - cap_off
+                    sum_cap_prev = cap_h2_prev - cap_off_prev
+                    diff_cap_h2 = (cap_h2 - sum_cap / (nC + 1)) - (cap_h2_prev - sum_cap_prev / (nC + 1))
+                    diff_cap_off = ((-cap_off) - sum_cap / (nC + 1)) - ((-cap_off_prev) - sum_cap_prev / (nC + 1))
+                    dual_contract_cap = (C_hpa["ρ_cap"][h2_id][end] * diff_cap_h2)^2 + (C_hpa["ρ_cap"][h2_id][end] * diff_cap_off)^2
+                    push!(C_hpa["Dual_cap"][h2_id], sqrt(dual_contract_cap))
+                end
+
                 scales_du = ADMM_state["ResidualScale"]["Dual"]
                 for key in ("elec", "H2", "elec_GC", "H2_GC", "EP")
                     rd = ADMM_state["Residuals"]["Dual"][key][end]
@@ -328,6 +419,17 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                         C["ResidualScale_Dual_cap"][vres_id] = rd
                     end
                 end
+                C_hpa = ADMM_state["hpa"]
+                for h2_id in hpa_h2
+                    rd = C_hpa["Dual"][h2_id][end]
+                    if C_hpa["ResidualScale_Dual"][h2_id] == 0.0 && rd < Inf
+                        C_hpa["ResidualScale_Dual"][h2_id] = rd
+                    end
+                    rd = C_hpa["Dual_cap"][h2_id][end]
+                    if C_hpa["ResidualScale_Dual_cap"][h2_id] == 0.0 && rd < Inf
+                        C_hpa["ResidualScale_Dual_cap"][h2_id] = rd
+                    end
+                end
             else
                 for key in ("elec", "H2", "elec_GC", "H2_GC", "EP")
                     push!(ADMM_state["Residuals"]["Dual"][key], Inf)
@@ -337,6 +439,11 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 for vres_id in get(ppa_market, "ppa_vres", String[])
                     push!(C["Dual"][vres_id], Inf)
                     push!(C["Dual_cap"][vres_id], Inf)
+                end
+                C_hpa = ADMM_state["hpa"]
+                for h2_id in get(hpa_market, "hpa_h2", String[])
+                    push!(C_hpa["Dual"][h2_id], Inf)
+                    push!(C_hpa["Dual_cap"][h2_id], Inf)
                 end
             end
         end
@@ -357,7 +464,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             end
             results["λ"]["H2_GC"][end] .= max.(results["λ"]["H2_GC"][end], 0.0)
 
-            # Contract pool: per-VRES λ_contract (€/MWh). No price for contract_cap.
+            # PPA pool: per-VRES λ_ppa (€/MWh). No price for ppa_cap.
             ppa_vres = get(ppa_market, "ppa_vres", String[])
             C = ADMM_state["ppa"]
             for vres_id in ppa_vres
@@ -368,6 +475,18 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 push!(results["λ_ppa"][vres_id],
                       results["λ_ppa"][vres_id][end] .- η .* C["ρ"][vres_id][end] .* C["Imbalances"][vres_id][end])
                 results["λ_ppa"][vres_id][end] .= max.(results["λ_ppa"][vres_id][end], 0.0)
+            end
+
+            hpa_h2 = get(hpa_market, "hpa_h2", String[])
+            C_hpa = ADMM_state["hpa"]
+            for h2_id in hpa_h2
+                rp = C_hpa["Primal"][h2_id][end]
+                rd = C_hpa["Dual"][h2_id][end]
+                base = max(rp, rd)
+                η = base <= eta_threshold ? 0.3 : 1.0
+                push!(results["λ_hpa"][h2_id],
+                      results["λ_hpa"][h2_id][end] .- η .* C_hpa["ρ"][h2_id][end] .* C_hpa["Imbalances"][h2_id][end])
+                results["λ_hpa"][h2_id][end] .= max.(results["λ_hpa"][h2_id][end], 0.0)
             end
         end
 
@@ -380,6 +499,10 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             C = ADMM_state["ppa"]
             for vres_id in get(ppa_market, "ppa_vres", String[])
                 push!(C["PriceHistory"][vres_id], mean(results["λ_ppa"][vres_id][end]))
+            end
+            C_hpa = ADMM_state["hpa"]
+            for h2_id in get(hpa_market, "hpa_h2", String[])
+                push!(C_hpa["PriceHistory"][h2_id], mean(results["λ_hpa"][h2_id][end]))
             end
         end
 
@@ -430,6 +553,27 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             eps_du = eps_abs * 1.0 + eps_rel * sd
             cap_ok = cap_ok && (rp <= eps_pr) && (rd <= eps_du)
         end
+        C_hpa = ADMM_state["hpa"]
+        hpa_ok = true
+        for h2_id in get(hpa_market, "hpa_h2", String[])
+            rp = C_hpa["Primal"][h2_id][end]
+            rd = C_hpa["Dual"][h2_id][end]
+            sp = max(C_hpa["ResidualScale_Primal"][h2_id], 1.0)
+            sd = max(C_hpa["ResidualScale_Dual"][h2_id], 1.0)
+            eps_pr = eps_abs * sqrt_n + eps_rel * sp
+            eps_du = eps_abs * sqrt_n + eps_rel * sd
+            hpa_ok = hpa_ok && (rp <= eps_pr) && (rd <= eps_du)
+        end
+        hpa_cap_ok = true
+        for h2_id in get(hpa_market, "hpa_h2", String[])
+            rp = C_hpa["Primal_cap"][h2_id][end]
+            rd = C_hpa["Dual_cap"][h2_id][end]
+            sp = max(C_hpa["ResidualScale_Primal_cap"][h2_id], 1.0)
+            sd = max(C_hpa["ResidualScale_Dual_cap"][h2_id], 1.0)
+            eps_pr = eps_abs * 1.0 + eps_rel * sp
+            eps_du = eps_abs * 1.0 + eps_rel * sd
+            hpa_cap_ok = hpa_cap_ok && (rp <= eps_pr) && (rd <= eps_du)
+        end
 
         # Capacity consensus: use relaxed tolerance (see file header).
         # Effective eps = (eps_pr, eps_du) * cap_tol_relax so we accept larger residuals.
@@ -442,7 +586,8 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         eps_du_cap = cap_tol_relax * (eps_abs * sqrt_n + eps_rel * sd_cap)
         cap_consensus_ok = (rp_cap <= eps_pr_cap) && (rd_cap <= eps_du_cap)
         if (within_tol("elec") && within_tol("H2") && within_tol("elec_GC") &&
-            within_tol("H2_GC") && within_tol("EP") && contract_ok && cap_ok && cap_consensus_ok)
+            within_tol("H2_GC") && within_tol("EP") &&
+            contract_ok && cap_ok && hpa_ok && hpa_cap_ok && cap_consensus_ok)
             convergence = 1
         end
 
@@ -486,6 +631,20 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         dual   = C["Dual_cap"][vres_id][end]
         @printf("  %-14s  primal = %.3e,  dual = %.3e  (consensus, no price)\n",
                 "contract_cap_$(vres_id)", primal, dual)
+    end
+    C_hpa = ADMM_state["hpa"]
+    for h2_id in get(hpa_market, "hpa_h2", String[])
+        primal = C_hpa["Primal"][h2_id][end]
+        dual   = C_hpa["Dual"][h2_id][end]
+        price  = C_hpa["PriceHistory"][h2_id][end]
+        @printf("  %-14s  primal = %.3e,  dual = %.3e,  price_mean = %.6f\n",
+                "hpa_$(h2_id)", primal, dual, price)
+    end
+    for h2_id in get(hpa_market, "hpa_h2", String[])
+        primal = C_hpa["Primal_cap"][h2_id][end]
+        dual   = C_hpa["Dual_cap"][h2_id][end]
+        @printf("  %-14s  primal = %.3e,  dual = %.3e  (consensus, no price)\n",
+                "hpa_cap_$(h2_id)", primal, dual)
     end
     primal_cap = ADMM_state["Residuals"]["Primal"]["cap"][end]
     dual_cap   = ADMM_state["Residuals"]["Dual"]["cap"][end]

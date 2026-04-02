@@ -6,16 +6,17 @@
 #   Extends define_results! with the bilateral contract pool. Used ONLY by
 #   market_exposure_contracts.jl.
 #
-#   PER-VRES CONTRACT MARKETS: Each VRES has its own bilateral contract sub-market
-#   with the electrolyzer. results["λ_contract"] is Dict(vres_id => [3D arrays]).
-#   (Separate from results["λ"] to avoid Dict/Vector type conflict.)
-#   results["contract_from"]: electrolyzer demand per VRES.
+#   PER-VRES PPA MARKETS: each VRES has its own PPA sub-market with GreenProducer.
+#   PER-H2-PRODUCER HPA MARKETS: each GreenProducer has its own HPA sub-market
+#   with GreenOfftaker side.
+#   Contract prices are stored as results["λ_ppa"] and results["λ_hpa"] (separate
+#   from results["λ"] to avoid Dict/Vector type conflicts).
 #
 # ==============================================================================
 
 function define_results_contracts!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dict,
                                   elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
-                                  H2_GC_market::Dict, EP_market::Dict, ppa_market::Dict;
+                                  H2_GC_market::Dict, EP_market::Dict, ppa_market::Dict, hpa_market::Dict;
                                   sp_prices_file::String = "", sp_primal_file::String = "", use_primal_warmstart::Bool = true)
     # Call base define_results! for the five standard markets (same warm-start as market_exposure)
     define_results!(admm_data, results, ADMM, agents, elec_market, H2_market,
@@ -29,6 +30,7 @@ function define_results_contracts!(admm_data::Dict, results::Dict, ADMM::Dict, a
 
     # Add contract market to results["markets"]
     results["markets"]["ppa"] = ppa_market
+    results["markets"]["hpa"] = hpa_market
 
     # Per-VRES PPA sub-markets
     ppa_vres = collect(keys(get(ppa_market, "per_vres", Dict())))
@@ -85,6 +87,54 @@ function define_results_contracts!(admm_data::Dict, results::Dict, ADMM::Dict, a
 
     # Store ppa_vres for use in ADMM and solve modules
     ppa_market["ppa_vres"] = ppa_vres
+
+    # Per-H2-producer HPA sub-markets
+    hpa_h2 = collect(keys(get(hpa_market, "per_h2", Dict())))
+    if isempty(hpa_h2)
+        hpa_h2 = get(agents, :hpa_h2, String[])
+    end
+
+    results["λ_hpa"] = Dict{String, Vector}()
+    for h2_id in hpa_h2
+        hv = get(hpa_market["per_h2"], h2_id, Dict())
+        init_price = get(hv, "initial_price", hpa_market["initial_price"])
+        results["λ_hpa"][h2_id] = [fill(init_price, shp...)]
+    end
+
+    results["hpa"]        = Dict(m => [] for m in agents[:all])
+    results["hpa_cap"]    = Dict(m => [] for m in agents[:all])
+    results["hpa_from"]   = Dict(m => Dict(v => [] for v in hpa_h2) for m in agents[:offtaker])
+    results["hpa_cap_from"] = Dict(m => Dict(v => [] for v in hpa_h2) for m in agents[:offtaker])
+
+    rho_init_hpa = hpa_market["rho_initial"]
+    ADMM["hpa"] = Dict(
+        "Imbalances"     => Dict(v => Any[] for v in hpa_h2),
+        "Imbalances_cap" => Dict(v => Any[] for v in hpa_h2),
+        "ρ"              => Dict(v => [get(get(hpa_market["per_h2"], v, Dict()), "rho_initial", rho_init_hpa)] for v in hpa_h2),
+        "ρ_cap"          => Dict(v => [get(get(hpa_market["per_h2"], v, Dict()), "rho_initial", rho_init_hpa)] for v in hpa_h2),
+        "PriceHistory"   => Dict(v => Float64[] for v in hpa_h2),
+        "ImbalanceMean"  => Dict(v => Float64[] for v in hpa_h2),
+        "ImbalanceMean_cap" => Dict(v => Float64[] for v in hpa_h2),
+        "Primal"         => Dict(v => Float64[] for v in hpa_h2),
+        "Primal_cap"     => Dict(v => Float64[] for v in hpa_h2),
+        "Dual"           => Dict(v => Float64[] for v in hpa_h2),
+        "Dual_cap"       => Dict(v => Float64[] for v in hpa_h2),
+        "BestPrimal"     => Dict(v => Inf for v in hpa_h2),
+        "BestDual"       => Dict(v => Inf for v in hpa_h2),
+        "BestPrimal_cap" => Dict(v => Inf for v in hpa_h2),
+        "BestDual_cap"   => Dict(v => Inf for v in hpa_h2),
+        "ρ_frozen"       => Dict(v => false for v in hpa_h2),
+        "ρ_frozen_cap"   => Dict(v => false for v in hpa_h2),
+        "R_hist"         => Dict(v => Float64[] for v in hpa_h2),
+        "R_hist_cap"     => Dict(v => Float64[] for v in hpa_h2),
+        "ResidualScale_Primal"     => Dict(v => 0.0 for v in hpa_h2),
+        "ResidualScale_Primal_cap" => Dict(v => 0.0 for v in hpa_h2),
+        "ResidualScale_Dual"       => Dict(v => 0.0 for v in hpa_h2),
+        "ResidualScale_Dual_cap"   => Dict(v => 0.0 for v in hpa_h2),
+        "Tolerance"      => Dict(v => base_tol for v in hpa_h2),
+        "Tolerance_cap"  => Dict(v => base_tol for v in hpa_h2),
+    )
+    hpa_market["hpa_h2"] = hpa_h2
 
     return results, ADMM
 end

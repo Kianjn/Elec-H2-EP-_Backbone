@@ -114,10 +114,11 @@ function update_rho_contracts!(ADMM_state::Dict, iter::Int)
         end
     end
 
-    # Per-VRES PPA and ppa_cap (from ADMM_state["ppa"])
-    haskey(ADMM_state, "ppa") || return
-    C = ADMM_state["ppa"]
-    for vres_id in keys(C["ρ"])
+    # Per-submarket contract pools: PPA and HPA
+    for contract_key in ("ppa", "hpa")
+        haskey(ADMM_state, contract_key) || continue
+        C = ADMM_state[contract_key]
+        for vres_id in keys(C["ρ"])
         isempty(C["Primal"][vres_id]) && continue
         isempty(C["Dual"][vres_id]) && continue
         rp = C["Primal"][vres_id][end]
@@ -262,6 +263,7 @@ function update_rho_contracts!(ADMM_state::Dict, iter::Int)
                     push!(C["ρ_cap"][vres_id], ρ)
                 end
             end
+        end
         end
     end
     return nothing
