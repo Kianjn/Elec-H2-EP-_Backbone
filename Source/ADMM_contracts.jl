@@ -36,6 +36,59 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     max_iter = data["ADMM"]["max_iter"]
     convergence = 0
     iterations = ProgressBar(1:max_iter)
+    market_keys = ("elec", "H2", "elec_GC", "H2_GC", "EP", "cap")
+    ppa_ids = get(ppa_market, "ppa_vres", String[])
+    hpa_ids = get(hpa_market, "hpa_h2", String[])
+
+    # Advanced controller: per-market (and per-contract-submarket) step scales.
+    η_scale = Dict("elec" => 1.0, "H2" => 1.0, "elec_GC" => 1.0, "H2_GC" => 1.0, "EP" => 1.0)
+    η_scale_ppa = Dict(v => 1.0 for v in ppa_ids)
+    η_scale_hpa = Dict(v => 1.0 for v in hpa_ids)
+
+    # Best-iterate checkpoint over normalized residual merit.
+    best_iter = 0
+    best_score = Inf
+    stall_count = 0
+    restart_patience = 40
+    restart_factor = 1.15
+    best_λ = Dict{String,Array{Float64,3}}()
+    best_ρ = Dict{String,Float64}()
+    best_λ_ppa = Dict{String,Array{Float64,3}}()
+    best_ρ_ppa = Dict{String,Float64}()
+    best_ρ_ppa_cap = Dict{String,Float64}()
+    best_λ_hpa = Dict{String,Array{Float64,3}}()
+    best_ρ_hpa = Dict{String,Float64}()
+    best_ρ_hpa_cap = Dict{String,Float64}()
+
+    function _market_eps_std(key::String, n_slots::Int)
+        eps_abs = ADMM_state["EpsilonAbs"]
+        eps_rel = ADMM_state["EpsilonRel"]
+        sqrt_n = sqrt(max(1, n_slots))
+        sp = max(ADMM_state["ResidualScale"]["Primal"][key], 1.0)
+        sd = max(ADMM_state["ResidualScale"]["Dual"][key], 1.0)
+        eps_pr = eps_abs * sqrt_n + eps_rel * sp
+        eps_du = eps_abs * sqrt_n + eps_rel * sd
+        return eps_pr, eps_du
+    end
+
+    function _market_eps_contract(C::Dict, id::String, is_cap::Bool, n_slots::Int)
+        eps_abs = ADMM_state["EpsilonAbs"]
+        eps_rel = ADMM_state["EpsilonRel"]
+        if is_cap
+            sp = max(C["ResidualScale_Primal_cap"][id], 1.0)
+            sd = max(C["ResidualScale_Dual_cap"][id], 1.0)
+            # Scalar consensus (capacity): keep sqrt(1) basis for consistency with current check.
+            eps_pr = eps_abs * 1.0 + eps_rel * sp
+            eps_du = eps_abs * 1.0 + eps_rel * sd
+        else
+            sqrt_n = sqrt(max(1, n_slots))
+            sp = max(C["ResidualScale_Primal"][id], 1.0)
+            sd = max(C["ResidualScale_Dual"][id], 1.0)
+            eps_pr = eps_abs * sqrt_n + eps_rel * sp
+            eps_du = eps_abs * sqrt_n + eps_rel * sd
+        end
+        return eps_pr, eps_du
+    end
 
     # Log initial mean prices (before any iteration) so diagnostics show warm-start.
     for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
@@ -449,16 +502,130 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         end
 
         # ------------------------------------------------------------------
+        # Merit tracking (normalized residuals) and controller adaptation
+        # ------------------------------------------------------------------
+        n_slots = n_ts * n_rd * n_yr
+        merit = Dict{String,Float64}()
+        for key in market_keys
+            rp = ADMM_state["Residuals"]["Primal"][key][end]
+            rd = ADMM_state["Residuals"]["Dual"][key][end]
+            eps_pr, eps_du = _market_eps_std(key, n_slots)
+            m = max(rp / max(eps_pr, 1e-9), rd / max(eps_du, 1e-9))
+            merit[key] = isfinite(m) ? m : 1e12
+        end
+        C = ADMM_state["ppa"]
+        for vres_id in ppa_ids
+            rp = C["Primal"][vres_id][end]
+            rd = C["Dual"][vres_id][end]
+            eps_pr, eps_du = _market_eps_contract(C, vres_id, false, n_slots)
+            merit["ppa_" * vres_id] = isfinite(max(rp / max(eps_pr, 1e-9), rd / max(eps_du, 1e-9))) ?
+                                      max(rp / max(eps_pr, 1e-9), rd / max(eps_du, 1e-9)) : 1e12
+            rp_cap = C["Primal_cap"][vres_id][end]
+            rd_cap = C["Dual_cap"][vres_id][end]
+            eps_pr_cap, eps_du_cap = _market_eps_contract(C, vres_id, true, n_slots)
+            merit["ppa_cap_" * vres_id] = isfinite(max(rp_cap / max(eps_pr_cap, 1e-9), rd_cap / max(eps_du_cap, 1e-9))) ?
+                                          max(rp_cap / max(eps_pr_cap, 1e-9), rd_cap / max(eps_du_cap, 1e-9)) : 1e12
+        end
+        C_hpa = ADMM_state["hpa"]
+        for h2_id in hpa_ids
+            rp = C_hpa["Primal"][h2_id][end]
+            rd = C_hpa["Dual"][h2_id][end]
+            eps_pr, eps_du = _market_eps_contract(C_hpa, h2_id, false, n_slots)
+            merit["hpa_" * h2_id] = isfinite(max(rp / max(eps_pr, 1e-9), rd / max(eps_du, 1e-9))) ?
+                                    max(rp / max(eps_pr, 1e-9), rd / max(eps_du, 1e-9)) : 1e12
+            rp_cap = C_hpa["Primal_cap"][h2_id][end]
+            rd_cap = C_hpa["Dual_cap"][h2_id][end]
+            eps_pr_cap, eps_du_cap = _market_eps_contract(C_hpa, h2_id, true, n_slots)
+            merit["hpa_cap_" * h2_id] = isfinite(max(rp_cap / max(eps_pr_cap, 1e-9), rd_cap / max(eps_du_cap, 1e-9))) ?
+                                        max(rp_cap / max(eps_pr_cap, 1e-9), rd_cap / max(eps_du_cap, 1e-9)) : 1e12
+        end
+
+        score = maximum(values(merit))
+        if score < best_score
+            best_score = score
+            best_iter = iter
+            stall_count = 0
+            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+                best_λ[mkt] = copy(results["λ"][mkt][end])
+                best_ρ[mkt] = ADMM_state["ρ"][mkt][end]
+            end
+            best_ρ["cap"] = ADMM_state["ρ"]["cap"][end]
+            for vres_id in ppa_ids
+                best_λ_ppa[vres_id] = copy(results["λ_ppa"][vres_id][end])
+                best_ρ_ppa[vres_id] = C["ρ"][vres_id][end]
+                best_ρ_ppa_cap[vres_id] = C["ρ_cap"][vres_id][end]
+            end
+            for h2_id in hpa_ids
+                best_λ_hpa[h2_id] = copy(results["λ_hpa"][h2_id][end])
+                best_ρ_hpa[h2_id] = C_hpa["ρ"][h2_id][end]
+                best_ρ_hpa_cap[h2_id] = C_hpa["ρ_cap"][h2_id][end]
+            end
+        else
+            stall_count += 1
+        end
+
+        if iter > 1
+            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+                rp_prev = ADMM_state["Residuals"]["Primal"][mkt][end-1]
+                rd_prev = ADMM_state["Residuals"]["Dual"][mkt][end-1]
+                eps_pr_prev, eps_du_prev = _market_eps_std(mkt, n_slots)
+                merit_prev = max(rp_prev / max(eps_pr_prev, 1e-9), rd_prev / max(eps_du_prev, 1e-9))
+                merit_now = merit[mkt]
+                if merit_now > 1.02 * merit_prev
+                    η_scale[mkt] = max(0.15, 0.85 * η_scale[mkt])
+                elseif merit_now < 0.98 * merit_prev
+                    η_scale[mkt] = min(1.0, 1.03 * η_scale[mkt])
+                end
+            end
+            for vres_id in ppa_ids
+                rp_prev = C["Primal"][vres_id][end-1]
+                rd_prev = C["Dual"][vres_id][end-1]
+                eps_pr_prev, eps_du_prev = _market_eps_contract(C, vres_id, false, n_slots)
+                merit_prev = max(rp_prev / max(eps_pr_prev, 1e-9), rd_prev / max(eps_du_prev, 1e-9))
+                merit_now = merit["ppa_" * vres_id]
+                if merit_now > 1.02 * merit_prev
+                    η_scale_ppa[vres_id] = max(0.15, 0.85 * η_scale_ppa[vres_id])
+                elseif merit_now < 0.98 * merit_prev
+                    η_scale_ppa[vres_id] = min(1.0, 1.03 * η_scale_ppa[vres_id])
+                end
+            end
+            for h2_id in hpa_ids
+                rp_prev = C_hpa["Primal"][h2_id][end-1]
+                rd_prev = C_hpa["Dual"][h2_id][end-1]
+                eps_pr_prev, eps_du_prev = _market_eps_contract(C_hpa, h2_id, false, n_slots)
+                merit_prev = max(rp_prev / max(eps_pr_prev, 1e-9), rd_prev / max(eps_du_prev, 1e-9))
+                merit_now = merit["hpa_" * h2_id]
+                if merit_now > 1.02 * merit_prev
+                    η_scale_hpa[h2_id] = max(0.15, 0.85 * η_scale_hpa[h2_id])
+                elseif merit_now < 0.98 * merit_prev
+                    η_scale_hpa[h2_id] = min(1.0, 1.03 * η_scale_hpa[h2_id])
+                end
+            end
+        end
+
+        # ------------------------------------------------------------------
         # Price update (standard + contract)
         # ------------------------------------------------------------------
         @timeit TO "Update prices" begin
-            # Damp price updates earlier (residuals < 10×ε) to reduce oscillation (same as base ADMM).
-            eta_threshold = 10.0 * ADMM_state["EpsilonAbs"]
+            # Scale-aware damping of dual updates, consistent with base ADMM.
+            η_min = 0.25
+            eps_abs = ADMM_state["EpsilonAbs"]
+            eps_rel = ADMM_state["EpsilonRel"]
+            n_slots_upd = max(1, get(ADMM_state, "n_slots", n_slots))
+            sqrt_n = sqrt(n_slots_upd)
+            scale_pr = ADMM_state["ResidualScale"]["Primal"]
+            scale_du = ADMM_state["ResidualScale"]["Dual"]
             for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
                 rp = ADMM_state["Residuals"]["Primal"][mkt][end]
                 rd = ADMM_state["Residuals"]["Dual"][mkt][end]
                 base = max(rp, rd)
-                η = base <= eta_threshold ? 0.3 : 1.0
+                sp = max(scale_pr[mkt], 1.0)
+                sd = max(scale_du[mkt], 1.0)
+                eps_pr = eps_abs * sqrt_n + eps_rel * sp
+                eps_du = eps_abs * sqrt_n + eps_rel * sd
+                eps_m = max(eps_pr, eps_du)
+                η_raw = base <= 1.5 * eps_m ? 1.0 : max(η_min, 1.5 * eps_m / max(base, 1e-9))
+                η = η_scale[mkt] * η_raw
                 push!(results["λ"][mkt],
                       results["λ"][mkt][end] .- η .* ADMM_state["ρ"][mkt][end] .* ADMM_state["Imbalances"][mkt][end])
             end
@@ -471,7 +638,10 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 rp = C["Primal"][vres_id][end]
                 rd = C["Dual"][vres_id][end]
                 base = max(rp, rd)
-                η = base <= eta_threshold ? 0.3 : 1.0
+                eps_pr, eps_du = _market_eps_contract(C, vres_id, false, n_slots_upd)
+                eps_m = max(eps_pr, eps_du)
+                η_raw = base <= 1.5 * eps_m ? 1.0 : max(η_min, 1.5 * eps_m / max(base, 1e-9))
+                η = η_scale_ppa[vres_id] * η_raw
                 push!(results["λ_ppa"][vres_id],
                       results["λ_ppa"][vres_id][end] .- η .* C["ρ"][vres_id][end] .* C["Imbalances"][vres_id][end])
                 results["λ_ppa"][vres_id][end] .= max.(results["λ_ppa"][vres_id][end], 0.0)
@@ -483,7 +653,10 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 rp = C_hpa["Primal"][h2_id][end]
                 rd = C_hpa["Dual"][h2_id][end]
                 base = max(rp, rd)
-                η = base <= eta_threshold ? 0.3 : 1.0
+                eps_pr, eps_du = _market_eps_contract(C_hpa, h2_id, false, n_slots_upd)
+                eps_m = max(eps_pr, eps_du)
+                η_raw = base <= 1.5 * eps_m ? 1.0 : max(η_min, 1.5 * eps_m / max(base, 1e-9))
+                η = η_scale_hpa[h2_id] * η_raw
                 push!(results["λ_hpa"][h2_id],
                       results["λ_hpa"][h2_id][end] .- η .* C_hpa["ρ"][h2_id][end] .* C_hpa["Imbalances"][h2_id][end])
                 results["λ_hpa"][h2_id][end] .= max.(results["λ_hpa"][h2_id][end], 0.0)
@@ -508,6 +681,37 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
 
         @timeit TO "Update ρ" begin
             update_rho_contracts!(ADMM_state, iter)
+        end
+
+        # Anti-stall recovery: if the run has moved far away from the best
+        # checkpoint for a long window, restore best λ/ρ and continue with
+        # smaller dual steps.
+        if stall_count >= restart_patience && score > restart_factor * best_score && !isempty(best_λ)
+            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+                results["λ"][mkt][end] .= best_λ[mkt]
+                ADMM_state["ρ"][mkt][end] = best_ρ[mkt]
+                η_scale[mkt] = max(0.15, 0.8 * η_scale[mkt])
+            end
+            ADMM_state["ρ"]["cap"][end] = best_ρ["cap"]
+            C = ADMM_state["ppa"]
+            for vres_id in ppa_ids
+                if haskey(best_λ_ppa, vres_id)
+                    results["λ_ppa"][vres_id][end] .= best_λ_ppa[vres_id]
+                    C["ρ"][vres_id][end] = best_ρ_ppa[vres_id]
+                    C["ρ_cap"][vres_id][end] = best_ρ_ppa_cap[vres_id]
+                    η_scale_ppa[vres_id] = max(0.15, 0.8 * η_scale_ppa[vres_id])
+                end
+            end
+            C_hpa = ADMM_state["hpa"]
+            for h2_id in hpa_ids
+                if haskey(best_λ_hpa, h2_id)
+                    results["λ_hpa"][h2_id][end] .= best_λ_hpa[h2_id]
+                    C_hpa["ρ"][h2_id][end] = best_ρ_hpa[h2_id]
+                    C_hpa["ρ_cap"][h2_id][end] = best_ρ_hpa_cap[h2_id]
+                    η_scale_hpa[h2_id] = max(0.15, 0.8 * η_scale_hpa[h2_id])
+                end
+            end
+            stall_count = 0
         end
 
         set_description(iterations, "")
@@ -599,6 +803,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         println("ADMM convergence achieved.")
     else
         println("ADMM reached max_iter without convergence.")
+        @printf("Best normalized residual score reached at iter %d: %.4f\n", best_iter, best_score)
     end
     n_it = ADMM_state["n_iter"]
     println("Number of iterations: ", n_it)

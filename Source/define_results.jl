@@ -29,6 +29,21 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     n_yr = admm_data["nYears"]
     shp = (n_ts, n_rd, n_yr)
 
+    # If ADMM is run with multiple scenario years while SP is saved for one year,
+    # replicate the single-year SP block across all scenario years.
+    function _expand_sp_rows(df::DataFrame, label::String)
+        n_expected = n_ts * n_rd * n_yr
+        n_one_year = n_ts * n_rd
+        if nrow(df) == n_expected
+            return df, false
+        elseif n_yr > 1 && nrow(df) == n_one_year
+            @info "$label has one-year rows ($(nrow(df))); replicating across $n_yr scenario years for warm-start."
+            return vcat([copy(df) for _ in 1:n_yr]...), true
+        else
+            return df, false
+        end
+    end
+
     # Store references so save_results and post-processing can access agent/market info.
     results["agents"] = agents
     results["markets"] = Dict("elec" => elec_market, "H2" => H2_market, "elec_GC" => elec_GC_market, "H2_GC" => H2_GC_market, "EP" => EP_market)
@@ -47,6 +62,7 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     if !isempty(sp_prices_file) && isfile(sp_prices_file)
         try
             sp_df = CSV.read(sp_prices_file, DataFrame)
+            sp_df, _ = _expand_sp_rows(sp_df, "Social planner prices file")
             n_total = n_ts * n_rd * n_yr
             if nrow(sp_df) == n_total
                 # Use SP prices as-is when warm-starting. Do NOT clamp H2_GC to 0 here:
@@ -146,6 +162,9 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
                     @warn "SP primal warm-start: elec market sum = $elec_sum (expected ≈0). " *
                           "Index/ordering or g_net mapping may be wrong."
                 end
+            elseif n_yr > 1 && nrow(sp_primal) == n_ts * n_rd
+                @warn "SP primal file has one-year rows ($(nrow(sp_primal))) but ADMM is running $n_yr years. " *
+                      "Skipping primal warm-start to avoid injecting year-mismatched consensus targets."
             else
                 @warn "SP primal file has $(nrow(sp_primal)) rows, expected $n_total. Skipping primal warm-start."
             end
@@ -286,6 +305,8 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     )
     ADMM["n_iter"]   = 0     # Iteration counter; incremented each ADMM loop
     ADMM["walltime"] = 0.0   # Cumulative wall-clock time (seconds); measured in ADMM.jl
+    # Number of market-clearing slots used by Boyd-style scaled tolerances.
+    ADMM["n_slots"]  = n_ts * n_rd * n_yr
 
     # Warm-start flags for consolidated logging (read by market_exposure.jl)
     results["warmstart"] = Dict("λ" => sp_loaded, "primal" => primal_loaded)

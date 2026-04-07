@@ -60,9 +60,11 @@ Both the ADMM and social planner use the **same problem definition** from the `S
 - **Five coupled base markets**: Electricity, Electricity Guarantees of Origin (GC), Hydrogen, Hydrogen GC, End Product (plus optional **PPA + HPA bilateral pools** in `market_exposure_contracts.jl`)
 - **Seven agent types**: VRES generator, conventional generator, elastic consumer, electrolyzer, green offtaker, grey offtaker, EP importer
 - **Endogenous capacity investment**: VRES, electrolyzer, and green offtaker decide yearly capacity and investment (MW), with fixed annualised CAPEX proportional to installed capacity.
-- **Optional risk aversion (CVaR)**: Those three "green" agents can include a CVaR risk term in their objectives via per-agent `gamma` (risk weight) and `beta` (confidence level); default `gamma = 0.0` keeps them risk-neutral.
+- **Optional risk aversion (CVaR)**: Those three "green" agents can include a CVaR risk term in their objectives via per-agent `gamma` (risk weight) and `beta` (confidence level); `gamma = 1.0` is risk-neutral and `gamma < 1.0` activates risk aversion.
 - **Distributed ADMM**: Per-agent QP subproblems coordinated by iterative price updates
 - **Three-stage adaptive penalty (Boyd rule)**: Market-specific ρ adaptation with (1) normal rp/rd balancing, (2) a gentle push far from tolerance, and (3) a fixed-ρ stability zone near convergence.
+- **Advanced ADMM controller**: Scale-aware dual-step damping, per-market step-scale adaptation, and best-iterate checkpoint/restart logic for anti-stall robustness in multi-scenario runs.
+  - Implemented consistently in both `market_exposure.jl` and `market_exposure_contracts.jl`; contracts adds only PPA/HPA-specific states and updates.
 - **Centralised benchmark**: Social planner with dual-variable price recovery and the same physical/investment structure as ADMM
 - **Green certificate mandate**: 42% H₂ GC requirement for offtakers (configurable)
 - **Representative days**: Temporal reduction from 8760 hours to a small set of representative days with weights
@@ -247,11 +249,12 @@ All configuration is in **`Data/data.yaml`**. The file is fully annotated with i
 General:
   nTimesteps: 24      # Hours per representative day
   nReprDays: 3        # Number of representative days
-  nYears: 1           # Number of scenario years
+  nYears: 1           # Number of years for social_planner.jl (base scenario only)
   base_year: 2021     # Calendar year for timeseries
 
 ADMM:
   rho_initial: 1.0    # Starting penalty weight
+  nScenarioYears: 10  # Scenario years for market_exposure*.jl (e.g., 2021..2030)
   max_iter: 10000     # Max ADMM iterations
   epsilon: 0.1        # Convergence tolerance (L2 norm)
 ```
@@ -279,9 +282,23 @@ HPAs:
 
 Both pools clear energy (3D) with a market price (`λ_ppa`, `λ_hpa`) and enforce scalar capacity consensus (`ppa_cap`, `hpa_cap`) with no separate capacity price.
 
+### Scenarios and Risk Aversion
+
+- `General.nYears` is used by `social_planner.jl` (typically 1 base year).
+- `ADMM.nScenarioYears` controls multi-scenario horizon for `market_exposure.jl` and `market_exposure_contracts.jl`.
+- Risk aversion effects (`gamma < 1`) are meaningful only with multiple scenarios.
+
 ### Changing Tolerances
 
-The convergence tolerance `epsilon` in the ADMM block controls the base L2 residual threshold for `market_exposure` (see `define_results.jl` and DOCUMENTATION.md §5.4). For the contracts case, use `epsilon_contracts` (e.g. 5) for a more relaxed tolerance—the contracts case has more coupled markets and benefits from a higher value. If `epsilon_contracts` is unset, it falls back to `epsilon`. Residual norms are L2 over all time slots (hours × representative days × years), so "per-slot" imbalances are smaller than the raw norms might suggest.
+The ADMM stopping rule uses Boyd-style scaled tolerances per market:
+
+`ε_pri = ε_abs * sqrt(n_slots) + ε_rel * scale_primal`,  
+`ε_dual = ε_abs * sqrt(n_slots) + ε_rel * scale_dual`.
+
+`epsilon` (or `epsilon_abs`) controls the absolute part for `market_exposure`.  
+For the contracts case, `epsilon_contracts` can be set separately (falls back to `epsilon` if omitted).
+
+Because residuals are L2 norms over all slots (hours × representative days × years), raw residual magnitudes increase with horizon size; compare runs using RMS-style interpretation, not raw norms alone.
 
 ---
 
@@ -438,7 +455,9 @@ Each iteration:
    ```
 
    where $r_k^{(t)}$ is the current imbalance (sum of net positions), $\rho_k^{(t)}$ is the penalty weight, and $\eta_k^{(t)} \in (0,1]$ is a residual-aware step size. **Excess supply** ($r_k>0$) reduces prices; **excess demand** ($r_k<0$) increases prices.
-4. **Penalty adaptation**: ρ increases if the market is far from clearing (primal residual too large), decreases if agents are oscillating (dual residual too large).
+4. **Penalty + controller adaptation**:
+   - `update_rho!` applies market-wise three-regime adaptive ρ logic with hysteresis and freeze-near-convergence.
+   - The ADMM controller also adapts per-market dual step scales and can restart from the best checkpoint if residual merit stalls/worsens over a long window.
 5. **Convergence**: Stops when all markets have both primal and dual residuals below tolerance.
 
 ### Social Planner
@@ -527,8 +546,11 @@ Simply edit the relevant `build_*_agent.jl` file. Both the ADMM version (`build_
 ### ADMM Does Not Converge
 
 - **Increase `max_iter`** in `data.yaml`.
-- **Increase `epsilon`** (looser tolerance) to check if the algorithm is close.
-- **Check `ADMM_Diagnostics.csv`**: if prices oscillate, the ρ adaptation may need tuning. Reduce `ρ_max` or use gentler factors for the oscillating market in `update_rho.jl`.
+- **Interpret tolerance correctly**: raw residuals are L2 norms over all slots; with more scenarios they are naturally larger.
+- **Check `ADMM_Diagnostics.csv` and `ADMM_Convergence.csv` together**:
+  - If one market oscillates while others settle, inspect that market’s `rho`, price, and imbalance histories.
+  - If progress stalls, the ADMM best-checkpoint restart (in `ADMM.jl`) should recover the best basin; if not, tune that market’s `rho` limits/factors.
+- **Increase `epsilon` only if justified by your accepted RMS imbalance budget**, not only to force a stop.
 - **Check residuals**: if primal residuals plateau above tolerance, the L2 norm may be hitting an "error floor" due to the representative-day discretisation. The solution may still be economically meaningful (compare against the social planner).
 
 ### Social Planner Warns "Non-Optimal Status"

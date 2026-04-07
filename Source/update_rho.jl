@@ -29,11 +29,17 @@
 #         capacity constraints make the problem more kinked and prone to
 #         limit cycles around the optimum.
 #
-#   Per-market parameters:
-#     • elec / elec_GC — inc/dec factor 1.10, ρ_max = 100,000
-#     • H2 / H2_GC / EP — inc/dec factor 1.01 (or 1.05 for H2_GC), ρ_max = 100
-#       (more conservative for tightly price-coupled markets to avoid
+#   Per-market parameters (current implementation):
+#     • elec / elec_GC — inc/dec factor 1.05, ρ_max = 5,000
+#     • H2 / EP        — inc/dec factor 1.01, ρ_max = 100
+#     • H2_GC / cap    — inc/dec factor 1.05, ρ_max = 100
+#       (more conservative in tightly coupled or thin markets to avoid
 #        oscillation when capacities/investments are binding).
+#
+#   Tolerance basis:
+#     market_tol is computed from the SAME Boyd-style scaled tolerances used
+#     by convergence checks (ε_abs * sqrt(n_slots) + ε_rel * residual_scale),
+#     so ρ adaptation stays consistent when nYears/horizon size increases.
 #
 # ARGUMENTS:
 #   ADMM_state — Must contain Residuals["Primal"] and ["Dual"] per market, and
@@ -95,7 +101,18 @@ function update_rho!(ADMM_state::Dict, iter::Int)
         end
 
         # Per-market convergence scale and thresholds.
-        market_tol = get(ADMM_state["Tolerance"], key, 1.0)
+        # Use the SAME Boyd-style scaled tolerance basis as ADMM convergence:
+        #   eps = eps_abs * sqrt(n_slots) + eps_rel * residual_scale.
+        # This keeps rho-adaptation behavior consistent when nYears grows.
+        eps_abs = get(ADMM_state, "EpsilonAbs", get(get(ADMM_state, "Tolerance", Dict()), key, 1.0))
+        eps_rel = get(ADMM_state, "EpsilonRel", 0.0)
+        n_slots = get(ADMM_state, "n_slots", 1)
+        sqrt_n = sqrt(max(1, n_slots))
+        scale_pr = max(get(ADMM_state["ResidualScale"]["Primal"], key, 1.0), 1.0)
+        scale_du = max(get(ADMM_state["ResidualScale"]["Dual"], key, 1.0), 1.0)
+        eps_pr = eps_abs * sqrt_n + eps_rel * scale_pr
+        eps_du = eps_abs * sqrt_n + eps_rel * scale_du
+        market_tol = max(eps_pr, eps_du)
         # When rp and rd differ by more than this factor, we are clearly in
         # regime (1) "normal Boyd updates".
         balance_threshold = 1.2

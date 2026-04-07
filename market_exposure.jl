@@ -161,8 +161,10 @@ order_matrix = Dict() #Can I remove it?
 # periods (day index 1–365), weights (frequency), selected_periods.
 repr_days = Dict()
 
-# Determine modeled years from data["General"] so the horizon is configurable
-# via data.yaml only. For example:
+# Determine modeled years. By default use data["General"]["nYears"], but allow
+# ADMM-specific scenario expansion via data["ADMM"]["nScenarioYears"] so the
+# social planner can remain on the base scenario.
+# For example:
 #   base_year = 2021, nYears = 1  -> {1 => 2021}
 #   base_year = 2021, nYears = 5  -> {1 => 2021, 2 => 2022, ..., 5 => 2025}
 # years Dict: maps scenario index (1, 2, ...) to calendar year (2021, 2022, ...).
@@ -170,7 +172,11 @@ repr_days = Dict()
 # uses integer scenario indices (JY). This mapping bridges the two.
 gen = data["General"]
 base_year = haskey(gen, "base_year") ? gen["base_year"] : 2021
-n_years  = haskey(gen, "nYears") ? gen["nYears"] : 1
+n_years  = haskey(data["ADMM"], "nScenarioYears") ? data["ADMM"]["nScenarioYears"] :
+           (haskey(gen, "nYears") ? gen["nYears"] : 1)
+run_general = merge(gen, Dict("nYears" => n_years))
+data_run = copy(data)
+data_run["General"] = run_general
 years = Dict(i => base_year + (i - 1) for i in 1:n_years)
 
 # Full-year hourly time series and representative days for each modeled year.
@@ -257,11 +263,11 @@ EP_market["nAgents"] = length(agents[:offtaker])
 
 # Fill market dicts with initial_price, rho_initial, and for EP_market also
 # Demand_Column, Total_Demand, and the 3D demand array D_EP.
-define_electricity_market_parameters!(elec_market, merge(data["General"], data["ADMM"], data["elec_market"]), ts, repr_days)
-define_H2_market_parameters!(H2_market, merge(data["General"], data["ADMM"], data["H2_market"]), ts, repr_days)
-define_electricity_GC_market_parameters!(elec_GC_market, merge(data["General"], data["ADMM"], data["elec_GC_market"]), ts, repr_days)
-define_H2_GC_market_parameters!(H2_GC_market, merge(data["General"], data["ADMM"], data["H2_GC_market"]), ts, repr_days)
-define_EP_market_parameters!(EP_market, merge(data["General"], data["ADMM"], data["EP_market"]), ts, repr_days)
+define_electricity_market_parameters!(elec_market, merge(run_general, data["ADMM"], data["elec_market"]), ts, repr_days)
+define_H2_market_parameters!(H2_market, merge(run_general, data["ADMM"], data["H2_market"]), ts, repr_days)
+define_electricity_GC_market_parameters!(elec_GC_market, merge(run_general, data["ADMM"], data["elec_GC_market"]), ts, repr_days)
+define_H2_GC_market_parameters!(H2_GC_market, merge(run_general, data["ADMM"], data["H2_GC_market"]), ts, repr_days)
+define_EP_market_parameters!(EP_market, merge(run_general, data["ADMM"], data["EP_market"]), ts, repr_days)
 
 # ------------------------------------------------------------------------------
 # SECTION 10: AGENT PARAMETER DEFINITION
@@ -269,24 +275,24 @@ define_EP_market_parameters!(EP_market, merge(data["General"], data["ADMM"], dat
 
 for m in agents[:power]
     # Common: sets (JY, JD, JH), weights W, P, γ, β, market flags, ADMM arrays.
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Power"][m], data["ADMM"]), ts, repr_days, agents)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Power"][m], data["ADMM"]), ts, repr_days, agents)
     # Power-specific: capacity, profile column, costs, or consumer utility/load.
-    define_power_parameters!(m, mdict[m], merge(data["General"], data["Power"][m]), ts, repr_days)
+    define_power_parameters!(m, mdict[m], merge(run_general, data["Power"][m]), ts, repr_days)
 end
 
 for m in agents[:H2]
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen"][m], data["ADMM"]), ts, repr_days, agents)
-    define_H2_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen"][m]), ts, repr_days)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Hydrogen"][m], data["ADMM"]), ts, repr_days, agents)
+    define_H2_parameters!(m, mdict[m], merge(run_general, data["Hydrogen"][m]), ts, repr_days)
 end
 
 for m in agents[:offtaker]
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m], data["ADMM"]), ts, repr_days, agents)
-    define_offtaker_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m]), ts, repr_days)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Hydrogen_Offtaker"][m], data["ADMM"]), ts, repr_days, agents)
+    define_offtaker_parameters!(m, mdict[m], merge(run_general, data["Hydrogen_Offtaker"][m]), ts, repr_days)
 end
 
 for m in agents[:elec_GC_demand]
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Electricity_GC_Demand"][m], data["ADMM"]), ts, repr_days, agents)
-    define_elec_GC_demand_parameters!(m, mdict[m], merge(data["General"], data["Electricity_GC_Demand"][m]), ts, repr_days)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Electricity_GC_Demand"][m], data["ADMM"]), ts, repr_days, agents)
+    define_elec_GC_demand_parameters!(m, mdict[m], merge(run_general, data["Electricity_GC_Demand"][m]), ts, repr_days)
 end
 
 # Agents with endogenous capacity (VRES, H2 producer, GreenOfftaker) for investment consensus.
@@ -344,11 +350,15 @@ if isfile(sp_cap_file)
             if cap_var !== nothing
                 for jy in jy_set
                     row = sp_cap_df[(sp_cap_df.AgentID .== m) .& (sp_cap_df.jy .== jy), :]
+                    if nrow(row) == 0
+                        # If SP was solved for one year, reuse jy=1 capacity for all scenario years.
+                        row = sp_cap_df[(sp_cap_df.AgentID .== m) .& (sp_cap_df.jy .== 1), :]
+                    end
                     if nrow(row) >= 1
                         set_start_value(cap_var[jy], row.cap[1])
                     end
                 end
-                n_cap_warmstart += 1
+                global n_cap_warmstart += 1
             end
         end
     catch e
@@ -373,7 +383,7 @@ sp_primal_file = joinpath(home_dir, "social_planner_results", "SP_Primal_Quantit
 # Primal warm-start: pre-populate g_bar with SP quantities so iter 1 agents solve
 # with λ=SP and g_bar=SP → zero imbalance → prices stay at SP. Without it, g_bar=0
 # biases agents toward zero and causes immediate price drift.
-define_results!(merge(data["General"], data["ADMM"]), results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market; sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, use_primal_warmstart=true)
+define_results!(merge(run_general, data["ADMM"]), results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market; sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, use_primal_warmstart=true)
 
 # Single consolidated warm-start message
 ws = results["warmstart"]
@@ -387,7 +397,7 @@ end
 
 # Run the coordination loop: each iteration solves all agents, aggregates
 # imbalances, updates prices and ρ, and checks convergence.
-ADMM!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, mdict, agents, data, TO)
+ADMM!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, mdict, agents, data_run, TO)
 
 # Total ADMM wall-clock time in minutes for human-readable reporting.
 # TimerOutputs.tottime returns nanoseconds; multiply by 10^-9 to get

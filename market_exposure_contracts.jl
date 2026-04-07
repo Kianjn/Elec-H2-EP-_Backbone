@@ -133,7 +133,11 @@ repr_days = Dict()
 
 gen = data["General"]
 base_year = haskey(gen, "base_year") ? gen["base_year"] : 2021
-n_years  = haskey(gen, "nYears") ? gen["nYears"] : 1
+n_years  = haskey(data["ADMM"], "nScenarioYears") ? data["ADMM"]["nScenarioYears"] :
+           (haskey(gen, "nYears") ? gen["nYears"] : 1)
+run_general = merge(gen, Dict("nYears" => n_years))
+data_run = copy(data)
+data_run["General"] = run_general
 years = Dict(i => base_year + (i - 1) for i in 1:n_years)
 
 for y in values(years)
@@ -196,40 +200,40 @@ elec_GC_market["nAgents"] = length(agents[:elec_GC_market])
 H2_GC_market["nAgents"] = length(agents[:H2_GC_market])
 EP_market["nAgents"] = length(agents[:offtaker])
 
-define_electricity_market_parameters!(elec_market, merge(data["General"], data["ADMM"], data["elec_market"]), ts, repr_days)
-define_H2_market_parameters!(H2_market, merge(data["General"], data["ADMM"], data["H2_market"]), ts, repr_days)
-define_electricity_GC_market_parameters!(elec_GC_market, merge(data["General"], data["ADMM"], data["elec_GC_market"]), ts, repr_days)
-define_H2_GC_market_parameters!(H2_GC_market, merge(data["General"], data["ADMM"], data["H2_GC_market"]), ts, repr_days)
-define_EP_market_parameters!(EP_market, merge(data["General"], data["ADMM"], data["EP_market"]), ts, repr_days)
+define_electricity_market_parameters!(elec_market, merge(run_general, data["ADMM"], data["elec_market"]), ts, repr_days)
+define_H2_market_parameters!(H2_market, merge(run_general, data["ADMM"], data["H2_market"]), ts, repr_days)
+define_electricity_GC_market_parameters!(elec_GC_market, merge(run_general, data["ADMM"], data["elec_GC_market"]), ts, repr_days)
+define_H2_GC_market_parameters!(H2_GC_market, merge(run_general, data["ADMM"], data["H2_GC_market"]), ts, repr_days)
+define_EP_market_parameters!(EP_market, merge(run_general, data["ADMM"], data["EP_market"]), ts, repr_days)
 
 # PPA/HPA markets: per-asset initial prices and rho from data.yaml PPAs/HPAs blocks
-define_contract_market_parameters!(ppa_market, hpa_market, data, agents)
+define_contract_market_parameters!(ppa_market, hpa_market, data_run, agents)
 
 # ------------------------------------------------------------------------------
 # SECTION 9: AGENT PARAMETER DEFINITION
 # ------------------------------------------------------------------------------
 
 for m in agents[:power]
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Power"][m], data["ADMM"]), ts, repr_days, agents)
-    define_power_parameters!(m, mdict[m], merge(data["General"], data["Power"][m]), ts, repr_days)
-    define_contract_parameters!(m, mdict[m], merge(data["General"], data["Power"][m]), agents)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Power"][m], data["ADMM"]), ts, repr_days, agents)
+    define_power_parameters!(m, mdict[m], merge(run_general, data["Power"][m]), ts, repr_days)
+    define_contract_parameters!(m, mdict[m], merge(run_general, data["Power"][m]), agents)
 end
 
 for m in agents[:H2]
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen"][m], data["ADMM"]), ts, repr_days, agents)
-    define_H2_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen"][m]), ts, repr_days)
-    define_contract_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen"][m]), agents)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Hydrogen"][m], data["ADMM"]), ts, repr_days, agents)
+    define_H2_parameters!(m, mdict[m], merge(run_general, data["Hydrogen"][m]), ts, repr_days)
+    define_contract_parameters!(m, mdict[m], merge(run_general, data["Hydrogen"][m]), agents)
 end
 
 for m in agents[:offtaker]
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m], data["ADMM"]), ts, repr_days, agents)
-    define_offtaker_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m]), ts, repr_days)
-    define_contract_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m]), agents)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Hydrogen_Offtaker"][m], data["ADMM"]), ts, repr_days, agents)
+    define_offtaker_parameters!(m, mdict[m], merge(run_general, data["Hydrogen_Offtaker"][m]), ts, repr_days)
+    define_contract_parameters!(m, mdict[m], merge(run_general, data["Hydrogen_Offtaker"][m]), agents)
 end
 
 for m in agents[:elec_GC_demand]
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Electricity_GC_Demand"][m], data["ADMM"]), ts, repr_days, agents)
-    define_elec_GC_demand_parameters!(m, mdict[m], merge(data["General"], data["Electricity_GC_Demand"][m]), ts, repr_days)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Electricity_GC_Demand"][m], data["ADMM"]), ts, repr_days, agents)
+    define_elec_GC_demand_parameters!(m, mdict[m], merge(run_general, data["Electricity_GC_Demand"][m]), ts, repr_days)
 end
 
 # Agents with endogenous capacity (VRES, H2 producer, GreenOfftaker) for investment consensus.
@@ -288,6 +292,10 @@ if isfile(sp_cap_file)
             if cap_var !== nothing
                 for jy in jy_set
                     row = sp_cap_df[(sp_cap_df.AgentID .== m) .& (sp_cap_df.jy .== jy), :]
+                    if nrow(row) == 0
+                        # If SP was solved for one year, reuse jy=1 capacity for all scenario years.
+                        row = sp_cap_df[(sp_cap_df.AgentID .== m) .& (sp_cap_df.jy .== 1), :]
+                    end
                     if nrow(row) >= 1
                         set_start_value(cap_var[jy], row.cap[1])
                     end
@@ -311,7 +319,7 @@ TO = TimerOutput()
 sp_prices_file = joinpath(home_dir, "social_planner_results", "Market_Prices.csv")
 sp_primal_file = joinpath(home_dir, "social_planner_results", "SP_Primal_Quantities.csv")
 # Use epsilon_contracts if set (more relaxed for higher complexity); else same epsilon as market_exposure.
-admm_data = merge(data["General"], data["ADMM"])
+admm_data = merge(run_general, data["ADMM"])
 if haskey(data["ADMM"], "epsilon_contracts")
     admm_data = merge(admm_data, Dict("epsilon" => data["ADMM"]["epsilon_contracts"], "epsilon_abs" => data["ADMM"]["epsilon_contracts"]))
 end
@@ -327,7 +335,7 @@ if !isempty(parts)
     @info "ADMM warm-start: $(join(parts, ", "))"
 end
 
-ADMM_contracts!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, ppa_market, hpa_market, mdict, agents, data, TO)
+ADMM_contracts!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, ppa_market, hpa_market, mdict, agents, data_run, TO)
 
 ADMM["walltime"] = TimerOutputs.tottime(TO) * 10^-9 / 60
 

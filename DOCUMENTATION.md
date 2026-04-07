@@ -483,17 +483,19 @@ Each ADMM iteration `k` proceeds as follows:
 
    The primal residual $\|r_k^t\|_2$ measures **how far the market is from clearing**, while the dual residual $\|s_k^t\|_2$ measures **how stable the agents’ net positions are** from one iteration to the next.
 
-4. **Update prices**: `λ^{k+1} = λ^k − η_k × ρ_k × imbalance^k` (gradient ascent on the dual with **residual-aware step size** `η_k ∈ (0,1]` per market). The step size `η_k` is chosen per market:
-
-   - **η = 1** when `max(rp, rd) > 10 × ε_abs`: the algorithm is far from convergence; use the full step to make rapid progress.
-   - **η = 0.3** when `max(rp, rd) ≤ 10 × ε_abs`: residuals are small enough that we are near the solution; reduce the step to **damp oscillations** in tightly coupled markets. A full step can overshoot and cause limit cycles when capacity, flows, and prices are mutually dependent. The smaller η lets the algorithm settle into the equilibrium basin without bouncing around it.
+4. **Update prices**: `λ^{k+1} = λ^k − η_k × ρ_k × imbalance^k` (dual ascent with **scale-aware residual damping** `η_k ∈ (0,1]` per market).  
+   The base damping is computed from each market's current residual level relative to its Boyd-style tolerance scale (`ε_pri_k`, `ε_dual_k`), so step behavior remains robust when horizon size changes (e.g., 1-year vs 10-scenario runs).
 
 5. **Update ρ** (history-aware multi-regime rule): For each market independently:
    - **Regime 1 (rp vs rd imbalanced)**: If `primal > balance_threshold × dual` → increase `ρ` (under-penalised). If `dual > balance_threshold × primal` → decrease `ρ` (over-penalised). Increases are applied only when they have not worsened the recent residual history.
    - **Regime 2 (far from tolerance, rp ≈ rd)**: If both residuals are much larger than the market tolerance but comparable, apply a **gentle multiplicative increase** to ρ (again, only if the recent residual history has not deteriorated) to avoid stalling with large residuals.
    - **Regime 3 (near-convergence stability with hysteresis)**: If both residuals are within a modest multiple of tolerance and close to the **best residuals seen so far** for that market, **freeze ρ permanently**. From that point on, ADMM behaves like fixed-ρ ADMM in that market, preventing later ρ updates from kicking the algorithm out of a good basin and eliminating small oscillations around the optimum.
 
-6. **Convergence check**: All five markets must have both primal and dual residuals below their tolerance.
+6. **Controller adaptation and anti-stall recovery**:
+   - Per-market step scales are adapted from one-step merit movement (normalized residual score).
+   - If progress stalls for a long window and the current point is much worse than the best seen, ADMM restarts from the best checkpoint and continues with smaller steps.
+
+7. **Convergence check**: All five markets must have both primal and dual residuals below their tolerance.
 
 ### 5.2 Consensus Formula (Sharing ADMM)
 
@@ -654,6 +656,20 @@ For details on how both pools choose contract capacities under pay-as-produced l
 
 Market imbalance = Σ (net positions). Positive imbalance = excess supply → price decreases. Negative imbalance = excess demand → price increases.
 
+### 5.8 Practical Convergence Behavior and Monotonicity
+
+With coupled multi-market ADMM (especially with endogenous investments and contract couplings), strict **per-iteration monotonic decrease** of every residual is generally not guaranteed. What the controller is designed to guarantee in practice is stronger **best-so-far progress** and anti-stall recovery:
+
+- Residual merit is tracked in normalized form (relative to market-specific Boyd tolerances).
+- If short-term residual motion worsens, per-market dual step scales are reduced automatically.
+- If a long stall/worsening phase is detected, the algorithm restarts from the best checkpoint found so far and continues with smaller steps.
+
+This design avoids the common "improve-then-wander" ADMM behavior in hard regimes while preserving convergence speed in easy regimes. In empirical runs, this yields:
+
+- fast coarse convergence in early iterations,
+- fewer late oscillation plateaus,
+- improved ability to reach tighter `epsilon` values without inflating tolerance.
+
 ---
 
 ## 6. Social Planner Benchmark
@@ -749,8 +765,8 @@ Both the social planner and market exposure include **endogenous investment** in
 | Dimension | Set | Size | Description |
 |---|---|---|---|
 | Hours | `JH = 1:nTimesteps` | 24 | Hours within each representative day |
-| Representative days | `JD = 1:nReprDays` | 3 | Representative days (clustered from 365) |
-| Years | `JY = 1:nYears` | 1 | Scenario years |
+| Representative days | `JD = 1:nReprDays` | 8 | Representative days (configured in `data.yaml`) |
+| Years | `JY = 1:nYears` | 1 (SP) / 10 (ADMM scenarios) | `social_planner.jl` uses `General.nYears`; ADMM entry points can use `ADMM.nScenarioYears` |
 
 ### 7.2 Representative-Day Weights
 
@@ -773,8 +789,8 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 | Parameter | Value | Description |
 |---|---|---|
 | `nTimesteps` | 24 | Hours per representative day (hourly resolution) |
-| `nReprDays` | 3 | Representative days (trade-off: speed vs. accuracy) |
-| `nYears` | 1 | Single-year snapshot |
+| `nReprDays` | 8 | Representative days (trade-off: speed vs. accuracy) |
+| `nYears` | 1 | Base-year horizon used by `social_planner.jl` |
 | `base_year` | 2021 | Calendar year for timeseries data |
 
 ### 8.2 ADMM
@@ -782,7 +798,8 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 | Parameter | Value | Description |
 |---|---|---|
 | `rho_initial` | 1.0 | Default penalty weight (neutral starting point) |
-| `max_iter` | 10,000 | Maximum ADMM iterations |
+| `nScenarioYears` | 10 | Scenario years used by `market_exposure*.jl` (e.g., 2021..2030) |
+| `max_iter` | 1,000 | Maximum ADMM iterations |
 | `epsilon` | 2 | Convergence tolerance for `market_exposure`; see §5.4 for choosing ε. Recommended: 2 for typical energy-system models. |
 | `epsilon_contracts` | 5 | [market_exposure_contracts only] More relaxed tolerance for the contracts case (more coupled markets). If unset, falls back to `epsilon`. |
 | `cap_tol_relax` | 100 | [market_exposure_contracts only] Multiplier for capacity consensus tolerance. See §5.6. |
@@ -791,11 +808,11 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 
 | Market | `initial_price` | `rho_initial` | Notes |
 |---|---|---|---|
-| `elec_market` | 50.0 €/MWh | 1.0 | Typical EU wholesale price |
-| `elec_GC_market` | 5.0 €/MWh_GC | 0.3 | Modest GC premium |
-| `H2_market` | 0.0 €/MWh_H2 | 0.5 | Internal transfer good; ADMM discovers price |
-| `H2_GC_market` | 50.0 €/MWh_GC | 0.3 | Renewable premium |
-| `EP_market` | 700.0 €/t_EP | 3.0 | Ammonia market level; also has `Demand_Column`, `Total_Demand` |
+| `elec_market` | 80.0 €/MWh | 1.0 | Electricity price seed for ADMM warm start |
+| `elec_GC_market` | 10.0 €/MWh_GC | 0.3 | Electricity certificate market seed |
+| `H2_market` | 50.0 €/MWh_H2 | 0.5 | Hydrogen market seed |
+| `H2_GC_market` | 30.0 €/MWh_GC | 1.0 | Hydrogen certificate market seed |
+| `EP_market` | 150.0 €/MWh_EP | 3.0 | End-product market seed; also has `Demand_Column`, `Total_Demand` |
 
 ### 8.4 Contracts (market_exposure_contracts.jl only)
 
@@ -981,11 +998,11 @@ Now/
 
 | File | Role |
 |---|---|
-| `ADMM.jl` | Main loop: iterate agents → imbalances → primal residuals → dual residuals → price update → ρ update → convergence check. Progress bar. Summary printout. |
-| `ADMM_subroutine.jl` | Per-agent step: update g_bar/λ/ρ on model → dispatch to solve_* → extract & record quantities. H₂-GC prices averaged to annual scalars. |
-| `ADMM_contracts.jl` | Same as ADMM.jl but adds PPA + HPA energy imbalances, capacity consensuses, λ_ppa/λ_hpa updates, and convergence checks for both pools. |
+| `ADMM.jl` | Main loop: iterate agents → imbalances → primal/dual residuals → scale-aware price update → adaptive ρ update → controller adaptation (step-scale + anti-stall best-checkpoint restart) → convergence check. Progress bar + summary printout. |
+| `ADMM_subroutine.jl` | Per-agent step: update g_bar/λ/ρ on model → dispatch to solve_* → extract & record quantities. H₂-GC remains hourly (full 3D), consistent with other markets. |
+| `ADMM_contracts.jl` | Same controller stack as `ADMM.jl` (scale-aware damping, adaptive step scales, best-checkpoint anti-stall restart, adaptive ρ) plus PPA + HPA energy/capacity consensuses and λ_ppa/λ_hpa updates. |
 | `ADMM_subroutine_contracts.jl` | Per-agent step with PPA/HPA g_bar, λ, ρ updates and extraction. Dispatches to contracts solvers for power/H2/offtaker contract agents. |
-| `update_rho.jl` | Boyd rule: per-market adaptive ρ update with market-specific factors and caps. |
+| `update_rho.jl` | Boyd-style adaptive ρ with market-specific factors/caps, residual-history safeguards, divergence detection, and freeze-near-convergence hysteresis (using scaled market tolerances). |
 | `update_rho_contracts.jl` | Extends update_rho! with ppa/hpa and their capacity consensuses (inc 1.05, ρ_max 500). |
 
 ### 10.6 Save Files

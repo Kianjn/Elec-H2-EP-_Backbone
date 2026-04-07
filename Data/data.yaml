@@ -8,7 +8,7 @@
 General:
   nTimesteps: 24       # Hours per representative day (24 = hourly resolution; standard for power-system models)
   nReprDays: 8         # Number of representative days (8 for finer temporal resolution and H2 price analysis)
-  nYears: 1            # Number of scenario years (1 = single-year snapshot; >1 enables stochastic / multi-year analysis)
+  nYears: 1            # Number of years for social_planner.jl (kept at 1: base scenario only)
   base_year: 2021      # Calendar year whose timeseries data is used (2021 chosen as a recent year with complete public data)
 
 # ---------------------------------------------------------------------------
@@ -17,6 +17,7 @@ General:
 ADMM:
   rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
   rho_cap_initial: 0.1  # Penalty for investment/capacity consensus; low initial to avoid over-constraining early iterations
+  nScenarioYears: 10    # Number of scenario years used by market_exposure*.jl (2021..2030)
   max_iter: 200        # Iteration budget (contracts case may need higher due stronger coupling)
   epsilon: 2          # Convergence tolerance on L2 norm of primal/dual residuals. Used by market_exposure. With 72 timesteps, epsilon=1 ≈ 0.12 MW per-timestep accuracy (<1% of quantities 20-50 MW).
   epsilon_contracts: 10 # [market_exposure_contracts only] More relaxed epsilon for the contracts case (more coupled markets). If unset, falls back to epsilon. Higher value (e.g. 5) helps declare convergence when residuals are good enough (~50 iters).
@@ -159,7 +160,7 @@ EP_Demand: {}
 
 # ---------------------------------------------------------------------------
 # PPAs — Power Purchase Agreements (VRES ↔ H2 producer)
-# Used ONLY by market_exposure_ppa.jl. Ignored by market_exposure.jl
+# Used ONLY by market_exposure_contracts.jl. Ignored by market_exposure.jl
 # and social_planner.jl.
 #
 # VRES and the electrolyzer can enter PPAs: each VRES has its own PPA

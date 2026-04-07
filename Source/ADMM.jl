@@ -11,10 +11,14 @@
 #   4. Primal residual per market = L2 norm of imbalance.
 #   5. Dual residual per market = norm of (ρ * change in consensus deviation);
 #      first iteration uses Inf (no previous deviation).
-#   6. Price update: λ_new = λ_old - ρ * imbalance (elementwise).
-#   7. Append mean price per market to PriceHistory (for CSV).
-#   8. update_rho! adapts ρ per market (Boyd rule).
-#   9. If all primal and dual residuals are below tolerance, set convergence=1.
+#   6. Track normalized residual merit (best-so-far checkpoint).
+#   7. Price update: λ_new = λ_old - η * ρ * imbalance (elementwise), with
+#      scale-aware η damping and per-market step-scale adaptation.
+#   8. Append mean price per market to PriceHistory (for CSV).
+#   9. update_rho! adapts ρ per market (Boyd rule with hysteresis/freeze).
+#   10. Anti-stall logic: if merit worsens for a long window, restart from best
+#       checkpoint and continue with smaller dual steps.
+#   11. If all primal and dual residuals are below tolerance, set convergence=1.
 #   Progress bar is left clean (no per-iteration print).
 #
 # ARGUMENTS:
@@ -39,6 +43,34 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
     max_iter = data["ADMM"]["max_iter"]
     convergence = 0
     iterations = ProgressBar(1:max_iter)
+    market_keys = ("elec", "H2", "elec_GC", "H2_GC", "EP", "cap")
+
+    # Per-market dual-update step scaling (in addition to rho and eta damping).
+    # This is adapted online from residual progress to prevent late-iteration
+    # oscillations in tightly coupled markets.
+    η_scale = Dict("elec" => 1.0, "H2" => 1.0, "elec_GC" => 1.0, "H2_GC" => 1.0, "EP" => 1.0)
+
+    # Best-iterate checkpoint (normalized merit score). If progress stalls for a
+    # long window and current merit is much worse than best, we restart from this
+    # checkpoint and continue with smaller steps.
+    best_iter = 0
+    best_score = Inf
+    stall_count = 0
+    restart_patience = 40
+    restart_factor = 1.15
+    best_λ = Dict{String,Array{Float64,3}}()
+    best_ρ = Dict{String,Float64}()
+
+    function _market_eps(key::String, n_slots::Int)
+        eps_abs = ADMM_state["EpsilonAbs"]
+        eps_rel = ADMM_state["EpsilonRel"]
+        sqrt_n = sqrt(max(1, n_slots))
+        sp = max(ADMM_state["ResidualScale"]["Primal"][key], 1.0)
+        sd = max(ADMM_state["ResidualScale"]["Dual"][key], 1.0)
+        eps_pr = eps_abs * sqrt_n + eps_rel * sp
+        eps_du = eps_abs * sqrt_n + eps_rel * sd
+        return eps_pr, eps_du
+    end
 
     # Log initial mean prices (before any iteration) so diagnostics show warm-start.
     for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
@@ -292,6 +324,48 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         end
 
         # ------------------------------------------------------------------
+        # Merit tracking (normalized residuals) and anti-stall restart
+        # ------------------------------------------------------------------
+        n_slots = n_ts * n_rd * n_yr
+        merit = Dict{String,Float64}()
+        for key in market_keys
+            rp = ADMM_state["Residuals"]["Primal"][key][end]
+            rd = ADMM_state["Residuals"]["Dual"][key][end]
+            eps_pr, eps_du = _market_eps(key, n_slots)
+            m = max(rp / max(eps_pr, 1e-9), rd / max(eps_du, 1e-9))
+            merit[key] = isfinite(m) ? m : 1e12
+        end
+        score = maximum(values(merit))
+        if score < best_score
+            best_score = score
+            best_iter = iter
+            stall_count = 0
+            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+                best_λ[mkt] = copy(results["λ"][mkt][end])
+                best_ρ[mkt] = ADMM_state["ρ"][mkt][end]
+            end
+            best_ρ["cap"] = ADMM_state["ρ"]["cap"][end]
+        else
+            stall_count += 1
+        end
+
+        # Adapt per-market step scales from one-step merit movement.
+        if iter > 1
+            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+                rp_prev = ADMM_state["Residuals"]["Primal"][mkt][end-1]
+                rd_prev = ADMM_state["Residuals"]["Dual"][mkt][end-1]
+                eps_pr_prev, eps_du_prev = _market_eps(mkt, n_slots)
+                merit_prev = max(rp_prev / max(eps_pr_prev, 1e-9), rd_prev / max(eps_du_prev, 1e-9))
+                merit_now = merit[mkt]
+                if merit_now > 1.02 * merit_prev
+                    η_scale[mkt] = max(0.15, 0.85 * η_scale[mkt])
+                elseif merit_now < 0.98 * merit_prev
+                    η_scale[mkt] = min(1.0, 1.03 * η_scale[mkt])
+                end
+            end
+        end
+
+        # ------------------------------------------------------------------
         # Price (dual variable) update: λ_new = λ_old − η · ρ · imbalance.
         # Standard ADMM dual variable update with a per-market, iteration-
         # dependent step-size factor η ∈ (0,1], derived from current residuals.
@@ -302,14 +376,32 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         # oscillations in tightly coupled markets while ρ remains fixed.
         # ------------------------------------------------------------------
         @timeit TO "Update prices" begin
-            # Damp price updates earlier (residuals < 10×ε) to reduce oscillation.
-            # Previously used 2×ε; switching at 10×ε lets η=0.3 kick in while still improving.
-            eta_threshold = 10.0 * ADMM_state["EpsilonAbs"]
+            # Scale-aware damping of dual updates (λ update):
+            #   λ^{k+1} = λ^k - η_k * ρ_k * imbalance
+            # with η_k in [η_min, 1]. We compute η_k from the ratio of the
+            # market's current residual level to its Boyd-style tolerance scale
+            # (same scale used in the convergence check). This makes damping
+            # horizon-robust (e.g. 1 year vs 10 years) and prevents thin markets
+            # from oscillating with full-step updates near the stopping region.
+            η_min = 0.25
+            eps_abs = ADMM_state["EpsilonAbs"]
+            eps_rel = ADMM_state["EpsilonRel"]
+            n_slots = max(1, get(ADMM_state, "n_slots", 1))
+            sqrt_n = sqrt(n_slots)
+            scale_pr = ADMM_state["ResidualScale"]["Primal"]
+            scale_du = ADMM_state["ResidualScale"]["Dual"]
             for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
                 rp = ADMM_state["Residuals"]["Primal"][mkt][end]
                 rd = ADMM_state["Residuals"]["Dual"][mkt][end]
                 base = max(rp, rd)
-                η = base <= eta_threshold ? 0.3 : 1.0
+                sp = max(scale_pr[mkt], 1.0)
+                sd = max(scale_du[mkt], 1.0)
+                eps_pr = eps_abs * sqrt_n + eps_rel * sp
+                eps_du = eps_abs * sqrt_n + eps_rel * sd
+                eps_m = max(eps_pr, eps_du)
+                # Full step when comfortably above tolerance; smoothly damp near it.
+                η_raw = base <= 1.5 * eps_m ? 1.0 : max(η_min, 1.5 * eps_m / max(base, 1e-9))
+                η = η_scale[mkt] * η_raw
                 push!(results["λ"][mkt],
                       results["λ"][mkt][end] .- η .* ADMM_state["ρ"][mkt][end] .* ADMM_state["Imbalances"][mkt][end])
             end
@@ -335,6 +427,18 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
 
         @timeit TO "Update ρ" begin
             update_rho!(ADMM_state, iter)
+        end
+
+        # If we are clearly worse than the best point for a long window,
+        # restart from the best checkpoint and continue with smaller steps.
+        if stall_count >= restart_patience && score > restart_factor * best_score && !isempty(best_λ)
+            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+                results["λ"][mkt][end] .= best_λ[mkt]
+                ADMM_state["ρ"][mkt][end] = best_ρ[mkt]
+                η_scale[mkt] = max(0.15, 0.8 * η_scale[mkt])
+            end
+            ADMM_state["ρ"]["cap"][end] = best_ρ["cap"]
+            stall_count = 0
         end
 
         # Clean progress bar: show only iteration and max; no extra printing
@@ -397,6 +501,7 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         println("ADMM convergence achieved.")
     else
         println("ADMM reached max_iter without convergence.")
+        @printf("Best normalized residual score reached at iter %d: %.4f\n", best_iter, best_score)
     end
     n_it = ADMM_state["n_iter"]
     println("Number of iterations: ", n_it)
