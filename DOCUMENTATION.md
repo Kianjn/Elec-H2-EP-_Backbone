@@ -507,73 +507,208 @@ The consensus target for agent `i` in a market with `n` participants:
 
 The `(n+1)` denominator comes from the sharing ADMM formulation, which introduces one "market copy" alongside the `n` agent copies. This distributes the imbalance correction equally.
 
-### 5.3 Adaptive Penalty (ρ)
+### 5.3 Adaptive Penalty (ρ): Why the Current Design Is Multi-Regime
 
-The adaptive penalty mechanism is implemented in `update_rho.jl` and is designed as a **state-of-the-art, history-aware extension** of the classic Boyd rule. It combines:
+The adaptive penalty mechanism in `update_rho.jl` is intentionally more sophisticated than the classic single-stage Boyd update. This section explains:
 
-1. **Per-market tuning** (different growth caps and factors per market),
-2. **Three behavioural regimes** (balance, gentle push, stability),
-3. **Hysteresis and residual-history safeguards** that prevent the algorithm from leaving a good basin once it has found one and avoid harmful ρ increases.
+1. what `ρ` does in ADMM,
+2. what the older one-stage logic did,
+3. why that older logic often stalled or was sensitive to initial `ρ`,
+4. exactly what each current regime achieves, how it is triggered, and why it is needed.
 
-Per-market parameters:
+#### 5.3.1 Role of `ρ` in this ADMM implementation
 
-| Market | Increase factor | Decrease factor | ρ_max | Notes |
+For each market `k`, `ρ_k` appears in two places:
+
+- in the **agent subproblem penalty**: stronger `ρ_k` enforces consensus/feasibility more aggressively,
+- in the **dual (price) update magnitude**: `λ^{t+1} = λ^t - η^t ρ^t r^t`.
+
+So `ρ` controls a trade-off:
+
+- too small: weak feasibility pressure, slow primal residual decay,
+- too large: aggressive dual motion, higher risk of oscillation/overshoot, especially in tightly coupled markets.
+
+In coupled energy systems with investment decisions and binding capacities, this trade-off changes over the solve trajectory. A single fixed update logic is often not enough.
+
+#### 5.3.2 The older one-stage rule (and why it was not sufficient)
+
+The classic one-stage Boyd-style idea is:
+
+- if primal residual dominates (`rp >> rd`), increase `ρ`,
+- if dual residual dominates (`rd >> rp`), decrease `ρ`,
+- otherwise keep `ρ` unchanged.
+
+This is effective as a first-order balancing mechanism, but it has a known blind spot:
+
+- if `rp ≈ rd` **and both are still large**, the rule treats the system as "balanced" and stops adapting `ρ`, even though the run is still far from tolerances.
+
+That is exactly the stall pattern observed in practice: residuals can plateau at a high level while `ρ` stays unchanged because the ratio test no longer triggers.
+
+#### 5.3.3 Initial `ρ` logic in this project (and sensitivity)
+
+Initial `ρ` is seeded from market-specific values in configuration (`data.yaml`) and loaded into ADMM state at iteration 0 (`define_results.jl`). It is a calibrated starting scale, not a computed optimum:
+
+- `elec`: 1.0, `H2`: 0.5, `elec_GC`: 0.3, `H2_GC`: 1.0, `EP`: 3.0, `cap`: `rho_cap_initial`.
+
+In the older one-stage regime, convergence quality was more sensitive to this initial scale because:
+
+- the update decision depended mainly on residual ratio (`rp/rd`), not residual level vs tolerance,
+- a poor initial scale could leave the run in a long plateau before ratio imbalances became informative,
+- dual residual itself is multiplied by `ρ`, so early ratio signals can be noisy/misleading when `ρ` is poorly scaled.
+
+Hence users often had to tune initial `ρ` by trial and error.
+
+#### 5.3.4 Current controller: three regimes + safeguards
+
+Current `update_rho!` combines:
+
+1. **Regime 1 (imbalance correction)**: classic residual balancing when `rp` and `rd` differ clearly,
+2. **Regime 2 (anti-stall push)**: gentle increase when `rp ≈ rd` but both remain far above tolerance,
+3. **Regime 3 (near-solution stability)**: freeze `ρ` near convergence to avoid late-cycle perturbations,
+4. **history-aware safeguards**: skip harmful increases, detect divergence, and add hysteresis via best-so-far residual anchors.
+
+All decisions are market-wise and use the same Boyd-style scaled tolerance basis as convergence:
+
+```math
+\varepsilon_{\text{pri},k}=\varepsilon_{\text{abs}}\sqrt{n}+\varepsilon_{\text{rel}}\,\text{Scale}_{\text{pr},k},
+\quad
+\varepsilon_{\text{dual},k}=\varepsilon_{\text{abs}}\sqrt{n}+\varepsilon_{\text{rel}}\,\text{Scale}_{\text{du},k}.
+```
+
+This is critical: `ρ` adaptation and stopping logic "speak the same scale language," so behavior is robust when horizon length changes.
+
+#### 5.3.5 Regime-by-regime explanation (what each regime achieves)
+
+Let `market_tol = max(ε_pri_k, ε_dual_k)`, `balance_threshold = 1.2`, `high_resid_factor = 2.0`, `mid_resid_factor = 5.0`.
+
+##### Regime 1 — Residual-balance correction (classic Boyd core)
+
+**Trigger:**
+
+- `rp > 1.2 * rd`  -> primal dominates,
+- `rd > 1.2 * rp`  -> dual dominates.
+
+**Action:**
+
+- primal-dominant -> increase `ρ` (subject to history checks and caps),
+- dual-dominant -> decrease `ρ`.
+
+**What it achieves:**
+
+- re-balances feasibility pressure and dual aggressiveness when they are clearly mismatched.
+
+**Why still needed:**
+
+- this remains the most direct mechanism when one side is obviously lagging.
+
+##### Regime 2 — Gentle anti-stall push when far from tolerance
+
+**Trigger:**
+
+- `rp` and `rd` are comparable (no Regime 1 imbalance),
+- both are still large: `rp > 2 * market_tol` and `rd > 2 * market_tol`.
+
+**Action:**
+
+- apply a mild multiplicative increase (`mild_inc = 1.01`) if recent history is not worsening.
+
+**What it achieves:**
+
+- breaks the "balanced-but-far" stall where classic one-stage logic would keep `ρ` frozen.
+
+**Why gentle (1.01, not aggressive):**
+
+- at this stage the problem can already be in a delicate nonlinear/kinked region; a strong jump can destabilize dual dynamics.
+
+##### Regime 3 — Stability zone near convergence (freeze `ρ`)
+
+**Trigger:**
+
+- both residuals within a moderate tolerance band:
+  `rp <= 5 * market_tol` and `rd <= 5 * market_tol`,
+- and both close to best-so-far residuals (hysteresis check).
+
+**Action:**
+
+- set `ρ_frozen[key] = true`; thereafter keep `ρ` fixed for that market.
+
+**What it achieves:**
+
+- prevents late-stage `ρ` perturbations from kicking the run out of a good basin,
+- suppresses small limit cycles near the optimum.
+
+**Why this matters in this model:**
+
+- endogenous investment and capacity constraints create kinks/non-smooth active-set changes; near-solution "controller noise" from continuing to change `ρ` can be harmful.
+
+#### 5.3.6 Safeguards that make the regimes robust
+
+Beyond regime triggers, the implementation adds controller safeguards:
+
+- **Residual history gate (`R_hist`)**: before increasing `ρ`, check whether combined residual `R = rp + rd` has improved over a window (`window_len = 10`, `improve_tol = 1.02`). If not, skip increase.
+- **Divergence detector**: if `R` increased for 3 consecutive iterations, force a `ρ` decrease (damping step).
+- **Best-residual hysteresis anchors**: freeze decisions depend on closeness to best-so-far residuals, not only on instantaneous values.
+- **Per-market caps and rates**: each market has different `inc/dec` and `ρ_max` tuned to coupling strength and numerical stiffness.
+
+These safeguards are what make the update "smart" rather than merely reactive.
+
+#### 5.3.7 Why this is better than one-stage in practice
+
+Compared with single-stage residual-ratio updates, the current controller is superior on three dimensions:
+
+1. **Progress far from convergence**: Regime 2 resolves the classical `rp≈rd>>tol` stall.
+2. **Stability near convergence**: Regime 3 intentionally stops adapting `ρ` when adaptation is no longer beneficial.
+3. **Lower sensitivity to initial `ρ`**: trend checks + level-aware logic reduce dependence on perfectly tuned initial values.
+
+In short, one-stage logic asks only "are residuals balanced?" while the current logic asks:
+
+- are they balanced,
+- are they small enough,
+- is recent trend improving,
+- are we near a good basin that should be protected?
+
+That extra context is the key reason convergence is more reliable in this multi-market, investment-coupled setting.
+
+#### 5.3.8 Per-market parameters
+
+| Market | Increase factor | Decrease factor | ρ_max | Reasoning |
 |---|---|---|---|---|
-| `elec`, `elec_GC` | 1.05 | 1/1.05 | 5,000 | Dominant, tightly coupled electricity/GC markets; moderate adaptation with a low cap avoids ill-conditioning while still correcting imbalances quickly. |
-| `H2` | 1.01 | 1/1.01 | 100 | Strongly coupled to electricity and EP; very gentle updates minimise oscillation when H₂ capacity/investment kinks are active. |
-| `H2_GC` | 1.05 | 1/1.05 | 100 | Hourly GC market but thin volumes; moderate adaptation with a conservative cap. |
-| `EP` | 1.01 | 1/1.01 | 100 | Stiff EP market; slow adaptation avoids limit cycles when EP capacities/investments bind. |
-| `ppa`, `ppa_cap` | 1.05 | 1/1.05 | 500 | Thin bilateral power contract pool. |
-| `hpa`, `hpa_cap` | 1.05 | 1/1.05 | 500 | Thin bilateral hydrogen contract pool. |
+| `elec`, `elec_GC` | 1.05 | 1/1.05 | 5,000 | Large-volume core markets; can tolerate moderately faster adaptation. |
+| `H2`, `EP` | 1.01 | 1/1.01 | 100 | More kink-sensitive due to coupling and capacity effects; slower updates reduce oscillation risk. |
+| `H2_GC` | 1.05 | 1/1.05 | 100 | Thin but hourly market; moderate adaptation with conservative cap. |
+| `cap` | 1.05 | 1/1.05 | 100 | Consensus over investment-capacity variables; moderate damping preferred. |
+| `ppa`, `ppa_cap` | 1.05 | 1/1.05 | 500 | Thin bilateral pool; conservative but responsive. |
+| `hpa`, `hpa_cap` | 1.05 | 1/1.05 | 500 | Same logic as PPA for hydrogen contracts. |
 
-In addition to these static parameters, the algorithm maintains:
-
-- **Best residuals per market**: `best_primal[key]`, `best_dual[key]` track the smallest primal and dual residuals seen so far. They serve as a *hysteresis anchor* for deciding when a market has truly entered a near-solution region.
-- **A short residual history per market**: `R_hist[key]` stores a short window of `R = rp + rd`. Before increasing ρ, the rule checks whether residuals have improved (or at least not deteriorated) over this window; if they have worsened, the increase is skipped.
-- **Per-market freeze flags**: once a market hits residuals that are both within a modest multiple of tolerance and close to its best-ever residuals, its `ρ` is frozen permanently. Subsequent iterations keep ρ fixed for that market. The freeze threshold is `mid_resid_factor × ε` (e.g. 5×ε); freezing earlier (within a few times ε) prevents later ρ updates from kicking the algorithm out of a good basin.
-
-- **Divergence detection**: if the combined residual `R = rp + rd` has increased for three consecutive iterations, the algorithm is overshooting. ρ is decreased for that market to damp the overshoot and break limit cycles.
-
-This combination yields a robust behaviour:
-
-- **Far from tolerance**: ρ can adapt aggressively enough to overcome stalling and large imbalances.
-- **Near the solution**: ρ becomes effectively fixed and the algorithm behaves like a stable fixed-ρ ADMM, eliminating the classic oscillatory patterns observed with naive adaptive schemes.
-
-In pseudo-code, the **per-market update** at iteration $t$ can be summarised as:
+#### 5.3.9 Pseudo-code (current behavior)
 
 ```text
 for each market k:
-    compute rp = ||r_k^t||_2, rd = ||s_k^t||_2
-    update best_primal[k], best_dual[k], R_hist[k]
+    rp = primal_residual(k); rd = dual_residual(k)
+    tol = max(ε_pri_k, ε_dual_k)
+    update best residual anchors and R_hist[k] with R = rp + rd
 
     if rho_frozen[k]:
-        continue   # Regime 3: fixed-ρ near convergence
-
-    if rp <= c_freeze * ε_pri_k  and  rd <= c_freeze * ε_dual_k
-       and rp, rd close to best_primal[k], best_dual[k]:
-        rho_frozen[k] = true     # enter permanent fixed-ρ regime
+        keep ρ unchanged
         continue
 
-    if rp > balance_threshold * rd or rd > balance_threshold * rp:
-        # Regime 1: classic Boyd-like rule with safeguards
-        if rp > balance_threshold * rd and residual_history_improved(k):
-            ρ_k^{t+1} = min(ρ_max[k], ρ_inc[k] * ρ_k^t)
-        elseif rd > balance_threshold * rp and residual_history_improved(k):
-            ρ_k^{t+1} = ρ_dec[k] * ρ_k^t
+    if R increased 3 consecutive iterations:
+        decrease ρ   # divergence damping
+        continue
+
+    if rp > 1.2*rd:
+        increase ρ only if recent history does not show worsening
+    elseif rd > 1.2*rp:
+        decrease ρ
+    else
+        # rp and rd comparable
+        if rp <= 5*tol and rd <= 5*tol and close to best anchors:
+            freeze ρ permanently
+        elseif rp > 2*tol and rd > 2*tol:
+            apply mild increase (1.01) only if history is not worsening
         else
-            ρ_k^{t+1} = ρ_k^t
-    elseif rp, rd >> ε_pri_k, ε_dual_k and residual_history_improved(k):
-        # Regime 2: gentle push when both residuals are large but balanced
-        ρ_k^{t+1} = min(ρ_max[k], ρ_soft_inc[k] * ρ_k^t)
-    else:
-        ρ_k^{t+1} = ρ_k^t
+            keep ρ unchanged
 ```
-
-where:
-
-- `c_freeze` controls how close to tolerance we require residuals to be before freezing ρ,
-- `ρ_inc[k]`, `ρ_dec[k]`, and `ρ_soft_inc[k]` are the multiplicative factors from the table above,
-- `residual_history_improved(k)` checks whether the short history window in `R_hist[k]` has improved (or at least not deteriorated), guarding against **myopic** ρ increases that would worsen convergence.
 
 ### 5.4 Convergence Tolerances (Boyd-style)
 
