@@ -63,6 +63,7 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
     var_dict = Dict{Symbol, Dict{String, Any}}(
         :power_d_E => Dict{String, Any}(),
         :power_q_E => Dict{String, Any}(),
+        :power_q_E_stage => Dict{String, Any}(),
         :power_cap_VRES => Dict{String, Any}(),
         :power_inv_VRES => Dict{String, Any}(),
         :H2_e_buy => Dict{String, Any}(),

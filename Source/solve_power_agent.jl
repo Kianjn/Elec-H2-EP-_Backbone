@@ -15,7 +15,7 @@
 #   re-added each iteration with the fresh losses.
 #
 #   For Conventional and Consumer agents no CVaR logic is needed; only the
-#   objective is rebuilt.
+#   objective is rebuilt (for Conventional: stagewise convex variable-cost stack).
 #
 # ARGUMENTS:
 #   m — Agent ID (used only for dispatch; parameters are on mod).
@@ -124,13 +124,27 @@ function solve_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
         # Conventional generator objective: same structure as VRES but
         # WITHOUT the green certificate (GC) revenue/penalty terms,
         # since conventional plants do not earn GCs.
-        #   min  sum W * (MC*g - lambda_elec*g)           [cost - revenue]
+        #   min  sum W * (stagewise convex cost - lambda_elec*g)  [cost - revenue]
         #      + rho_elec/2 * sum W * (g - g_bar_elec)^2  [ADMM elec penalty]
         g  = mod.ext[:variables][:g]
         MC = mod.ext[:parameters][:MarginalCost]
+        if haskey(mod.ext[:variables], :g_stage) &&
+           haskey(mod.ext[:parameters], :ConvStageBaseCost) &&
+           haskey(mod.ext[:parameters], :ConvStageSlope)
+            g_stage = mod.ext[:variables][:g_stage]
+            stage_base = mod.ext[:parameters][:ConvStageBaseCost]
+            stage_slope = mod.ext[:parameters][:ConvStageSlope]
+            mod.ext[:objective] = @objective(mod, Min,
+                sum(W[jd, jy] * (
+                    sum(stage_base[s] * g_stage[s, jh, jd, jy] + 0.5 * stage_slope[s] * g_stage[s, jh, jd, jy]^2 for s in 1:3)
+                    - λ_elec[jh, jd, jy] * g[jh, jd, jy]
+                ) for jh in JH, jd in JD, jy in JY)
+                + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY))
+        else
         mod.ext[:objective] = @objective(mod, Min,
             sum(W[jd, jy] * (MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY))
+        end
     elseif agent_type == "Consumer"
         # Consumer objective:
         #   min  sum W * (lambda*d - U(d))                  [cost - utility]

@@ -62,8 +62,24 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
         g = quantities[:g]
         λ_elec = prices[:λ_elec]
         MC = get(params, :MarginalCost, 0.0)
+        has_stages = haskey(params, :ConvStageCap) && haskey(params, :ConvStageBaseCost) && haskey(params, :ConvStageSlope)
+        stage_cap = has_stages ? params[:ConvStageCap] : [0.0, 0.0, 0.0]
+        stage_base = has_stages ? params[:ConvStageBaseCost] : [MC, MC, MC]
+        stage_slope = has_stages ? params[:ConvStageSlope] : [0.0, 0.0, 0.0]
         for jh in JH, jd in JD, jy in JY
-            obj += W[jd, jy] * (MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy])
+            if has_stages
+                g_tot = g[jh, jd, jy]
+                rem = g_tot
+                cost = 0.0
+                for s in 1:3
+                    gs = min(max(rem, 0.0), stage_cap[s])
+                    cost += stage_base[s] * gs + 0.5 * stage_slope[s] * gs^2
+                    rem -= gs
+                end
+                obj += W[jd, jy] * (cost - λ_elec[jh, jd, jy] * g_tot)
+            else
+                obj += W[jd, jy] * (MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy])
+            end
         end
 
     elseif agent_type == :H2_producer
@@ -260,8 +276,24 @@ function compute_agent_objective_contributions(agent_type::Symbol, quantities::D
         g = quantities[:g]
         λ_elec = prices_dict[:λ_elec]
         MC = get(params, :MarginalCost, 0.0)
+        has_stages = haskey(params, :ConvStageCap) && haskey(params, :ConvStageBaseCost) && haskey(params, :ConvStageSlope)
+        stage_cap = has_stages ? params[:ConvStageCap] : [0.0, 0.0, 0.0]
+        stage_base = has_stages ? params[:ConvStageBaseCost] : [MC, MC, MC]
+        stage_slope = has_stages ? params[:ConvStageSlope] : [0.0, 0.0, 0.0]
         for (iy, jy) in enumerate(JY_vec), (id, jd) in enumerate(JD_vec), (ih, jh) in enumerate(JH_vec)
-            contrib[ih, id, iy] = MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy]
+            if has_stages
+                g_tot = g[jh, jd, jy]
+                rem = g_tot
+                cost = 0.0
+                for s in 1:3
+                    gs = min(max(rem, 0.0), stage_cap[s])
+                    cost += stage_base[s] * gs + 0.5 * stage_slope[s] * gs^2
+                    rem -= gs
+                end
+                contrib[ih, id, iy] = cost - λ_elec[jh, jd, jy] * g_tot
+            else
+                contrib[ih, id, iy] = MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy]
+            end
         end
 
     elseif agent_type == :H2_producer

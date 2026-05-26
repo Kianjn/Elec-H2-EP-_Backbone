@@ -62,6 +62,41 @@ function define_power_parameters!(m::String, mod::Model, data::Dict, ts::Dict, r
         # --- Dispatchable thermal generator ---
         params[:Capacity]     = data["Capacity"]        # Installed capacity (MW)
         params[:MarginalCost] = data["MarginalCost"]    # €/MWh; fuel + O&M cost of generation
+        # Three-stage convex marginal-cost curve (single aggregated conventional agent):
+        #   Stage s has capacity cap_s, marginal cost c_s(x) = a_s + b_s*x (x in [0, cap_s]).
+        # This represents stacked technologies (e.g., coal, nuclear, gas) while
+        # preserving one market participant.
+        #
+        # Inputs can be overridden in data.yaml:
+        #   - StageCapacityShares       (length 3, positive; normalized internally)
+        #   - StageBaseCostMultipliers  (length 3, increasing)
+        #   - StageSlopeMultipliers     (length 3, nonnegative)
+        #
+        # Calibration target:
+        #   Average variable cost at full dispatch equals MarginalCost, so the
+        #   new curve keeps aggregate cost level comparable to the old constant-cost model.
+        shares_raw = Float64.(get(data, "StageCapacityShares", [0.40, 0.35, 0.25]))
+        base_mult  = Float64.(get(data, "StageBaseCostMultipliers", [0.70, 1.30, 1.90]))
+        slope_mult = Float64.(get(data, "StageSlopeMultipliers", [0.40, 0.50, 0.60]))
+        if length(shares_raw) != 3 || length(base_mult) != 3 || length(slope_mult) != 3
+            error("Conventional generator requires 3 entries for StageCapacityShares, StageBaseCostMultipliers, StageSlopeMultipliers")
+        end
+        shares = max.(shares_raw, 1e-9)
+        shares ./= sum(shares)
+        caps = params[:Capacity] .* shares
+
+        mc_ref = params[:MarginalCost]
+        base_raw = base_mult .* mc_ref
+        slope_raw = slope_mult .* (mc_ref ./ max.(caps, 1e-9))
+
+        total_cost_raw = sum(base_raw[s] * caps[s] + 0.5 * slope_raw[s] * caps[s]^2 for s in 1:3)
+        target_total_cost = mc_ref * params[:Capacity]
+        scale = total_cost_raw > 1e-9 ? target_total_cost / total_cost_raw : 1.0
+
+        params[:ConvStageCap] = caps
+        params[:ConvStageBaseCost] = scale .* base_raw
+        params[:ConvStageSlope] = scale .* slope_raw
+
         # Constant AF = 1.0 at every hour: conventional generators are always
         # available up to their full capacity (dispatchable thermal generation).
         # No timeseries profile is needed; the optimizer decides dispatch level.

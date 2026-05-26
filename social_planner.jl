@@ -401,19 +401,24 @@ JY              = planner_state[:JY]
 sw_aux          = planner_state[:sw_aux]
 agent_welfare_per_year = planner_state[:agent_welfare_per_year]
 
-# Identify demand agent IDs (quadratic utility) vs supply agent IDs (linear).
+# Identify agents with quadratic welfare terms that must be fixed for LP dual recovery:
+# - demand agents (quadratic utility),
+# - conventional generator (stagewise convex variable cost).
 demand_agent_ids = Set{String}()
 union!(demand_agent_ids, planner_state[:power_consumers])
 union!(demand_agent_ids, agents[:elec_GC_demand])
 union!(demand_agent_ids, agents[:EP_demand])
+quadratic_welfare_agent_ids = Set{String}(demand_agent_ids)
+union!(quadratic_welfare_agent_ids, planner_state[:power_conv])
 all_welfare_ids   = collect(keys(agent_welfare_per_year))
-supply_agent_ids  = filter(id -> !(id in demand_agent_ids), all_welfare_ids)
+linear_welfare_agent_ids  = filter(id -> !(id in quadratic_welfare_agent_ids), all_welfare_ids)
 
 # ── Phase A: Query ALL optimal values BEFORE any model modification ──────
 # The first fix() call invalidates JuMP's solution cache, so every value()
 # query must happen here.
 
-# (a) Demand variable optimal values.
+# (a) Variable optimal values to be fixed before LP re-solve.
+#     Start with elastic-demand variables.
 demand_vars_and_vals = Tuple{JuMP.VariableRef, Float64}[]
 for key in demand_var_keys
     if haskey(var_dict, key)
@@ -430,12 +435,29 @@ for key in demand_var_keys
     end
 end
 
-# (b) Per-year demand welfare evaluated at optimal demand quantities.
+# Also fix conventional stage variables because they appear quadratically
+# in the social welfare epigraph after introducing staged convex cost.
+if haskey(var_dict, :power_q_E_stage)
+    for id in planner_state[:power_conv]
+        if haskey(var_dict[:power_q_E_stage], id)
+            qstage = var_dict[:power_q_E_stage][id]
+            if qstage isa AbstractArray
+                for vi in qstage
+                    push!(demand_vars_and_vals, (vi, value(vi)))
+                end
+            elseif qstage isa JuMP.VariableRef
+                push!(demand_vars_and_vals, (qstage, value(qstage)))
+            end
+        end
+    end
+end
+
+# (b) Per-year quadratic welfare terms evaluated at optimal quantities.
 #     These become constants in the replacement linear epigraph constraints.
-demand_welfare_const = Dict{Int, Float64}()
+quadratic_welfare_const = Dict{Int, Float64}()
 for jy in JY
-    demand_welfare_const[jy] = sum(
-        value(agent_welfare_per_year[id][jy]) for id in demand_agent_ids;
+    quadratic_welfare_const[jy] = sum(
+        value(agent_welfare_per_year[id][jy]) for id in quadratic_welfare_agent_ids;
         init = 0.0
     )
 end
@@ -457,16 +479,16 @@ end
 unregister(planner, :social_welfare_epigraph)
 
 # (b3) Re-add epigraph as purely LINEAR constraints:
-#   sw_aux[jy] ≤ Σ(supply welfare)[jy] + demand_welfare_const[jy]
-# Supply agents have only linear cost/revenue terms (AffExpr), so the sum
-# is linear. Adding the Float64 constant keeps the constraint linear.
+#   sw_aux[jy] ≤ Σ(linear welfare)[jy] + quadratic_welfare_const[jy]
+# where quadratic welfare (demand utility + conventional staged cost) has been
+# evaluated at the QCP optimum and absorbed into constants.
 # Gurobi now classifies the model as a pure LP.
 @constraint(planner, social_welfare_epigraph_lp[jy in JY],
-    sw_aux[jy] <= sum(agent_welfare_per_year[id][jy] for id in supply_agent_ids)
-                + demand_welfare_const[jy]
+    sw_aux[jy] <= sum(agent_welfare_per_year[id][jy] for id in linear_welfare_agent_ids)
+                + quadratic_welfare_const[jy]
 )
 
-@info "Step 2 complete: Fixed $(length(fixed_vars)) demand variables, " *
+@info "Step 2 complete: Fixed $(length(fixed_vars)) quadratic-term variables, " *
       "replaced QC epigraph with linear constraints — model is now LP."
 
 # ── Step 3: Re-solve as LP for dual variables ────────────────────────────

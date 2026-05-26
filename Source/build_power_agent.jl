@@ -14,9 +14,10 @@
 #     + ADMM penalties + fixed annualised CAPEX on cap_VRES + optional CVaR
 #     term (γ·β_VRES). Capacity constraint: g ≤ AF × cap_VRES[jy].
 #
-#   - Conventional: dispatchable generator with fixed Capacity and marginal
-#     cost. Net position: g_net_elec = +g. ADMM objective = generation cost −
-#     elec revenue + ADMM penalties.
+#   - Conventional: dispatchable generator with fixed Capacity and a 3-stage
+#     convex variable-cost stack (single aggregated agent). Net position:
+#     g_net_elec = +g. ADMM objective = stagewise generation cost − elec
+#     revenue + ADMM penalties.
 #
 #   - Consumer: elastic electricity demand with quadratic utility. Net position:
 #     g_net_elec = −d. ADMM objective = expenditure − utility + ADMM penalty.
@@ -169,21 +170,37 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
 
     elseif agent_type == "Conventional"
         cap = mod.ext[:parameters][:Capacity]        # installed capacity (MW)
-        MC  = mod.ext[:parameters][:MarginalCost]    # marginal cost (€/MWh)
+        MC  = mod.ext[:parameters][:MarginalCost]    # fallback marginal cost (€/MWh)
+        stage_cap = get(mod.ext[:parameters], :ConvStageCap, [cap, 0.0, 0.0])
+        stage_base = get(mod.ext[:parameters], :ConvStageBaseCost, [MC, MC, MC])
+        stage_slope = get(mod.ext[:parameters], :ConvStageSlope, [0.0, 0.0, 0.0])
 
         # Generation variable g ≥ 0 for conventional (thermal) plant.
         g = mod.ext[:variables][:g] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "gen")
+        # Segment variables for 3-stage stacked technologies.
+        g_stage = mod.ext[:variables][:g_stage] = @variable(mod, [s in 1:3, jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "gen_stage")
 
         # Net position in the electricity market only — conventional generation
         # does NOT participate in the elec-GC market (output is not renewable-
         # certified), so there is no g_net_elec_GC expression.
         mod.ext[:expressions][:g_net_elec] = @expression(mod, g)   # g_net_elec = +g
 
+        # Stage coupling and capacity limits:
+        # - Total output equals sum of stage outputs.
+        # - Each stage has its own capacity, representing one technology block.
+        mod.ext[:constraints][:stage_balance] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
+            g[jh, jd, jy] == sum(g_stage[s, jh, jd, jy] for s in 1:3))
+        mod.ext[:constraints][:stage_caps] = @constraint(mod, [s in 1:3, jh in JH, jd in JD, jy in JY],
+            g_stage[s, jh, jd, jy] <= stage_cap[s])
+
         # Objective — same structure as VRES but without GC market terms:
-        #   min  Σ W·(MC·g − λ_elec·g)     ← production cost minus elec revenue
+        #   min  Σ W·( Σ_s (a_s·g_s + 0.5·b_s·g_s²) − λ_elec·g )  ← stagewise convex variable cost minus elec revenue
         #      + Σ (ρ_elec/2)·W·(g − ḡ)²   ← ADMM penalty toward consensus
         mod.ext[:objective] = @objective(mod, Min,
-            sum(W[jd, jy] * (MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
+            sum(W[jd, jy] * (
+                sum(stage_base[s] * g_stage[s, jh, jd, jy] + 0.5 * stage_slope[s] * g_stage[s, jh, jd, jy]^2 for s in 1:3)
+                - λ_elec[jh, jd, jy] * g[jh, jd, jy]
+            ) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         )
 
@@ -313,19 +330,28 @@ function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
     else  # Conventional
         cap = _p(mod, :Capacity)
         C = _p(mod, :MarginalCost)
+        stage_cap = get(mod.ext[:parameters], :ConvStageCap, [cap, 0.0, 0.0])
+        stage_base = get(mod.ext[:parameters], :ConvStageBaseCost, [C, C, C])
+        stage_slope = get(mod.ext[:parameters], :ConvStageSlope, [0.0, 0.0, 0.0])
 
         q_E = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="q_E_$(id)")
+        q_stage = @variable(planner, [s in 1:3, jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="q_E_stage_$(id)")
+        @constraint(planner, [jh in JH, jd in JD, jy in JY], q_E[jh, jd, jy] == sum(q_stage[s, jh, jd, jy] for s in 1:3))
+        @constraint(planner, [s in 1:3, jh in JH, jd in JD, jy in JY], q_stage[s, jh, jd, jy] <= stage_cap[s])
         @constraint(planner, [jh in JH, jd in JD, jy in JY], q_E[jh, jd, jy] <= cap)
 
-        # Per-year welfare = −(production cost). Revenue from electricity
+        # Per-year welfare = −(stagewise convex production cost). Revenue from electricity
         # sales is a transfer that cancels in the aggregate planner objective.
         welfare_per_year = Dict{Int, Any}()
         for jy in JY
             welfare_per_year[jy] = @expression(planner,
-                -sum(W_dict[jy][jd] * (C * q_E[jh, jd, jy]) for jh in JH, jd in JD)
+                -sum(W_dict[jy][jd] * (
+                    sum(stage_base[s] * q_stage[s, jh, jd, jy] + 0.5 * stage_slope[s] * q_stage[s, jh, jd, jy]^2 for s in 1:3)
+                ) for jh in JH, jd in JD)
             )
         end
         var_dict[:power_q_E][id] = q_E
+        var_dict[:power_q_E_stage][id] = q_stage
         return welfare_per_year
     end
 end

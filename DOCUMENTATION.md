@@ -198,7 +198,7 @@ In the **contracts case**:
 | Agent | Type | Description |
 |---|---|---|
 | `Gen_VRES_01` | `VRES` | Variable renewable (e.g. solar). Zero marginal cost. Produces both electricity and elec GCs (1:1). Constrained by hourly availability factor × **endogenous capacity**. Decides yearly installed capacity and investment (MW), incurring fixed annualised CAPEX `FixedCost_per_MW × capacity`. In `market_exposure_contracts.jl`: splits generation into `g_EOM` (pool) and `g_ppa` (PPA); `g_ppa ≤ ppa_cap` at every hour; revenue includes `λ_ppa × g_ppa`. |
-| `Gen_Conv_01` | `Conventional` | Dispatchable thermal plant. Constant availability (AF = 1). Marginal cost sets price floor. No GC production. |
+| `Gen_Conv_01` | `Conventional` | Dispatchable thermal fleet proxy. Constant availability (AF = 1). Uses a calibrated 3-stage increasing marginal-cost curve (coal-like, nuclear-like, gas-like blocks) with the same total capacity and full-load average cost as the original single-block parameterisation. No GC production. |
 | `Cons_Elec_01` | `Consumer` | Elastic electricity demand. Quadratic utility `U(d) = A_E·d − ½B_E·d²` gives inverse demand `p(d) = A_E − B_E·d`. Bounded by `PeakLoad × load_profile`. |
 
 ### 3.2 Hydrogen-Sector Agent
@@ -301,10 +301,13 @@ where loss_VRES[y] = Σ_{h,d} W × ( MC×g − λ_elec×g − λ_GC×g )
 
 **VRES in contracts case** (`build_power_agent_contracts.jl`): Splits generation into `g_EOM` (pool) and `g_ppa` (PPA). Loss includes `−λ_ppa×g_ppa`; penalties add `(ρ_ppa/2)×Σ W×(g_ppa − ḡ_ppa)²` and `(ρ_ppa_cap/2)×(ppa_cap − ḡ_ppa_cap)²`. Constraint: `g_ppa ≤ ppa_cap` at every hour.
 
-**Conventional generator:**
+**Conventional generator (3-stage increasing cost):**
 ```
-min Σ W × ( MC×g − λ_elec×g )  +  (ρ_elec/2)×Σ W×(g − ḡ_elec)²
+min Σ W × ( Σ_s (base_s×g_s + 0.5×slope_s×g_s²) − λ_elec×g )  +  (ρ_elec/2)×Σ W×(g − ḡ_elec)²
+
+subject to: g = Σ_s g_s,   0 ≤ g_s ≤ cap_s
 ```
+where stage capacities/costs are calibrated from `Capacity`, `MarginalCost`, `StageCapacityShares`, `StageBaseCostMultipliers`, and `StageSlopeMultipliers` in `data.yaml`, preserving total capacity and full-load average variable cost.
 
 **Consumer:**
 ```
@@ -348,7 +351,7 @@ These templates are implemented in the `build_*_agent.jl` files as follows:
 | Constraint | Equation | Scope | Rationale |
 |---|---|---|---|
 | VRES capacity | `g ≤ AF × Capacity` | Per (h,d,y) | Generation limited by resource availability |
-| Conventional capacity | `g ≤ Capacity` | Per (h,d,y) | Generation limited by installed capacity |
+| Conventional staging | `g = Σ_s g_s`, `0 ≤ g_s ≤ cap_s` | Per (h,d,y) | Piecewise thermal stack with increasing stage costs and fixed total capacity |
 | Consumer load | `d ≤ PeakLoad × load_profile` | Per (h,d,y) | Maximum consumption bound |
 | H₂ conversion | `h2_out = η × e_in` | Per (h,d,y) | Stoichiometric mass/energy balance |
 | H₂ GC physical limit | `gc_h2 ≤ h2_out` | Per (h,d,y) | Cannot certify more than produced |
@@ -829,17 +832,23 @@ The solution is a **two-step dual recovery** procedure:
 
 1. **Step 1 — QCP solve**: Solve the full QCP to obtain optimal primal values (quantities, capacities, CVaR variables). Accept both `OPTIMAL` and `LOCALLY_SOLVED` (for convex QCPs, local = global optimum).
 
-2. **Step 2 — Convert QCP → LP**: Fix the demand variables (`d_E`, `d_GC_E`, `d_EP`) at their QCP-optimal values. Delete the quadratic epigraph constraints and re-add them as linear constraints (with demand welfare evaluated as a constant). This converts the model to a pure LP.
+2. **Step 2 — Convert QCP → LP**: Fix all variables that appear quadratically in social welfare at their QCP-optimal values:
+   - demand variables (`d_E`, `d_GC_E`, `d_EP`) from elastic utility terms, and
+   - conventional stage dispatch variables (`q_stage`) from the 3-stage generator cost terms.
+   Then delete the quadratic epigraph constraints and re-add linear versions (with those quadratic welfare components evaluated as constants). This converts the model to a pure LP.
 
 3. **Step 3 — LP solve**: Re-solve the LP. Gurobi provides full dual variables for LPs solved to `OPTIMAL`.
 
 4. **Step 4 — Save results**: Extract duals (prices) and variable values.
 
-5. **Step 5 — Cleanup**: Unfix demand variables, delete linear epigraph constraints, restore original quadratic epigraph constraints (model back to QCP form for potential re-use).
+5. **Step 5 — Cleanup**: Unfix demand + conventional stage variables, delete linear epigraph constraints, restore original quadratic epigraph constraints (model back to QCP form for potential re-use).
 
-This approach is **exact**: the LP has the same feasible allocation as the QCP (demand fixed at optimal values), so the duals represent the correct marginal prices at the risk-averse optimal allocation.
+This approach is **exact**: the LP has the same feasible allocation as the QCP (all quadratic-welfare variables fixed at optimal values), so the duals represent the correct marginal prices at the risk-averse optimal allocation.
 
-**Why fixing demand variables works**: The only quadratic constraints are the epigraph constraints `sw_aux[y] ≤ social_welfare[y]`, where `social_welfare[y]` contains `−B/2 × d²` terms from elastic demand agents. Fixing `d` makes `d²` a constant, so the constraints become linear. The replacement constraints use numerically evaluated demand welfare (constant) plus the still-variable supply-side welfare (linear), producing purely linear constraints.
+**Why fixing quadratic-welfare variables works**: The only quadratic constraints are the epigraph constraints `sw_aux[y] ≤ social_welfare[y]`, where `social_welfare[y]` contains:
+- `−B/2 × d²` terms from elastic demand agents, and
+- `−0.5 × slope_s × q_stage[s]^2` terms from conventional stage costs.
+Fixing these variables makes all squared terms constants, so the epigraph constraints become linear. The replacement constraints use numerically evaluated quadratic welfare constants plus still-variable linear welfare terms, producing a pure LP for dual extraction.
 
 ### 6.3 Code Architecture
 
@@ -854,7 +863,7 @@ All problem definition lives in `Source/build_*.jl` files. Each file contains:
 
 The social planner applies **one single CVaR** to the aggregate social welfare (not per-agent CVaR). This ensures risk aversion considers all welfare components (consumer utility, production costs, investment costs) holistically.
 
-**Problem**: `social_welfare[y]` includes quadratic consumer utility terms (`A·d − B/2·d²`). Putting `−social_welfare[y]` inside the CVaR shortfall constraint would create a quadratic constraint (QC), turning the model into a QCP. Gurobi cannot provide duals for QCPs.
+**Problem**: `social_welfare[y]` includes quadratic terms from both elastic demand utility (`A·d − B/2·d²`) and conventional stage costs (`base_s·q_s + 0.5·slope_s·q_s²`). Putting `−social_welfare[y]` inside the CVaR shortfall constraint would create a quadratic constraint (QC), turning the model into a QCP. Gurobi cannot provide duals for QCPs.
 
 **Solution — epigraph reformulation**: Introduce auxiliary variables `sw_aux[y]` with epigraph constraints:
 
@@ -965,7 +974,7 @@ PPA and HPA both clear energy at their λ prices and enforce scalar capacity con
 See `Data/data.yaml` for the full annotated configuration. Key parameters:
 
 - **VRES**: `Capacity`, `Profile_Column`, `MarginalCost`
-- **Conventional**: `Capacity`, `MarginalCost`
+- **Conventional**: `Capacity`, `MarginalCost` (reference full-load average), `StageCapacityShares`, `StageBaseCostMultipliers`, `StageSlopeMultipliers`
 - **Consumer**: `PeakLoad`, `Load_Column`, `A_E`, `B_E` (quadratic utility)
 - **Electrolyzer**: `Capacity_Electrolyzer`, `Capacity_H2_Output`, `SpecificConsumption`, `OperationalCost`
 - **Green offtaker**: `Capacity_H2_In`, `Capacity_EP_Out`, `Alpha`, `ProcessingCost`
@@ -1090,14 +1099,14 @@ Now/
 |---|---|
 | `market_exposure.jl` | Entry point for distributed ADMM. Sections 1–13: env, packages, dirs, source loading, data loading, results folder, agent init, market params, agent params, build models, run ADMM, save results. |
 | `market_exposure_contracts.jl` | Entry point for ADMM with bilateral PPA + HPA contracts. Same structure as market_exposure but uses contract-specific modules: define_contract_parameters, define_contract_market_parameters, define_results_contracts, build_power_agent_contracts, build_H2_agent_contracts, build_offtaker_agent_contracts, ADMM_contracts, save_results_contracts. Outputs to `market_exposure_contracts_results/`. |
-| `social_planner.jl` | Entry point for centralised benchmark. Sections 1–12: same structure as market_exposure but builds a single planner model instead of per-agent models + ADMM loop. Section 11 implements the two-step QCP dual recovery (QCP solve → fix demand vars + replace QC → LP solve → extract duals). |
+| `social_planner.jl` | Entry point for centralised benchmark. Sections 1–12: same structure as market_exposure but builds a single planner model instead of per-agent models + ADMM loop. Section 11 implements the two-step QCP dual recovery (QCP solve → fix all quadratic-welfare vars, including demand and conventional stage dispatch, + replace QC → LP solve → extract duals). |
 
 ### 10.2 Parameter Definition Files
 
 | File | Role |
 |---|---|
 | `define_common_parameters.jl` | Creates `mod.ext` dictionaries (sets, parameters, timeseries, variables, constraints, expressions). Fills JH/JD/JY, W, P, γ, β. Determines market participation from agent type. Pre-allocates ADMM placeholder arrays. |
-| `define_power_parameters.jl` | VRES: capacity, AF profile. Conventional: capacity, constant AF=1. Consumer: PeakLoad, LOAD_E profile, A_E, B_E. |
+| `define_power_parameters.jl` | VRES: capacity, AF profile. Conventional: capacity, AF=1, 3-stage calibrated cost curve (`ConvStageCap`, `ConvStageBaseCost`, `ConvStageSlope`) built from stage-share/multiplier inputs while preserving full-load average cost. Consumer: PeakLoad, LOAD_E profile, A_E, B_E. |
 | `define_H2_parameters.jl` | Electrolyzer: Capacity_Electrolyzer, Capacity_H2_Output, SpecificConsumption, OperationalCost, η_elec_H2. |
 | `define_offtaker_parameters.jl` | Copies all keys from agent block; sets gamma_GC = 0.42 (regulatory mandate). |
 | `define_elec_GC_demand_parameters.jl` | PeakLoad, Load_Column, A_GC, B_GC, LOAD_GC timeseries. |
@@ -1109,7 +1118,7 @@ Now/
 
 | File | ADMM Function | Planner Function |
 |---|---|---|
-| `build_power_agent.jl` | `build_power_agent!()` — power agents (VRES with capacity & CVaR, conventional, consumer) | `add_power_agent_to_planner!()` — same constraints, returns `Dict{Int, Any}` of per-year welfare (no per-agent CVaR) |
+| `build_power_agent.jl` | `build_power_agent!()` — power agents (VRES with capacity & CVaR, conventional with stage dispatch variables and convex stage costs, consumer) | `add_power_agent_to_planner!()` — same constraints; planner stores conventional `q_stage` variables for dual recovery and returns `Dict{Int, Any}` of per-year welfare (no per-agent CVaR) |
 | `build_H2_agent.jl` | `build_H2_agent!()` — electrolyzer with 4-market ADMM terms, endogenous capacity & CVaR | `add_H2_agent_to_planner!()` — same constraints, returns per-year welfare = −op_cost − fixed CAPEX (no per-agent CVaR) |
 | `build_offtaker_agent.jl` | `build_offtaker_agent!()` — green/grey/importer (green with EP capacity & CVaR) | `add_offtaker_agent_to_planner!()` — same constraints, returns per-year welfare = −processing/import cost − fixed CAPEX (no per-agent CVaR) |
 | `build_elec_GC_demand_agent.jl` | `build_elec_GC_demand_agent!()` — GC demand with ADMM | `add_elec_GC_demand_agent_to_planner!()` — returns per-year utility expression |
@@ -1123,7 +1132,7 @@ Now/
 
 | File | Role |
 |---|---|
-| `solve_power_agent.jl` | Rebuilds objective with current λ, ḡ, ρ. For VRES: recomputes loss expressions with current λ, deletes and re-adds CVaR shortfall/linking constraints. Calls `optimize!`. |
+| `solve_power_agent.jl` | Rebuilds objective with current λ, ḡ, ρ. For VRES: recomputes loss expressions with current λ, deletes and re-adds CVaR shortfall/linking constraints. For conventional: applies the calibrated 3-stage convex variable cost (with fallback to linear MC if stage inputs are absent). Calls `optimize!`. |
 | `solve_H2_agent.jl` | Rebuilds objective with current λ, ḡ, ρ. Recomputes loss expressions with current λ (4-market), deletes and re-adds CVaR shortfall/linking constraints. Calls `optimize!`. |
 | `solve_offtaker_agent.jl` | Rebuilds objective for green/grey/importer. For GreenOfftaker: recomputes loss expressions with current λ, deletes and re-adds CVaR shortfall/linking constraints. Calls `optimize!`. |
 | `solve_elec_GC_demand_agent.jl` | Rebuilds utility − expenditure + ADMM penalty; calls `optimize!`. |

@@ -59,13 +59,14 @@ Both the ADMM and social planner use the **same problem definition** from the `S
 
 - **Five coupled base markets**: Electricity, Electricity Guarantees of Origin (GC), Hydrogen, Hydrogen GC, End Product (plus optional **PPA + HPA bilateral pools** in `market_exposure_contracts.jl`)
 - **Seven agent types**: VRES generator, conventional generator, elastic consumer, electrolyzer, green offtaker, grey offtaker, EP importer
+- **More realistic conventional fleet proxy**: Conventional generation uses a calibrated 3-stage increasing marginal-cost curve (technology-stack style) while preserving original total capacity and full-load average variable cost.
 - **Endogenous capacity investment**: VRES, electrolyzer, and green offtaker decide yearly capacity and investment (MW), with fixed annualised CAPEX proportional to installed capacity.
 - **Optional risk aversion (CVaR)**: Those three "green" agents can include a CVaR risk term in their objectives via per-agent `gamma` (risk weight) and `beta` (confidence level); `gamma = 1.0` is risk-neutral and `gamma < 1.0` activates risk aversion.
 - **Distributed ADMM**: Per-agent QP subproblems coordinated by iterative price updates
 - **Three-stage adaptive penalty (Boyd rule)**: Market-specific ρ adaptation with (1) normal rp/rd balancing, (2) a gentle push far from tolerance, and (3) a fixed-ρ stability zone near convergence.
 - **Advanced ADMM controller**: Scale-aware dual-step damping, per-market step-scale adaptation, and best-iterate checkpoint/restart logic for anti-stall robustness in multi-scenario runs.
   - Implemented consistently in both `market_exposure.jl` and `market_exposure_contracts.jl`; contracts adds only PPA/HPA-specific states and updates.
-- **Centralised benchmark**: Social planner with dual-variable price recovery and the same physical/investment structure as ADMM
+- **Centralised benchmark**: Social planner with dual-variable price recovery and the same physical/investment structure as ADMM (dual recovery fixes all quadratic-welfare variables before LP re-solve, including conventional stage-dispatch variables)
 - **Green certificate mandate**: 42% H₂ GC requirement for offtakers (configurable)
 - **Representative days**: Temporal reduction from 8760 hours to a small set of representative days with weights
 - **Quadratic demand**: Elastic electricity and GC demand with inverse-demand parameterisation
@@ -287,6 +288,26 @@ Both pools clear energy (3D) with a market price (`λ_ppa`, `λ_hpa`) and enforc
 - `General.nYears` is used by `social_planner.jl` (typically 1 base year).
 - `ADMM.nScenarioYears` controls multi-scenario horizon for `market_exposure.jl` and `market_exposure_contracts.jl`.
 - Risk aversion effects (`gamma < 1`) are meaningful only with multiple scenarios.
+
+### Conventional Generator Staging
+
+The conventional unit can be configured as a 3-stage increasing-cost stack in `data.yaml`:
+
+```yaml
+Power:
+  Gen_Conv_01:
+    Type: Conventional
+    Capacity: 100.0
+    MarginalCost: 40.0              # reference average variable cost at full dispatch
+    StageCapacityShares: [0.5, 0.3, 0.2]
+    StageBaseCostMultipliers: [0.8, 1.0, 1.3]
+    StageSlopeMultipliers: [0.4, 0.8, 1.2]
+```
+
+Internally, the model calibrates stage base/slope coefficients so that:
+- stage costs are increasing with dispatch and across stages,
+- total capacity remains unchanged, and
+- average variable cost at full output matches `MarginalCost`.
 
 ### Changing Tolerances
 
