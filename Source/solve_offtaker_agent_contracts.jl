@@ -74,9 +74,14 @@ function solve_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
     end
     mod.ext[:expressions][:loss_GreenOfftaker] = loss_G
 
-    cap_bar = get(mod.ext[:parameters], :cap_bar, zeros(length(JY)))
-    ρ_cap = get(mod.ext[:parameters], :ρ_cap, 0.1)
-    cap_pen = haskey(mod.ext[:parameters], :cap_bar) ? sum(ρ_cap/2 * (cap_EP_y[jy] - cap_bar[jy])^2 for jy in JY) : 0.0
+    # Capacity ADMM equality split (per-agent): same augmented Lagrangian
+    # form as the non-contracts solver. See DOCUMENTATION.md §5.4.
+    z_cap   = get(mod.ext[:parameters], :z_cap, zeros(length(JY)))
+    λ_cap   = get(mod.ext[:parameters], :λ_cap, zeros(length(JY)))
+    ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
+    cap_pen = haskey(mod.ext[:parameters], :z_cap) ?
+        sum(λ_cap[jy] * (cap_EP_y[jy] - z_cap[jy]) +
+            ρ_cap/2 * (cap_EP_y[jy] - z_cap[jy])^2 for jy in JY) : 0.0
     obj_hpa = sum(
         sum(ρ_hpa[v]/2 * W[jd, jy] * ((-h2_hpa_from[v][jh, jd, jy]) - g_bar_hpa[v][jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + (ρ_hpa_cap[v]/2) * ((-hpa_cap[v]) - g_bar_hpa_cap[v])^2

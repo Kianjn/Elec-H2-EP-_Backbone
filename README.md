@@ -59,11 +59,12 @@ Both the ADMM and social planner use the **same problem definition** from the `S
 
 - **Five coupled base markets**: Electricity, Electricity Guarantees of Origin (GC), Hydrogen, Hydrogen GC, End Product (plus optional **PPA + HPA bilateral pools** in `market_exposure_contracts.jl`)
 - **Seven agent types**: VRES generator, conventional generator, elastic consumer, electrolyzer, green offtaker, grey offtaker, EP importer
-- **More realistic conventional fleet proxy**: Conventional generation uses a calibrated 3-stage increasing marginal-cost curve (technology-stack style) while preserving original total capacity and full-load average variable cost.
+- **More realistic conventional fleet proxy**: Conventional generation uses a 3-stage increasing marginal-cost curve (coal-like, biomass-like, NG-like), with configurable stage shares and technology-specific stage base costs plus a final high-load marginal cost.
 - **Endogenous capacity investment**: VRES, electrolyzer, and green offtaker decide yearly capacity and investment (MW), with fixed annualised CAPEX proportional to installed capacity.
+- **Per-agent capacity ADMM equality split**: Capacity consensus is enforced via a textbook per-agent split `x_cap = z_cap` with explicit dual `λ_cap` and per-agent penalty `ρ_cap`. This restores the missing first-order force that drives `x → z` exactly in the limit and removes the persistent capacity-residual issue of pure-quadratic penalty designs. See `DOCUMENTATION.md` §5.4 for the formal model and justification.
 - **Optional risk aversion (CVaR)**: Those three "green" agents can include a CVaR risk term in their objectives via per-agent `gamma` (risk weight) and `beta` (confidence level); `gamma = 1.0` is risk-neutral and `gamma < 1.0` activates risk aversion.
 - **Distributed ADMM**: Per-agent QP subproblems coordinated by iterative price updates
-- **Three-stage adaptive penalty (Boyd rule)**: Market-specific ρ adaptation with (1) normal rp/rd balancing, (2) a gentle push far from tolerance, and (3) a fixed-ρ stability zone near convergence.
+- **Three-stage adaptive penalty (Boyd rule)**: Market-specific ρ adaptation with (1) normal rp/rd balancing, (2) a gentle push far from tolerance, and (3) a fixed-ρ stability zone near convergence. The same three regimes are applied PER AGENT to the capacity penalties `ρ_cap[m]`, so each capacity-owning agent has an independent controller.
 - **Advanced ADMM controller**: Scale-aware dual-step damping, per-market step-scale adaptation, and best-iterate checkpoint/restart logic for anti-stall robustness in multi-scenario runs.
   - Implemented consistently in both `market_exposure.jl` and `market_exposure_contracts.jl`; contracts adds only PPA/HPA-specific states and updates.
 - **Centralised benchmark**: Social planner with dual-variable price recovery and the same physical/investment structure as ADMM (dual recovery fixes all quadratic-welfare variables before LP re-solve, including conventional stage-dispatch variables)
@@ -250,7 +251,7 @@ All configuration is in **`Data/data.yaml`**. The file is fully annotated with i
 General:
   nTimesteps: 24      # Hours per representative day
   nReprDays: 3        # Number of representative days
-  nYears: 1           # Number of years for social_planner.jl (base scenario only)
+  nYears: 1           # Fallback year count if ADMM.nScenarioYears is not set
   base_year: 2021     # Calendar year for timeseries
 
 ADMM:
@@ -285,8 +286,8 @@ Both pools clear energy (3D) with a market price (`λ_ppa`, `λ_hpa`) and enforc
 
 ### Scenarios and Risk Aversion
 
-- `General.nYears` is used by `social_planner.jl` (typically 1 base year).
-- `ADMM.nScenarioYears` controls multi-scenario horizon for `market_exposure.jl` and `market_exposure_contracts.jl`.
+- `ADMM.nScenarioYears` controls the active scenario horizon for both ADMM entry points and the social planner benchmark (for aligned comparisons).
+- `General.nYears` acts as fallback if `ADMM.nScenarioYears` is not provided.
 - Risk aversion effects (`gamma < 1`) are meaningful only with multiple scenarios.
 
 ### Conventional Generator Staging
@@ -298,16 +299,21 @@ Power:
   Gen_Conv_01:
     Type: Conventional
     Capacity: 100.0
-    MarginalCost: 40.0              # reference average variable cost at full dispatch
-    StageCapacityShares: [0.5, 0.3, 0.2]
-    StageBaseCostMultipliers: [0.8, 1.0, 1.3]
-    StageSlopeMultipliers: [0.4, 0.8, 1.2]
+    StageCapacityShares: [0.333333, 0.333333, 0.333333]
+    StageBaseCosts: [35.0, 55.0, 85.0]   # €/MWh: coal, biomass, NG start MC
+    FinalMarginalCost: 140.0              # €/MWh: MC at end of stage 3
 ```
 
-Internally, the model calibrates stage base/slope coefficients so that:
+Internally, the model normalizes capacity shares and constructs stage capacities from total `Capacity`, while:
 - stage costs are increasing with dispatch and across stages,
+- stage transitions are continuous (`end MC of stage s = start MC of stage s+1`),
 - total capacity remains unchanged, and
-- average variable cost at full output matches `MarginalCost`.
+- changing `StageCapacityShares` changes the aggregate average variable cost of the conventional fleet.
+
+Why these defaults are realistic:
+- `StageBaseCosts = [35, 55, 85]` EUR/MWh approximates a thermal merit order from lower-variable-cost baseload-like blocks to higher-variable-cost flexible gas blocks.
+- `FinalMarginalCost = 140` EUR/MWh represents the high-load tail where less efficient/flexible thermal output sets the margin.
+- Continuity across stage boundaries avoids artificial jumps in short-run dispatch costs while keeping the technology-stack interpretation.
 
 ### Changing Tolerances
 
@@ -362,8 +368,8 @@ julia --project=. social_planner.jl
 
 This will:
 1. Load the same configuration and timeseries.
-2. Build a single centralised QP model.
-3. Solve it (usually < 1 second).
+2. Build a single centralised social-planner model (epigraph + social CVaR structure).
+3. Solve it and run the two-step dual recovery (QCP solve, then LP re-solve for prices).
 4. Write results to `social_planner_results/`.
 
 ### Comparing Results
@@ -378,8 +384,9 @@ After running both scripts, compare `market_exposure_results/Agent_Quantities_Fi
 
 | File | Description |
 |---|---|
-| `ADMM_Convergence.csv` | Primal and dual residuals per iteration for all 5 markets |
-| `ADMM_Diagnostics.csv` | ρ, mean price, mean imbalance per iteration for all markets |
+| `ADMM_Convergence.csv` | Primal and dual residuals per iteration for all 5 markets; includes aggregate `cap_primal` / `cap_dual` (L2 norm over agents) **and** per-agent columns `cap_primal_<m>` / `cap_dual_<m>` from the equality-split capacity ADMM |
+| `ADMM_Diagnostics.csv` | ρ, mean price, mean imbalance per iteration for all markets; the legacy `cap_rho` column is replaced by per-agent `cap_rho_<m>` columns (one per cap-owning agent) |
+| `Capacity_Consensus.csv` | (new) Per-iteration, per-agent, per-year snapshot of the capacity equality split: `iter, AgentID, jy, x_cap, z_cap, lambda_cap, rho_cap, primal_local, dual_local`. Diagnostic file for the per-agent ADMM split — use this to identify the agent / year that gates capacity convergence. See `DOCUMENTATION.md` §5.4 and §11. |
 | `Electricity_Market_History.csv` | Per-iteration history for the electricity market |
 | `Hydrogen_Market_History.csv` | Per-iteration history for the hydrogen market |
 | `Electricity_GC_Market_History.csv` | Per-iteration history for the elec-GC market |
@@ -394,7 +401,7 @@ After running both scripts, compare `market_exposure_results/Agent_Quantities_Fi
 
 ### Market Exposure with Contracts (`market_exposure_contracts_results/`)
 
-`market_exposure_contracts.jl` produces the **same major ADMM outputs** as `market_exposure.jl` (ADMM_Convergence, ADMM_Diagnostics, 5× Market_History, Agent_Summary, Market_Prices), with additional PPA/HPA columns for convergence and diagnostics. It adds focal contract outputs:
+`market_exposure_contracts.jl` produces the **same major ADMM outputs** as `market_exposure.jl` (ADMM_Convergence, ADMM_Diagnostics, Capacity_Consensus, 5× Market_History, Agent_Summary, Market_Prices), with additional PPA/HPA columns for convergence and diagnostics. The capacity columns and `Capacity_Consensus.csv` from the per-agent equality split (§5.4) are mirrored here. It adds focal contract outputs:
 
 | File | Description |
 |---|---|

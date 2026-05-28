@@ -90,10 +90,18 @@ function solve_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
         #     With nYears=1, CVaR = loss_total, so objective = loss_total = risk-neutral.
         # (3) ADMM augmented-Lagrangian penalty for the electricity market.
         # (4) ADMM augmented-Lagrangian penalty for the elec-GC market.
-        # (5) Investment consensus: penalty on cap toward capacity needed for g_bar.
-        cap_bar = get(mod.ext[:parameters], :cap_bar, zeros(length(JY)))
+        # (5) Capacity ADMM equality split: enforces x_cap = z_cap via the
+        #     full augmented Lagrangian (dual λ_cap + quadratic ρ_cap/2).
+        #     The linear λ_cap term is what makes this a true ADMM split
+        #     (rather than a soft penalty): with only the quadratic term,
+        #     once ρ_cap saturates the CAPEX gradient leaves a persistent
+        #     residual x − z ≠ 0. See DOCUMENTATION.md §5.4.
+        z_cap   = get(mod.ext[:parameters], :z_cap,  zeros(length(JY)))
+        λ_cap   = get(mod.ext[:parameters], :λ_cap,  zeros(length(JY)))
         ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
-        cap_pen = haskey(mod.ext[:parameters], :cap_bar) ? sum(ρ_cap/2 * (cap_VRES[jy] - cap_bar[jy])^2 for jy in JY) : 0.0
+        cap_pen = haskey(mod.ext[:parameters], :z_cap) ?
+            sum(λ_cap[jy] * (cap_VRES[jy] - z_cap[jy]) +
+                ρ_cap/2 * (cap_VRES[jy] - z_cap[jy])^2 for jy in JY) : 0.0
         mod.ext[:objective] = @objective(mod, Min,
             gamma * sum(loss_total[jy] for jy in JY)
             + (1 - gamma) * cvar_VRES

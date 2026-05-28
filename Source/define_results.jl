@@ -182,9 +182,16 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     results["Cap_EP_Green"]    = Dict(m => [] for m in agents[:all])   # Green offtaker EP capacity per year (MW)
     results["Inv_EP_Green"]    = Dict(m => [] for m in agents[:all])   # Green offtaker EP investment per year (MW)
 
-    # ADMM["ρ"] — Per-market list of scalar penalty weights, one entry per ADMM
-    # iteration. Updated by update_rho! (which may increase/decrease ρ based on
-    # the ratio of primal to dual residuals). The first element = rho_initial.
+    # ADMM["ρ"] — Per-MARKET list of scalar penalty weights, one entry per
+    # ADMM iteration. Updated by update_rho! (which may increase/decrease ρ
+    # based on the ratio of primal to dual residuals). The first element =
+    # rho_initial.
+    #
+    # NOTE: The capacity penalty `ρ_cap` is NO LONGER stored here. After the
+    # capacity-ADMM refactor, capacity uses a per-agent equality split
+    # (x_cap_m = z_cap_m) with its own per-agent state in ADMM["Capacity"]
+    # below. See DOCUMENTATION.md §5.4 for the formal derivation and
+    # justification.
     rho_cap_init = get(admm_data, "rho_cap_initial", 0.1)
     ADMM["ρ"] = Dict(
         "elec"    => [elec_market["rho_initial"]],
@@ -192,7 +199,6 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
         "elec_GC" => [elec_GC_market["rho_initial"]],
         "H2_GC"   => [H2_GC_market["rho_initial"]],
         "EP"      => [EP_market["rho_initial"]],
-        "cap"     => [rho_cap_init],
     )
 
     # Full 3D imbalance tensor per iteration: sum of all agents' net positions in
@@ -240,42 +246,102 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     # Best (smallest) primal/dual residual seen so far per market; used by
     # update_rho! to implement hysteresis and freeze ρ once the algorithm has
     # entered a near-solution region.
+    # Capacity best-residuals are per-agent and live in ADMM["Capacity"].
     ADMM["BestResidual"] = Dict(
-        "Primal" => Dict("elec" => Inf, "H2" => Inf, "elec_GC" => Inf, "H2_GC" => Inf, "EP" => Inf, "cap" => Inf),
-        "Dual"   => Dict("elec" => Inf, "H2" => Inf, "elec_GC" => Inf, "H2_GC" => Inf, "EP" => Inf, "cap" => Inf),
+        "Primal" => Dict("elec" => Inf, "H2" => Inf, "elec_GC" => Inf, "H2_GC" => Inf, "EP" => Inf),
+        "Dual"   => Dict("elec" => Inf, "H2" => Inf, "elec_GC" => Inf, "H2_GC" => Inf, "EP" => Inf),
     )
 
-    # Per-market flag indicating that ρ has been frozen permanently; once set
+    # Per-MARKET flag indicating that ρ has been frozen permanently; once set
     # to true, update_rho! stops adapting ρ for that market and ADMM behaves
     # like fixed-ρ ADMM in the local neighbourhood of the solution.
+    # Capacity freeze flags live per-agent in ADMM["Capacity"]["ρ_frozen"].
     ADMM["ρ_frozen"] = Dict(
         "elec" => false,
         "H2" => false,
         "elec_GC" => false,
         "H2_GC" => false,
         "EP" => false,
-        "cap" => false,
     )
 
     # Short history of residual metrics R = rp + rd per market; update_rho!
     # uses this to decide whether increasing ρ has been beneficial over the
     # recent window, and skips harmful increases that would worsen residuals.
+    # Capacity R-histories live per-agent in ADMM["Capacity"]["R_hist"].
     ADMM["R_hist"] = Dict(
         "elec"    => Float64[],
         "H2"      => Float64[],
         "elec_GC" => Float64[],
         "H2_GC"   => Float64[],
         "EP"      => Float64[],
-        "cap"     => Float64[],
     )
 
     # ResidualScale: reference magnitude for primal and dual residuals used in
     # the Boyd-style absolute + relative stopping criteria. These are set from
     # the first non-zero residual observed per market and kept fixed for the
-    # rest of the run.
+    # rest of the run. The "cap" entries here are AGGREGATE scales used for
+    # the one-line convergence summary; per-agent scales live inside
+    # ADMM["Capacity"].
     ADMM["ResidualScale"] = Dict(
         "Primal" => Dict("elec" => 0.0, "H2" => 0.0, "elec_GC" => 0.0, "H2_GC" => 0.0, "EP" => 0.0, "cap" => 0.0),
         "Dual"   => Dict("elec" => 0.0, "H2" => 0.0, "elec_GC" => 0.0, "H2_GC" => 0.0, "EP" => 0.0, "cap" => 0.0),
+    )
+
+    # --------------------------------------------------------------------
+    # ADMM["Capacity"] — Per-agent capacity consensus state (equality split)
+    #
+    # Capacity consensus is solved as a proper ADMM equality split per
+    # capacity-owning agent m and year y:
+    #
+    #     x_{m,y} = cap variable in agent m's model (cap_VRES, cap_H2_y, cap_EP_y)
+    #     z_{m,y} = capacity target derived from flow consensus
+    #     λ_{m,y} = Lagrange multiplier for x_{m,y} = z_{m,y}
+    #     ρ_m    = per-agent penalty (each agent has its own controller)
+    #
+    # Agent objective adds:
+    #     Σ_y [ λ_{m,y}·(x_{m,y} - z_{m,y}) + (ρ_m/2)·(x_{m,y} - z_{m,y})² ].
+    #
+    # Per-agent residuals (Boyd):
+    #     r_m^k = ||x_m^k - z_m^k||_2
+    #     s_m^k = ||ρ_m·(z_m^k - z_m^{k-1})||_2
+    #
+    # WHY per-agent: a single global ρ_cap was the previous bottleneck — one
+    # stiff agent type (e.g. electrolyzer) would push the global controller
+    # into a regime that destabilised the others. Per-agent ρ_m lets each
+    # capacity type adapt independently, which is structurally closer to the
+    # ADMM theory.
+    #
+    # WHY include λ_cap (vs. a pure quadratic penalty): without the linear
+    # dual term, ADMM has no exact mechanism to drive x → z; only the
+    # quadratic penalty pushes them together. Once ρ_cap saturates, CAPEX
+    # dominates and x ≠ z is the local optimum. The dual ascent
+    # λ ← λ + ρ·(x - z) restores the missing first-order mechanism.
+    # See DOCUMENTATION.md §5.4 for the formal argument and units check.
+    # --------------------------------------------------------------------
+    cap_agents = get(agents, :cap_agents, String[])
+    ADMM["Capacity"] = Dict{String, Any}(
+        # Ordered list of cap-owning agents (preserves CSV column order)
+        "agents" => copy(cap_agents),
+        # Per-agent penalty ρ_m history (one push per iteration; first entry = rho_cap_initial)
+        "ρ" => Dict{String, Vector{Float64}}(m => [rho_cap_init] for m in cap_agents),
+        # Per-agent dual λ_m history; each entry is a length-nYears vector
+        "λ" => Dict{String, Vector{Vector{Float64}}}(m => [zeros(n_yr)] for m in cap_agents),
+        # Per-agent auxiliary z_m history; filled by ADMM_subroutine each iter
+        "z" => Dict{String, Vector{Vector{Float64}}}(m => Vector{Float64}[] for m in cap_agents),
+        # Per-agent residuals (one scalar per iteration). Primal = ||x_m-z_m||,
+        # Dual = ||ρ_m·(z_m^k - z_m^{k-1})||. Initial dual is Inf on iter 1.
+        "Primal" => Dict{String, Vector{Float64}}(m => Float64[] for m in cap_agents),
+        "Dual"   => Dict{String, Vector{Float64}}(m => Float64[] for m in cap_agents),
+        # Hysteresis anchors for the per-agent ρ controller
+        "BestPrimal" => Dict{String, Float64}(m => Inf for m in cap_agents),
+        "BestDual"   => Dict{String, Float64}(m => Inf for m in cap_agents),
+        # Recent residual-sum window used by the controller's monotonicity guards
+        "R_hist" => Dict{String, Vector{Float64}}(m => Float64[] for m in cap_agents),
+        # Per-agent freeze flag: once close to convergence ρ_m is locked
+        "ρ_frozen" => Dict{String, Bool}(m => false for m in cap_agents),
+        # Per-agent residual scales (initialised from first non-zero observation)
+        "ResidualScale_Primal" => Dict{String, Float64}(m => 0.0 for m in cap_agents),
+        "ResidualScale_Dual"   => Dict{String, Float64}(m => 0.0 for m in cap_agents),
     )
 
     # Absolute and relative tolerances for the ADMM stopping rule:
@@ -294,6 +360,8 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
 
     # Legacy per-market convergence tolerances (kept for diagnostics; the
     # actual stopping rule uses EpsilonAbs/EpsilonRel and ResidualScale).
+    # Capacity tolerance is now computed per agent inside ADMM.jl and not
+    # stored here; the per-agent stopping rule replaces the single "cap" entry.
     base_tol = get(admm_data, "epsilon", 1.0)
     ADMM["Tolerance"] = Dict(
         "elec"    => base_tol,
@@ -301,7 +369,6 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
         "EP"      => base_tol,
         "H2"      => base_tol,
         "H2_GC"   => base_tol,
-        "cap"     => base_tol,
     )
     ADMM["n_iter"]   = 0     # Iteration counter; incremented each ADMM loop
     ADMM["walltime"] = 0.0   # Cumulative wall-clock time (seconds); measured in ADMM.jl

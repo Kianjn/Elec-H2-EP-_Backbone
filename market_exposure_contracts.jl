@@ -237,7 +237,7 @@ for m in agents[:elec_GC_demand]
 end
 
 # Agents with endogenous capacity (VRES, H2 producer, GreenOfftaker) for investment consensus.
-agents[:cap_agents] = [m for m in agents[:all] if haskey(mdict[m].ext[:parameters], :cap_bar)]
+agents[:cap_agents] = [m for m in agents[:all] if haskey(mdict[m].ext[:parameters], :z_cap)]
 
 # Set market participant counts
 elec_market["nAgents"]    = length(agents[:elec_market])

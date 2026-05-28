@@ -39,6 +39,10 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     # One row per ADMM iteration with primal and dual residuals for every
     # market. Used to generate convergence plots that show whether the ADMM
     # algorithm is approaching feasibility (primal) and stationarity (dual).
+    # The aggregate `cap_primal` / `cap_dual` columns are the L2 norms over
+    # the per-agent residuals (kept for backwards compatibility with existing
+    # plots/scripts). Per-agent columns `cap_primal_<m>` / `cap_dual_<m>`
+    # are appended so users can spot which agent gates convergence.
     conv_df = DataFrame(
         iter          = 1:n_it,
         elec_primal   = ADMM_state["Residuals"]["Primal"]["elec"],
@@ -54,6 +58,17 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
         cap_primal     = ADMM_state["Residuals"]["Primal"]["cap"],
         cap_dual       = ADMM_state["Residuals"]["Dual"]["cap"],
     )
+    # Per-agent capacity columns
+    cap_state_save = get(ADMM_state, "Capacity", Dict())
+    cap_agents_save = get(cap_state_save, "agents", String[])
+    for m in cap_agents_save
+        rp = get(get(cap_state_save, "Primal", Dict()), m, Float64[])
+        rd = get(get(cap_state_save, "Dual",   Dict()), m, Float64[])
+        rp_aligned = length(rp) >= n_it ? rp[1:n_it] : vcat(rp, fill(NaN, n_it - length(rp)))
+        rd_aligned = length(rd) >= n_it ? rd[1:n_it] : vcat(rd, fill(NaN, n_it - length(rd)))
+        conv_df[!, Symbol("cap_primal_$(m)")] = rp_aligned
+        conv_df[!, Symbol("cap_dual_$(m)")]   = rd_aligned
+    end
     CSV.write(joinpath(results_dir, "ADMM_Convergence.csv"), conv_df)
 
     # ── ADMM_Diagnostics.csv ──────────────────────────────────────────────
@@ -66,6 +81,8 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     # [2:end] so we get "price after iteration i" for i=1..n_it.
     ph(mkt) = ADMM_state["PriceHistory"][mkt]
     ph_slice(mkt) = length(ph(mkt)) == n_it + 1 ? ph(mkt)[2:end] : ph(mkt)
+    # Per-agent ρ_cap columns replace the single legacy `cap_rho` column.
+    # Each capacity-owning agent now has its own controller and ρ_m history.
     diag_df = DataFrame(
         iter             = 1:n_it,
         elec_rho         = ADMM_state["ρ"]["elec"][1:n_it],
@@ -83,9 +100,66 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
         EP_rho             = ADMM_state["ρ"]["EP"][1:n_it],
         EP_price_mean      = ph_slice("EP"),
         EP_imb_mean        = ADMM_state["ImbalanceMean"]["EP"],
-        cap_rho            = ADMM_state["ρ"]["cap"][1:n_it],
     )
+    for m in cap_agents_save
+        ρhist = get(get(cap_state_save, "ρ", Dict()), m, Float64[])
+        ρ_aligned = length(ρhist) >= n_it ? ρhist[1:n_it] :
+                    vcat(ρhist, fill(isempty(ρhist) ? NaN : ρhist[end], n_it - length(ρhist)))
+        diag_df[!, Symbol("cap_rho_$(m)")] = ρ_aligned
+    end
     CSV.write(joinpath(results_dir, "ADMM_Diagnostics.csv"), diag_df)
+
+    # ── Capacity_Consensus.csv ──────────────────────────────────────────
+    # Per-iteration, per-agent, per-year snapshot of the capacity ADMM split.
+    # Columns: iter, AgentID, jy, x_cap, z_cap, lambda_cap, rho_cap,
+    #          primal_local, dual_local.
+    # This is the diagnostic file analogous to *_Market_History.csv but at
+    # the (iter, agent, year) granularity that the equality-split formulation
+    # naturally produces. See DOCUMENTATION.md §11 and §5.4.
+    if !isempty(cap_agents_save)
+        cap_rows = NamedTuple[]
+        for m in cap_agents_save
+            xhist = if !isempty(get(results["Cap_VRES"], m, []))
+                results["Cap_VRES"][m]
+            elseif !isempty(get(results["Cap_Elec_H2"], m, []))
+                results["Cap_Elec_H2"][m]
+            elseif !isempty(get(results["Cap_EP_Green"], m, []))
+                results["Cap_EP_Green"][m]
+            else
+                Vector{Vector{Float64}}()
+            end
+            zhist = get(get(cap_state_save, "z", Dict()), m, Vector{Vector{Float64}}())
+            λhist = get(get(cap_state_save, "λ", Dict()), m, Vector{Vector{Float64}}())
+            ρhist = get(get(cap_state_save, "ρ", Dict()), m, Float64[])
+            rp_hist = get(get(cap_state_save, "Primal", Dict()), m, Float64[])
+            rd_hist = get(get(cap_state_save, "Dual",   Dict()), m, Float64[])
+            nrec = min(length(xhist), length(zhist))
+            for i in 1:nrec
+                xvec = xhist[i]
+                zvec = zhist[i]
+                λvec = i <= length(λhist) ? λhist[i] : zeros(length(xvec))
+                ρ_i  = i <= length(ρhist) ? ρhist[i] : (isempty(ρhist) ? NaN : ρhist[end])
+                rp_i = i <= length(rp_hist) ? rp_hist[i] : NaN
+                rd_i = i <= length(rd_hist) ? rd_hist[i] : NaN
+                for jy in 1:length(xvec)
+                    push!(cap_rows, (
+                        iter         = i,
+                        AgentID      = m,
+                        jy           = jy,
+                        x_cap        = xvec[jy],
+                        z_cap        = zvec[jy],
+                        lambda_cap   = jy <= length(λvec) ? λvec[jy] : 0.0,
+                        rho_cap      = ρ_i,
+                        primal_local = rp_i,
+                        dual_local   = rd_i,
+                    ))
+                end
+            end
+        end
+        if !isempty(cap_rows)
+            CSV.write(joinpath(results_dir, "Capacity_Consensus.csv"), DataFrame(cap_rows))
+        end
+    end
 
     # ── Per-market history CSVs ──────────────────────────────────────────
     # Same convergence + diagnostic data reorganized into one CSV per market
@@ -661,6 +735,32 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     println("  Electricity_GC  mean = ", round(mean(λ_elec_GC), digits=6))
     println("  H2_GC           mean = ", round(mean(λ_H2_GC), digits=6))
     println("  End_Product     mean = ", round(mean(λ_EP), digits=6))
+    if n_yr > 1
+        println("  (base scenario jy=1 means: Elec=", round(mean(λ_elec[:, :, 1]), digits=6),
+                ", H2=", round(mean(λ_H2[:, :, 1]), digits=6),
+                ", Elec_GC=", round(mean(λ_elec_GC[:, :, 1]), digits=6),
+                ", H2_GC=", round(mean(λ_H2_GC[:, :, 1]), digits=6),
+                ", EP=", round(mean(λ_EP[:, :, 1]), digits=6), ")")
+    end
+
+    # ----------------------------------------------------------------------
+    # Capacity consensus summary (per-agent equality split)
+    # Final per-agent r_m, s_m, ρ_m to surface which capacity agent (if any)
+    # gated convergence. See DOCUMENTATION.md §5.4.
+    # ----------------------------------------------------------------------
+    if !isempty(cap_agents_save)
+        println()
+        println("Capacity consensus (per-agent equality split, x_cap = z_cap):")
+        for m in cap_agents_save
+            rp = get(get(cap_state_save, "Primal", Dict()), m, Float64[])
+            rd = get(get(cap_state_save, "Dual",   Dict()), m, Float64[])
+            ρh = get(get(cap_state_save, "ρ",      Dict()), m, Float64[])
+            rp_v = isempty(rp) ? NaN : rp[end]
+            rd_v = isempty(rd) ? NaN : rd[end]
+            ρ_v  = isempty(ρh) ? NaN : ρh[end]
+            @printf("  %-20s  primal = %.3e,  dual = %.3e,  ρ = %.3f\n", m, rp_v, rd_v, ρ_v)
+        end
+    end
 
     # --------------------------------------------------------------------------
     # Comparison with social planner benchmark (if available)
@@ -668,15 +768,34 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     sp_path = joinpath(@__DIR__, "..", "social_planner_results", "Market_Prices.csv")
     if isfile(sp_path)
         sp_df = CSV.read(sp_path, DataFrame)
+        # Compare like-for-like horizon:
+        # - If SP and ADMM have same number of slots, compare all-scenario means.
+        # - If SP has one year while ADMM has multiple years, compare ADMM base scenario jy=1.
+        admm_slots = n_ts * n_rd * n_yr
+        sp_slots = nrow(sp_df)
+        use_base_compare = (sp_slots == n_ts * n_rd) && (n_yr > 1)
+        use_full_compare = (sp_slots == admm_slots)
+
+        admm_cmp_elec = use_base_compare ? mean(λ_elec[:, :, 1]) : mean(λ_elec)
+        admm_cmp_H2 = use_base_compare ? mean(λ_H2[:, :, 1]) : mean(λ_H2)
+        admm_cmp_elec_GC = use_base_compare ? mean(λ_elec_GC[:, :, 1]) : mean(λ_elec_GC)
+        admm_cmp_H2_GC = use_base_compare ? mean(λ_H2_GC[:, :, 1]) : mean(λ_H2_GC)
+        admm_cmp_EP = use_base_compare ? mean(λ_EP[:, :, 1]) : mean(λ_EP)
+
         println()
         println("Comparison with social planner benchmark:")
+        if use_base_compare
+            println("  (ADMM compared on base scenario jy=1; all-scenario means shown above.)")
+        elseif !use_full_compare
+            println("  (Warning: SP/ADMM horizon mismatch in Market_Prices rows; comparing ADMM all-scenario mean.)")
+        end
         println("  Market          | Social planner |   ADMM λ mean")
         println("  " * repeat("-", 52))
-        @printf("  %-14s | %14.6f | %14.6f\n", "Electricity",    mean(sp_df.Elec_Price),    mean(λ_elec))
-        @printf("  %-14s | %14.6f | %14.6f\n", "Hydrogen",       mean(sp_df.H2_Price),      mean(λ_H2))
-        @printf("  %-14s | %14.6f | %14.6f\n", "Electricity_GC", mean(sp_df.Elec_GC_Price), mean(λ_elec_GC))
-        @printf("  %-14s | %14.6f | %14.6f\n", "H2_GC",          mean(sp_df.H2_GC_Price),   mean(λ_H2_GC))
-        @printf("  %-14s | %14.6f | %14.6f\n", "End_Product",    mean(sp_df.EP_Price),      mean(λ_EP))
+        @printf("  %-14s | %14.6f | %14.6f\n", "Electricity",    mean(sp_df.Elec_Price),    admm_cmp_elec)
+        @printf("  %-14s | %14.6f | %14.6f\n", "Hydrogen",       mean(sp_df.H2_Price),      admm_cmp_H2)
+        @printf("  %-14s | %14.6f | %14.6f\n", "Electricity_GC", mean(sp_df.Elec_GC_Price), admm_cmp_elec_GC)
+        @printf("  %-14s | %14.6f | %14.6f\n", "H2_GC",          mean(sp_df.H2_GC_Price),   admm_cmp_H2_GC)
+        @printf("  %-14s | %14.6f | %14.6f\n", "End_Product",    mean(sp_df.EP_Price),      admm_cmp_EP)
     end
 
     return nothing

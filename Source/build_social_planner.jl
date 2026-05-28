@@ -273,76 +273,25 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
     end
 
     # ── Epigraph variables for social welfare ────────────────────────────
-    # social_welfare[jy] contains quadratic consumer utility terms
-    # (−B/2·d² from elastic demand agents). If used directly in the CVaR
-    # shortfall constraint  u ≥ −social_welfare − α,  the +B/2·d² on the
-    # RHS makes it a quadratic constraint (QC), turning the model into a
-    # QCP. Gurobi does not reliably provide dual variables for QCPs.
-    #
-    # Reformulation: introduce epigraph variables sw_aux[jy] constrained
-    # by sw_aux[jy] ≤ social_welfare[jy]. In Gurobi's standard form this
-    # becomes B/2·d² + sw_aux ≤ A·d + … (PSD Q on the ≤ side), which is
-    # the canonical convex QC form. Since the objective maximizes sw_aux,
-    # the epigraph constraint is binding at optimality (sw_aux = welfare),
-    # so the solution is mathematically identical to applying CVaR
-    # directly to social_welfare.
-    #
-    # The CVaR constraints reference sw_aux instead of the quadratic
-    # social_welfare, making them purely LINEAR. The only QC constraints
-    # are the epigraph inequalities in standard convex form.
-    #
-    # DUAL RECOVERY: Gurobi cannot provide duals (Pi) for QCP models.
-    # After solving the QCP for optimal quantities, the caller
-    # (social_planner.jl) fixes the demand variables (d_E, d_GC_E, d_EP)
-    # at their optimal values, converting all QC constraints to linear.
-    # A second optimize! call then solves the resulting LP, for which
-    # Gurobi provides full dual variables. See social_planner.jl §11.
+    # Keep a single planner formulation for all gamma values: CVaR becomes
+    # inactive automatically when gamma = 1 via the objective coefficient.
     sw_aux = @variable(planner, [jy in JY], base_name = "sw_aux")
-
-    # Epigraph constraints: sw_aux[jy] ≤ social_welfare[jy].
-    # These are the ONLY quadratic constraints in the model, and they are
-    # in standard convex form (PSD on the ≤ side).
     @constraint(planner, social_welfare_epigraph[jy in JY],
         sw_aux[jy] <= social_welfare[jy]
     )
 
-    # ── Social CVaR auxiliary variables ──────────────────────────────────
-    # The social loss in year jy is defined as −sw_aux[jy] (≡ −welfare
-    # at optimality). CVaR is applied via the standard linear
-    # reformulation:
-    #   alpha_social = VaR proxy (threshold of the loss distribution)
-    #   u_social[jy] = max(0, social_loss[jy] − alpha_social) — shortfall
-    #   cvar_social  ≥ alpha_social + (1/(1−β)) · Σ P[jy]·u_social[jy]
-    # alpha_social and cvar_social must be FREE (no lower bound). When social
-    # welfare is positive, the social loss = −sw_aux is NEGATIVE. The optimal
-    # VaR α for CVaR of a negative loss is negative. With α ≥ 0, we force
-    # cvar_social ≥ 0, so the objective becomes γ·sw_aux instead of sw_aux when
-    # γ < 1 — breaking SP/ME equivalence for nYears=1. With α free, CVaR = loss
-    # when nYears=1, so objective = sw_aux regardless of γ.
     alpha_social = @variable(planner, base_name = "alpha_social")
     cvar_social  = @variable(planner, base_name = "CVaR_social")
     u_social     = @variable(planner, [jy in JY], lower_bound = 0, base_name = "u_social")
 
-    # Shortfall: u[jy] ≥ −sw_aux[jy] − α (purely LINEAR).
     @constraint(planner, [jy in JY],
         u_social[jy] >= -sw_aux[jy] - alpha_social
     )
-    # CVaR linking: cvar_social ≥ α + (1/(1−β)) · Σ P[jy]·u_social[jy].
     one_minus_beta = max(1e-6, 1.0 - beta_conf)
     @constraint(planner,
         cvar_social >= alpha_social + (1 / one_minus_beta) * sum(P[jy] * u_social[jy] for jy in JY)
     )
 
-    # ── Planner objective ─────────────────────────────────────────────────
-    #   max  γ · Σ_y sw_aux[y]             ← (1) expected social welfare
-    #      − (1−γ) · CVaR_social           ← (2) tail-risk penalty
-    #
-    # (1) sw_aux[jy] = social_welfare[jy] at optimality (epigraph binds
-    #     because we maximize). This keeps the objective LINEAR; the
-    #     quadratic consumer utility terms live only in the epigraph QC.
-    # (2) CVaR of the social loss. When γ=1 (risk-neutral) this term
-    #     vanishes, and the planner maximizes expected welfare — matching
-    #     the ADMM risk-neutral equilibrium by the first welfare theorem.
     @objective(planner, Max,
         gamma * sum(sw_aux[jy] for jy in JY)
         - (1 - gamma) * cvar_social

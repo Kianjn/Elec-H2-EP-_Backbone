@@ -65,7 +65,7 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
             mod.ext[:parameters][:ρ_EP]    = ADMM_state["ρ"]["EP"][end]
         end
 
-        # Contract market (per-VRES energy + capacity) — set BEFORE cap_bar so VRES cap_bar can use g_bar_ppa
+        # Contract market (per-VRES energy + capacity) — set BEFORE z_cap so VRES z_cap can use g_bar_ppa
         if get(mod.ext[:parameters], :in_ppa_market, false)
             ppa_vres = get(ppa_market, "ppa_vres", String[])
             atype = String(get(mod.ext[:parameters], :Type, ""))
@@ -139,13 +139,35 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
             end
         end
 
-        # Investment consensus: cap_bar = capacity needed to support flow consensus (same as base ADMM_subroutine).
-        # For VRES in contracts: total generation = g_EOM + g_ppa, so cap_bar uses g_bar_elec + g_bar_ppa.
-        if haskey(mod.ext[:parameters], :cap_bar)
+        # ----------------------------------------------------------------
+        # Capacity consensus parameter refresh (per-agent ADMM equality split)
+        #
+        # Same per-agent split as in ADMM_subroutine.jl, but z_cap derivation
+        # accounts for both the pool flow consensus AND the contract flow
+        # consensus (since VRES generation in contracts splits between EOM
+        # and PPA pools, and H₂ production splits between H₂ pool and HPA).
+        #
+        # See ADMM_subroutine.jl and DOCUMENTATION.md §5.4 for the formal
+        # derivation, residual definitions, and units check.
+        # ----------------------------------------------------------------
+        if haskey(mod.ext[:parameters], :z_cap)
             agent_type = String(get(mod.ext[:parameters], :Type, ""))
             JY = mod.ext[:sets][:JY]
-            cap_bar = zeros(length(JY))
+            z_cap = zeros(length(JY))
+            # Capacity dynamics are nondecreasing (inv >= 0). The floor
+            # prevents z_cap from asking for a smaller value than the
+            # previous iterate already installed.
+            cap_floor = zeros(length(JY))
+            if !isempty(get(results["Cap_VRES"], m, []))
+                cap_floor = results["Cap_VRES"][m][end]
+            elseif !isempty(get(results["Cap_Elec_H2"], m, []))
+                cap_floor = results["Cap_Elec_H2"][m][end]
+            elseif !isempty(get(results["Cap_EP_Green"], m, []))
+                cap_floor = results["Cap_EP_Green"][m][end]
+            end
             if agent_type == "VRES"
+                # In contracts, VRES capacity supports BOTH the EOM and the
+                # PPA flow consensus; sum them before computing the peak.
                 g_bar = mod.ext[:parameters][:g_bar_elec]
                 AF = mod.ext[:timeseries][:AF]
                 g_bar_ppa = get(mod.ext[:parameters], :g_bar_ppa, zeros_shp)
@@ -156,24 +178,40 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
                         af = AF[jh, jd, jy]
                         mx = max(mx, af > 1e-9 ? max(0.0, g_bar_total[jh, jd, jy] / af) : 0.0)
                     end
-                    cap_bar[iy] = mx
+                    z_cap[iy] = mx
                 end
             elseif agent_type == "GreenProducer"
-                # Total H2 production uses both pool and HPA streams.
+                # Electrolyzer H₂ capacity supports pool + HPA combined.
                 g_bar = mod.ext[:parameters][:g_bar_H2]
                 g_bar_hpa = get(mod.ext[:parameters], :g_bar_hpa, zeros_shp)
                 g_bar_total = g_bar .+ g_bar_hpa
                 for (iy, jy) in enumerate(JY)
-                    cap_bar[iy] = max(0.0, maximum(g_bar_total[:, :, jy]))
+                    z_cap[iy] = max(0.0, maximum(g_bar_total[:, :, jy]))
                 end
             elseif agent_type == "GreenOfftaker"
+                # Green offtaker EP capacity supports the EP flow consensus.
                 g_bar = mod.ext[:parameters][:g_bar_EP]
                 for (iy, jy) in enumerate(JY)
-                    cap_bar[iy] = max(0.0, maximum(g_bar[:, :, jy]))
+                    z_cap[iy] = max(0.0, maximum(g_bar[:, :, jy]))
                 end
             end
-            mod.ext[:parameters][:cap_bar] = cap_bar
-            mod.ext[:parameters][:ρ_cap]  = ADMM_state["ρ"]["cap"][end]
+            # Same projection as base subroutine: nondecreasing across years
+            # and not below the previous capacity floor.
+            for iy in eachindex(z_cap)
+                if iy > 1
+                    z_cap[iy] = max(z_cap[iy], z_cap[iy - 1])
+                end
+                if iy <= length(cap_floor)
+                    z_cap[iy] = max(z_cap[iy], cap_floor[iy])
+                end
+            end
+
+            cap_state = ADMM_state["Capacity"]
+            push!(cap_state["z"][m], copy(z_cap))
+
+            mod.ext[:parameters][:z_cap] = z_cap
+            mod.ext[:parameters][:λ_cap] = copy(cap_state["λ"][m][end])
+            mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
         end
     end
 

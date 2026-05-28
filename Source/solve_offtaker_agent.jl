@@ -82,10 +82,17 @@ function solve_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         # (1) Expected full loss (operational + fixed EP capacity cost).
         # (2) CVaR of full loss. With nYears=1, CVaR = loss_total ⇒ γ has no effect.
         # (3)–(5) ADMM augmented-Lagrangian penalties for each market.
-        # (6) Investment consensus: penalty on cap toward capacity needed for g_bar_EP.
-        cap_bar = get(mod.ext[:parameters], :cap_bar, zeros(length(JY)))
+        # (6) Capacity ADMM equality split: full augmented Lagrangian with
+        #     dual λ_cap + quadratic ρ_cap/2 forcing x_cap = z_cap. The
+        #     λ_cap·(x-z) term is what fixes the persistent residual issue
+        #     observed under the previous pure-quadratic formulation; see
+        #     DOCUMENTATION.md §5.4.
+        z_cap   = get(mod.ext[:parameters], :z_cap, zeros(length(JY)))
+        λ_cap   = get(mod.ext[:parameters], :λ_cap, zeros(length(JY)))
         ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
-        cap_pen = haskey(mod.ext[:parameters], :cap_bar) ? sum(ρ_cap/2 * (cap_EP_y[jy] - cap_bar[jy])^2 for jy in JY) : 0.0
+        cap_pen = haskey(mod.ext[:parameters], :z_cap) ?
+            sum(λ_cap[jy] * (cap_EP_y[jy] - z_cap[jy]) +
+                ρ_cap/2 * (cap_EP_y[jy] - z_cap[jy])^2 for jy in JY) : 0.0
         mod.ext[:objective] = @objective(mod, Min,
             gamma_G * sum(loss_total[jy] for jy in JY)
             + (1 - gamma_G) * cvar_G

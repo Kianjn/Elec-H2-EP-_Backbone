@@ -8,11 +8,13 @@
 #   ADMM_subroutine_contracts! and update_rho_contracts!.
 #
 # CAPACITY CONSENSUS TOLERANCE (relaxed for contracts case):
-#   The capacity consensus (cap_bar) couples VRES, electrolyzer, and green
-#   offtaker investments. In the contracts case, VRES splits generation between
-#   pool and contract, so cap_bar = f(g_bar_elec + g_bar_ppa) depends on both
-#   standard and contract flow consensus. This creates stronger coupling and
-#   slower convergence than in market_exposure.
+#   The capacity consensus uses a per-agent equality split (x_cap = z_cap
+#   with explicit dual λ_cap and per-agent ρ_cap; see DOCUMENTATION.md §5.4)
+#   that couples VRES, electrolyzer, and green offtaker investments. In the
+#   contracts case, VRES splits generation between pool and contract, so
+#   z_cap = f(g_bar_elec + g_bar_ppa) depends on both standard and contract
+#   flow consensus. This creates stronger coupling and slower convergence
+#   than in market_exposure.
 #
 #   We relax the capacity tolerance by CAP_CONSENSUS_TOL_RELAX so that
 #   convergence can be declared when flow markets are sufficiently converged,
@@ -51,6 +53,11 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     stall_count = 0
     restart_patience = 40
     restart_factor = 1.15
+    rollback_count = 0
+    max_rollbacks = 2
+    rollback_cooldown = 80
+    last_rollback_iter = -rollback_cooldown
+    rollback_blend = 0.35
     best_λ = Dict{String,Array{Float64,3}}()
     best_ρ = Dict{String,Float64}()
     best_λ_ppa = Dict{String,Array{Float64,3}}()
@@ -59,6 +66,20 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     best_λ_hpa = Dict{String,Array{Float64,3}}()
     best_ρ_hpa = Dict{String,Float64}()
     best_ρ_hpa_cap = Dict{String,Float64}()
+    # Per-agent best ρ_cap for the rollback blend (capacity equality split).
+    best_ρ_cap = Dict{String,Float64}()
+
+    # Capacity-owning agents — see ADMM.jl and DOCUMENTATION.md §5.4.
+    cap_agents = get(agents, :cap_agents, String[])
+
+    # Expose horizon sizes to update_rho_contracts! (Boyd-style abs tolerance).
+    n_yr_admm = data["General"]["nYears"]
+    n_ts_admm = data["General"]["nTimesteps"]
+    n_rd_admm = data["General"]["nReprDays"]
+    ADMM_state["n_slots"] = n_ts_admm * n_rd_admm * n_yr_admm
+    ADMM_state["n_yr"]    = n_yr_admm
+    ADMM_state["rho_cap_max"]        = get(get(data, "ADMM", Dict()), "rho_cap_max", 30.0)
+    ADMM_state["rho_cap_inc_factor"] = get(get(data, "ADMM", Dict()), "rho_cap_inc_factor", 1.05)
 
     function _market_eps_std(key::String, n_slots::Int)
         eps_abs = ADMM_state["EpsilonAbs"]
@@ -260,29 +281,66 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 scales_pr["EP"] = rp_EP
             end
 
-            # Capacity primal residual: L2 norm of (cap - cap_bar) across all cap agents.
-            cap_agents = get(agents, :cap_agents, String[])
-            rp_cap = 0.0
-            if !isempty(cap_agents)
-                for m in cap_agents
-                    cap_vec = Float64[]
-                    if !isempty(get(results["Cap_VRES"], m, []))
-                        cap_vec = results["Cap_VRES"][m][end]
-                    elseif !isempty(get(results["Cap_Elec_H2"], m, []))
-                        cap_vec = results["Cap_Elec_H2"][m][end]
-                    elseif !isempty(get(results["Cap_EP_Green"], m, []))
-                        cap_vec = results["Cap_EP_Green"][m][end]
-                    end
-                    if !isempty(cap_vec)
-                        cap_bar = get(mdict[m].ext[:parameters], :cap_bar, zeros(length(cap_vec)))
-                        rp_cap += sum((cap_vec[i] - cap_bar[i])^2 for i in eachindex(cap_vec))
-                    end
+            # ------------------------------------------------------------
+            # Capacity primal residuals — per-agent equality split
+            # (mirrors ADMM.jl; see DOCUMENTATION.md §5.4 for derivation).
+            # ------------------------------------------------------------
+            cap_state = ADMM_state["Capacity"]
+            rp_cap_sq = 0.0
+            for m in cap_agents
+                cap_vec = Float64[]
+                if !isempty(get(results["Cap_VRES"], m, []))
+                    cap_vec = results["Cap_VRES"][m][end]
+                elseif !isempty(get(results["Cap_Elec_H2"], m, []))
+                    cap_vec = results["Cap_Elec_H2"][m][end]
+                elseif !isempty(get(results["Cap_EP_Green"], m, []))
+                    cap_vec = results["Cap_EP_Green"][m][end]
                 end
-                rp_cap = sqrt(rp_cap)
+                z_hist = cap_state["z"][m]
+                z_vec  = isempty(z_hist) ? zeros(length(cap_vec)) : z_hist[end]
+                local_r = 0.0
+                if !isempty(cap_vec) && length(cap_vec) == length(z_vec)
+                    local_r = sqrt(sum((cap_vec[i] - z_vec[i])^2 for i in eachindex(cap_vec)))
+                end
+                push!(cap_state["Primal"][m], local_r)
+                if cap_state["ResidualScale_Primal"][m] == 0.0 && local_r > 0.0
+                    cap_state["ResidualScale_Primal"][m] = local_r
+                end
+                rp_cap_sq += local_r^2
             end
+            rp_cap = sqrt(rp_cap_sq)
             push!(ADMM_state["Residuals"]["Primal"]["cap"], rp_cap)
             if ADMM_state["ResidualScale"]["Primal"]["cap"] == 0.0 && rp_cap > 0.0
                 ADMM_state["ResidualScale"]["Primal"]["cap"] = rp_cap
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Capacity dual ASCENT (per-agent λ_cap update; mirrors ADMM.jl)
+        # λ_m^k = λ_m^{k-1} + ρ_m^{k-1} · (x_m^k - z_m^k) per year y.
+        # See DOCUMENTATION.md §5.4 for justification.
+        # ------------------------------------------------------------------
+        @timeit TO "Capacity dual update" begin
+            cap_state = ADMM_state["Capacity"]
+            for m in cap_agents
+                cap_vec = Float64[]
+                if !isempty(get(results["Cap_VRES"], m, []))
+                    cap_vec = results["Cap_VRES"][m][end]
+                elseif !isempty(get(results["Cap_Elec_H2"], m, []))
+                    cap_vec = results["Cap_Elec_H2"][m][end]
+                elseif !isempty(get(results["Cap_EP_Green"], m, []))
+                    cap_vec = results["Cap_EP_Green"][m][end]
+                end
+                z_hist = cap_state["z"][m]
+                z_vec  = isempty(z_hist) ? zeros(length(cap_vec)) : z_hist[end]
+                ρ_m    = cap_state["ρ"][m][end]
+                λ_prev = cap_state["λ"][m][end]
+                λ_new  = if isempty(cap_vec) || length(cap_vec) != length(λ_prev)
+                    copy(λ_prev)
+                else
+                    [λ_prev[i] + ρ_m * (cap_vec[i] - z_vec[i]) for i in eachindex(λ_prev)]
+                end
+                push!(cap_state["λ"][m], λ_new)
             end
         end
 
@@ -433,32 +491,31 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                         scales_du[key] = rd
                     end
                 end
-                # Capacity dual residual: change in cap across iterations.
-                cap_agents = get(agents, :cap_agents, String[])
-                dual_cap = 0.0
-                if !isempty(cap_agents)
-                    ρ_cap = ADMM_state["ρ"]["cap"][end]
-                    for m in cap_agents
-                        cap_new = Float64[]
-                        cap_old = Float64[]
-                        if !isempty(get(results["Cap_VRES"], m, []))
-                            cap_new = results["Cap_VRES"][m][end]
-                            cap_old = length(results["Cap_VRES"][m]) >= 2 ? results["Cap_VRES"][m][end-1] : zeros(length(cap_new))
-                        elseif !isempty(get(results["Cap_Elec_H2"], m, []))
-                            cap_new = results["Cap_Elec_H2"][m][end]
-                            cap_old = length(results["Cap_Elec_H2"][m]) >= 2 ? results["Cap_Elec_H2"][m][end-1] : zeros(length(cap_new))
-                        elseif !isempty(get(results["Cap_EP_Green"], m, []))
-                            cap_new = results["Cap_EP_Green"][m][end]
-                            cap_old = length(results["Cap_EP_Green"][m]) >= 2 ? results["Cap_EP_Green"][m][end-1] : zeros(length(cap_new))
+                # ----------------------------------------------------------
+                # Capacity dual residuals — per-agent split (Δz-based)
+                # (mirrors ADMM.jl; see DOCUMENTATION.md §5.4).
+                # ----------------------------------------------------------
+                cap_state = ADMM_state["Capacity"]
+                dual_cap_sq = 0.0
+                for m in cap_agents
+                    z_hist = cap_state["z"][m]
+                    ρ_m    = cap_state["ρ"][m][end]
+                    if length(z_hist) >= 2
+                        z_new = z_hist[end]
+                        z_old = z_hist[end-1]
+                        local_s = sqrt(sum((ρ_m * (z_new[i] - z_old[i]))^2 for i in eachindex(z_new)))
+                        push!(cap_state["Dual"][m], local_s)
+                        if cap_state["ResidualScale_Dual"][m] == 0.0 && local_s > 0.0 && isfinite(local_s)
+                            cap_state["ResidualScale_Dual"][m] = local_s
                         end
-                        if !isempty(cap_new) && length(cap_old) == length(cap_new)
-                            dual_cap += sum((ρ_cap * (cap_new[i] - cap_old[i]))^2 for i in eachindex(cap_new))
-                        end
+                        dual_cap_sq += local_s^2
+                    else
+                        push!(cap_state["Dual"][m], Inf)
                     end
-                    dual_cap = sqrt(dual_cap)
                 end
+                dual_cap = isempty(cap_agents) || any(isinf, [cap_state["Dual"][m][end] for m in cap_agents]) ? Inf : sqrt(dual_cap_sq)
                 push!(ADMM_state["Residuals"]["Dual"]["cap"], dual_cap)
-                if ADMM_state["ResidualScale"]["Dual"]["cap"] == 0.0 && dual_cap < Inf
+                if ADMM_state["ResidualScale"]["Dual"]["cap"] == 0.0 && isfinite(dual_cap) && dual_cap > 0.0
                     ADMM_state["ResidualScale"]["Dual"]["cap"] = dual_cap
                 end
                 C = ADMM_state["ppa"]
@@ -549,7 +606,10 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 best_λ[mkt] = copy(results["λ"][mkt][end])
                 best_ρ[mkt] = ADMM_state["ρ"][mkt][end]
             end
-            best_ρ["cap"] = ADMM_state["ρ"]["cap"][end]
+            # Capacity is per-agent: snapshot every agent's current ρ_m.
+            for m in cap_agents
+                best_ρ_cap[m] = ADMM_state["Capacity"]["ρ"][m][end]
+            end
             for vres_id in ppa_ids
                 best_λ_ppa[vres_id] = copy(results["λ_ppa"][vres_id][end])
                 best_ρ_ppa[vres_id] = C["ρ"][vres_id][end]
@@ -624,7 +684,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 eps_pr = eps_abs * sqrt_n + eps_rel * sp
                 eps_du = eps_abs * sqrt_n + eps_rel * sd
                 eps_m = max(eps_pr, eps_du)
-                η_raw = base <= 1.5 * eps_m ? 1.0 : max(η_min, 1.5 * eps_m / max(base, 1e-9))
+                η_raw = base >= 1.5 * eps_m ? 1.0 : max(η_min, base / max(1.5 * eps_m, 1e-9))
                 η = η_scale[mkt] * η_raw
                 push!(results["λ"][mkt],
                       results["λ"][mkt][end] .- η .* ADMM_state["ρ"][mkt][end] .* ADMM_state["Imbalances"][mkt][end])
@@ -640,7 +700,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 base = max(rp, rd)
                 eps_pr, eps_du = _market_eps_contract(C, vres_id, false, n_slots_upd)
                 eps_m = max(eps_pr, eps_du)
-                η_raw = base <= 1.5 * eps_m ? 1.0 : max(η_min, 1.5 * eps_m / max(base, 1e-9))
+                η_raw = base >= 1.5 * eps_m ? 1.0 : max(η_min, base / max(1.5 * eps_m, 1e-9))
                 η = η_scale_ppa[vres_id] * η_raw
                 push!(results["λ_ppa"][vres_id],
                       results["λ_ppa"][vres_id][end] .- η .* C["ρ"][vres_id][end] .* C["Imbalances"][vres_id][end])
@@ -655,7 +715,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 base = max(rp, rd)
                 eps_pr, eps_du = _market_eps_contract(C_hpa, h2_id, false, n_slots_upd)
                 eps_m = max(eps_pr, eps_du)
-                η_raw = base <= 1.5 * eps_m ? 1.0 : max(η_min, 1.5 * eps_m / max(base, 1e-9))
+                η_raw = base >= 1.5 * eps_m ? 1.0 : max(η_min, base / max(1.5 * eps_m, 1e-9))
                 η = η_scale_hpa[h2_id] * η_raw
                 push!(results["λ_hpa"][h2_id],
                       results["λ_hpa"][h2_id][end] .- η .* C_hpa["ρ"][h2_id][end] .* C_hpa["Imbalances"][h2_id][end])
@@ -684,32 +744,54 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         end
 
         # Anti-stall recovery: if the run has moved far away from the best
-        # checkpoint for a long window, restore best λ/ρ and continue with
-        # smaller dual steps.
+        # checkpoint for a long window, damp steps immediately and only
+        # occasionally blend toward checkpoint λ/ρ. This preserves anti-drift
+        # benefits while avoiding repeating hard-reset cycles.
         if stall_count >= restart_patience && score > restart_factor * best_score && !isempty(best_λ)
             for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
-                results["λ"][mkt][end] .= best_λ[mkt]
-                ADMM_state["ρ"][mkt][end] = best_ρ[mkt]
-                η_scale[mkt] = max(0.15, 0.8 * η_scale[mkt])
+                η_scale[mkt] = max(0.15, 0.9 * η_scale[mkt])
             end
-            ADMM_state["ρ"]["cap"][end] = best_ρ["cap"]
-            C = ADMM_state["ppa"]
             for vres_id in ppa_ids
-                if haskey(best_λ_ppa, vres_id)
-                    results["λ_ppa"][vres_id][end] .= best_λ_ppa[vres_id]
-                    C["ρ"][vres_id][end] = best_ρ_ppa[vres_id]
-                    C["ρ_cap"][vres_id][end] = best_ρ_ppa_cap[vres_id]
-                    η_scale_ppa[vres_id] = max(0.15, 0.8 * η_scale_ppa[vres_id])
-                end
+                η_scale_ppa[vres_id] = max(0.15, 0.9 * η_scale_ppa[vres_id])
             end
-            C_hpa = ADMM_state["hpa"]
             for h2_id in hpa_ids
-                if haskey(best_λ_hpa, h2_id)
-                    results["λ_hpa"][h2_id][end] .= best_λ_hpa[h2_id]
-                    C_hpa["ρ"][h2_id][end] = best_ρ_hpa[h2_id]
-                    C_hpa["ρ_cap"][h2_id][end] = best_ρ_hpa_cap[h2_id]
-                    η_scale_hpa[h2_id] = max(0.15, 0.8 * η_scale_hpa[h2_id])
+                η_scale_hpa[h2_id] = max(0.15, 0.9 * η_scale_hpa[h2_id])
+            end
+            can_rollback = rollback_count < max_rollbacks && (iter - last_rollback_iter) >= rollback_cooldown
+            if can_rollback
+                α = rollback_blend
+                for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+                    results["λ"][mkt][end] .= (1.0 - α) .* results["λ"][mkt][end] .+ α .* best_λ[mkt]
+                    ADMM_state["ρ"][mkt][end] = (1.0 - α) * ADMM_state["ρ"][mkt][end] + α * best_ρ[mkt]
+                    η_scale[mkt] = max(0.15, 0.85 * η_scale[mkt])
                 end
+                # Capacity rollback: blend each cap agent's ρ_m toward its best.
+                for m in cap_agents
+                    if haskey(best_ρ_cap, m)
+                        cur = ADMM_state["Capacity"]["ρ"][m][end]
+                        ADMM_state["Capacity"]["ρ"][m][end] = (1.0 - α) * cur + α * best_ρ_cap[m]
+                    end
+                end
+                C = ADMM_state["ppa"]
+                for vres_id in ppa_ids
+                    if haskey(best_λ_ppa, vres_id)
+                        results["λ_ppa"][vres_id][end] .= (1.0 - α) .* results["λ_ppa"][vres_id][end] .+ α .* best_λ_ppa[vres_id]
+                        C["ρ"][vres_id][end] = (1.0 - α) * C["ρ"][vres_id][end] + α * best_ρ_ppa[vres_id]
+                        C["ρ_cap"][vres_id][end] = (1.0 - α) * C["ρ_cap"][vres_id][end] + α * best_ρ_ppa_cap[vres_id]
+                        η_scale_ppa[vres_id] = max(0.15, 0.85 * η_scale_ppa[vres_id])
+                    end
+                end
+                C_hpa = ADMM_state["hpa"]
+                for h2_id in hpa_ids
+                    if haskey(best_λ_hpa, h2_id)
+                        results["λ_hpa"][h2_id][end] .= (1.0 - α) .* results["λ_hpa"][h2_id][end] .+ α .* best_λ_hpa[h2_id]
+                        C_hpa["ρ"][h2_id][end] = (1.0 - α) * C_hpa["ρ"][h2_id][end] + α * best_ρ_hpa[h2_id]
+                        C_hpa["ρ_cap"][h2_id][end] = (1.0 - α) * C_hpa["ρ_cap"][h2_id][end] + α * best_ρ_hpa_cap[h2_id]
+                        η_scale_hpa[h2_id] = max(0.15, 0.85 * η_scale_hpa[h2_id])
+                    end
+                end
+                rollback_count += 1
+                last_rollback_iter = iter
             end
             stall_count = 0
         end
@@ -781,14 +863,30 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
 
         # Capacity consensus: use relaxed tolerance (see file header).
         # Effective eps = (eps_pr, eps_du) * cap_tol_relax so we accept larger residuals.
+        # ----------------------------------------------------------------
+        # Per-agent capacity convergence (new equality-split formulation):
+        # every cap-owning agent must satisfy its own Boyd test on r_m, s_m.
+        # The optional cap_tol_relax knob still applies (multiplies the
+        # right-hand side) to keep backwards compatibility with the
+        # data.yaml configuration. See DOCUMENTATION.md §5.4.
+        # ----------------------------------------------------------------
         cap_tol_relax = get(get(data, "ADMM", Dict()), "cap_tol_relax", CAP_CONSENSUS_TOL_RELAX_DEFAULT)
-        rp_cap = ADMM_state["Residuals"]["Primal"]["cap"][end]
-        rd_cap = ADMM_state["Residuals"]["Dual"]["cap"][end]
-        sp_cap = max(scale_pr["cap"], 1.0)
-        sd_cap = max(scale_du["cap"], 1.0)
-        eps_pr_cap = cap_tol_relax * (eps_abs * sqrt_n + eps_rel * sp_cap)
-        eps_du_cap = cap_tol_relax * (eps_abs * sqrt_n + eps_rel * sd_cap)
-        cap_consensus_ok = (rp_cap <= eps_pr_cap) && (rd_cap <= eps_du_cap)
+        sqrt_y = sqrt(n_yr)
+        cap_state = ADMM_state["Capacity"]
+        cap_consensus_ok = true
+        for m in cap_agents
+            rp_m = cap_state["Primal"][m][end]
+            rd_m = cap_state["Dual"][m][end]
+            sp_m = max(cap_state["ResidualScale_Primal"][m], 1.0)
+            sd_m = max(cap_state["ResidualScale_Dual"][m], 1.0)
+            eps_pr_m = cap_tol_relax * (eps_abs * sqrt_y + eps_rel * sp_m)
+            eps_du_m = cap_tol_relax * (eps_abs * sqrt_y + eps_rel * sd_m)
+            if !(isfinite(rp_m) && isfinite(rd_m) &&
+                 rp_m <= eps_pr_m && rd_m <= eps_du_m)
+                cap_consensus_ok = false
+                break
+            end
+        end
         if (within_tol("elec") && within_tol("H2") && within_tol("elec_GC") &&
             within_tol("H2_GC") && within_tol("EP") &&
             contract_ok && cap_ok && hpa_ok && hpa_cap_ok && cap_consensus_ok)
@@ -853,8 +951,35 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     end
     primal_cap = ADMM_state["Residuals"]["Primal"]["cap"][end]
     dual_cap   = ADMM_state["Residuals"]["Dual"]["cap"][end]
-    @printf("  %-14s  primal = %.3e,  dual = %.3e  (capacity consensus)\n",
+    @printf("  %-14s  primal = %.3e,  dual = %.3e  (aggregate over cap agents)\n",
             "Capacity", primal_cap, dual_cap)
+
+    # Per-agent capacity consensus breakdown (equality-split formulation).
+    # Surfaces the worst-converged capacity agent — see DOCUMENTATION.md §5.4.
+    if !isempty(cap_agents)
+        println("Per-agent capacity consensus (x_cap = z_cap split):")
+        cap_state_print = ADMM_state["Capacity"]
+        worst_m   = ""
+        worst_val = -Inf
+        for m in cap_agents
+            rp_m = cap_state_print["Primal"][m][end]
+            rd_m = cap_state_print["Dual"][m][end]
+            ρ_m  = cap_state_print["ρ"][m][end]
+            λ_m  = cap_state_print["λ"][m][end]
+            λ_mean = isempty(λ_m) ? 0.0 : sum(λ_m) / length(λ_m)
+            @printf("  %-20s  primal = %.3e,  dual = %.3e,  ρ = %.3f,  mean(λ) = %.3e\n",
+                    m, rp_m, rd_m, ρ_m, λ_mean)
+            v = max(rp_m, isfinite(rd_m) ? rd_m : 0.0)
+            if v > worst_val
+                worst_val = v
+                worst_m   = m
+            end
+        end
+        if worst_m != ""
+            @printf("  Worst capacity agent: %s (max(primal, dual) = %.3e)\n",
+                    worst_m, worst_val)
+        end
+    end
 
     return nothing
 end

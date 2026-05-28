@@ -87,10 +87,17 @@ function solve_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     # (1) Expected full loss (operational + fixed CAPEX).
     # (2) CVaR of full loss. With nYears=1, CVaR = loss_total ⇒ γ has no effect.
     # (3)–(6) ADMM augmented-Lagrangian penalties for each market.
-    # (7) Investment consensus: penalty on cap toward capacity needed for g_bar_H2.
-    cap_bar = get(mod.ext[:parameters], :cap_bar, zeros(length(JY)))
+    # (7) Capacity ADMM equality split: enforces x_cap = z_cap with both the
+    #     linear dual λ_cap·(x-z) and the quadratic (ρ_cap/2)·(x-z)². The
+    #     linear term is what distinguishes a proper ADMM split from a soft
+    #     penalty and is essential for converging the capacity residual when
+    #     ρ_cap is bounded. See DOCUMENTATION.md §5.4.
+    z_cap   = get(mod.ext[:parameters], :z_cap, zeros(length(JY)))
+    λ_cap   = get(mod.ext[:parameters], :λ_cap, zeros(length(JY)))
     ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
-    cap_pen = haskey(mod.ext[:parameters], :cap_bar) ? sum(ρ_cap/2 * (cap_H2_y[jy] - cap_bar[jy])^2 for jy in JY) : 0.0
+    cap_pen = haskey(mod.ext[:parameters], :z_cap) ?
+        sum(λ_cap[jy] * (cap_H2_y[jy] - z_cap[jy]) +
+            ρ_cap/2 * (cap_H2_y[jy] - z_cap[jy])^2 for jy in JY) : 0.0
     mod.ext[:objective] = @objective(mod, Min,
         gamma * sum(loss_total[jy] for jy in JY)
         + (1 - gamma) * cvar_H2

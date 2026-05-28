@@ -7,7 +7,7 @@
 #   mod.ext[:parameters] and mod.ext[:timeseries] with type-specific data from
 #   data.yaml and with 3D arrays built from the full-year time series (using
 #   representative day indices). Supports: VRES (capacity + profile), Conventional
-#   (capacity + constant availability), Consumer (peak load + load profile +
+#   (capacity + constant availability + 3-stage thermal stack), Consumer (peak load + load profile +
 #   quadratic utility parameters A_E, B_E).
 #
 # ARGUMENTS:
@@ -59,46 +59,77 @@ function define_power_parameters!(m::String, mod::Model, data::Dict, ts::Dict, r
         end
 
     elseif agent_type == "Conventional"
-        # --- Dispatchable thermal generator ---
-        params[:Capacity]     = data["Capacity"]        # Installed capacity (MW)
-        params[:MarginalCost] = data["MarginalCost"]    # €/MWh; fuel + O&M cost of generation
+        # --- Dispatchable thermal generator (coal + biomass + NG stack) ---
+        params[:Capacity] = data["Capacity"]  # Installed capacity (MW)
+        # Keep MarginalCost only as optional legacy fallback if stage inputs are absent.
+        params[:MarginalCost] = get(data, "MarginalCost", 60.0)
+
         # Three-stage convex marginal-cost curve (single aggregated conventional agent):
-        #   Stage s has capacity cap_s, marginal cost c_s(x) = a_s + b_s*x (x in [0, cap_s]).
-        # This represents stacked technologies (e.g., coal, nuclear, gas) while
-        # preserving one market participant.
+        #   Stage s has capacity cap_s and marginal cost MC_s(x) = base_s + slope_s * x
+        #   for x in [0, cap_s], with continuity between stage endpoints.
         #
-        # Inputs can be overridden in data.yaml:
-        #   - StageCapacityShares       (length 3, positive; normalized internally)
-        #   - StageBaseCostMultipliers  (length 3, increasing)
-        #   - StageSlopeMultipliers     (length 3, nonnegative)
+        # Primary inputs (recommended, absolute values):
+        #   - StageCapacityShares : length-3 capacity split (normalized internally)
+        #   - StageBaseCosts      : length-3 starting MC values (€/MWh), e.g. coal/biomass/NG
+        #   - FinalMarginalCost   : MC at end of stage 3 (€/MWh)
         #
-        # Calibration target:
-        #   Average variable cost at full dispatch equals MarginalCost, so the
-        #   new curve keeps aggregate cost level comparable to the old constant-cost model.
-        shares_raw = Float64.(get(data, "StageCapacityShares", [0.40, 0.35, 0.25]))
-        base_mult  = Float64.(get(data, "StageBaseCostMultipliers", [0.70, 1.30, 1.90]))
-        slope_mult = Float64.(get(data, "StageSlopeMultipliers", [0.40, 0.50, 0.60]))
-        if length(shares_raw) != 3 || length(base_mult) != 3 || length(slope_mult) != 3
-            error("Conventional generator requires 3 entries for StageCapacityShares, StageBaseCostMultipliers, StageSlopeMultipliers")
+        # Slopes are derived internally to enforce continuous stage transitions:
+        #   end(MC_1) = base_2, end(MC_2) = base_3, end(MC_3) = FinalMarginalCost.
+        #
+        # Backward compatibility:
+        #   - If StageBaseCosts are missing, old multiplier keys are accepted.
+        #   - If FinalMarginalCost is missing, it is inferred from legacy slope keys when available.
+        shares_raw = Float64.(get(data, "StageCapacityShares", [1 / 3, 1 / 3, 1 / 3]))
+        if length(shares_raw) != 3
+            error("Conventional generator requires 3 entries for StageCapacityShares")
         end
         shares = max.(shares_raw, 1e-9)
         shares ./= sum(shares)
         caps = params[:Capacity] .* shares
 
-        mc_ref = params[:MarginalCost]
-        base_raw = base_mult .* mc_ref
-        slope_raw = slope_mult .* (mc_ref ./ max.(caps, 1e-9))
+        base_costs = if haskey(data, "StageBaseCosts")
+            Float64.(data["StageBaseCosts"])
+        elseif haskey(data, "StageBaseCostMultipliers")
+            Float64.(data["StageBaseCostMultipliers"]) .* params[:MarginalCost]
+        else
+            # Defaults: coal, biomass, natural-gas-like starting marginal costs.
+            [35.0, 55.0, 85.0]
+        end
 
-        total_cost_raw = sum(base_raw[s] * caps[s] + 0.5 * slope_raw[s] * caps[s]^2 for s in 1:3)
-        target_total_cost = mc_ref * params[:Capacity]
-        scale = total_cost_raw > 1e-9 ? target_total_cost / total_cost_raw : 1.0
+        final_mc = if haskey(data, "FinalMarginalCost")
+            Float64(data["FinalMarginalCost"])
+        elseif haskey(data, "StageSlopeMultipliers")
+            # Infer an endpoint from legacy slope multipliers.
+            slope_mult = Float64.(data["StageSlopeMultipliers"])
+            if length(slope_mult) != 3
+                error("Conventional generator requires 3 entries for StageSlopeMultipliers")
+            end
+            slope_legacy = slope_mult .* (params[:MarginalCost] / max(params[:Capacity], 1e-9))
+            base_costs[3] + slope_legacy[3] * caps[3]
+        else
+            # Default endpoint (NG-like high-load marginal cost).
+            140.0
+        end
+
+        if length(base_costs) != 3
+            error("Conventional generator requires 3 entries for StageBaseCosts")
+        end
+        if !(base_costs[1] <= base_costs[2] <= base_costs[3] <= final_mc + 1e-9)
+            error("Conventional stage MC endpoints must be nondecreasing: base1 <= base2 <= base3 <= FinalMarginalCost")
+        end
+
+        slopes = [
+            (base_costs[2] - base_costs[1]) / max(caps[1], 1e-9),
+            (base_costs[3] - base_costs[2]) / max(caps[2], 1e-9),
+            (final_mc      - base_costs[3]) / max(caps[3], 1e-9),
+        ]
 
         params[:ConvStageCap] = caps
-        params[:ConvStageBaseCost] = scale .* base_raw
-        params[:ConvStageSlope] = scale .* slope_raw
+        params[:ConvStageBaseCost] = base_costs
+        params[:ConvStageSlope] = max.(slopes, 0.0)
+        params[:ConvFinalMarginalCost] = final_mc
 
-        # Constant AF = 1.0 at every hour: conventional generators are always
-        # available up to their full capacity (dispatchable thermal generation).
+        # Constant AF = 1.0 at every hour: dispatchable thermal generation.
         # No timeseries profile is needed; the optimizer decides dispatch level.
         times[:AF] = ones(n_ts, n_rd, n_yr)
 

@@ -19,7 +19,7 @@ ADMM:
   rho_cap_initial: 0.1  # Penalty for investment/capacity consensus; low initial to avoid over-constraining early iterations
   nScenarioYears: 10    # Number of scenario years used by market_exposure*.jl (2021..2030)
   max_iter: 200        # Iteration budget (contracts case may need higher due stronger coupling)
-  epsilon: 2          # Convergence tolerance on L2 norm of primal/dual residuals. Used by market_exposure. With 72 timesteps, epsilon=1 ≈ 0.12 MW per-timestep accuracy (<1% of quantities 20-50 MW).
+  epsilon: 0.5          # Convergence tolerance on L2 norm of primal/dual residuals. Used by market_exposure. With 72 timesteps, epsilon=1 ≈ 0.12 MW per-timestep accuracy (<1% of quantities 20-50 MW).
   epsilon_contracts: 10 # [market_exposure_contracts only] More relaxed epsilon for the contracts case (more coupled markets). If unset, falls back to epsilon. Higher value (e.g. 5) helps declare convergence when residuals are good enough (~50 iters).
   cap_tol_relax: 100   # [market_exposure_contracts only] Multiplier for capacity consensus tolerance. Effective cap tolerance = standard × cap_tol_relax. Larger values allow convergence when flow markets are close but capacity lags (stronger coupling in contracts case).
   gamma: 1              # Risk weight for CVaR (γ=1 ⇒ risk-neutral). Used by both social planner and ADMM agents. Change here to update both simultaneously.
@@ -81,22 +81,24 @@ Power:
      gamma: 1                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
      beta: 0.95                 # CVaR confidence level τ (placeholder; only active when gamma<1).
 
-  # Dispatchable conventional generator (e.g. gas turbine)
+  # Dispatchable conventional fleet proxy (coal + biomass + NG stack)
   Gen_Conv_01:
     Type: "Conventional"
     Capacity: 50.0           # Installed capacity (MW); always available (AF = 1)
-    MarginalCost: 60.0       # €/MWh reference average variable cost at full dispatch
-    # 3-stage convex variable-cost curve (single aggregated conventional agent):
-    # - Stage 1 ~ lower-cost block (e.g., coal-like)
-    # - Stage 2 ~ medium-cost block (e.g., nuclear-like dispatch layer)
-    # - Stage 3 ~ higher-cost block (e.g., gas-like peaker layer)
-    # Marginal cost in each stage is linear in stage output:
+    MarginalCost: 60.0       # Legacy fallback used only if StageBaseCosts/FinalMarginalCost are omitted
+    # 3-stage convex variable-cost curve (single aggregated conventional fleet):
+    # - Stage 1: coal-like block
+    # - Stage 2: biomass-like block
+    # - Stage 3: NG-like block
+    # Stage marginal cost is linear in stage output:
     #   MC_s(x) = base_s + slope_s * x,  x in [0, stage_capacity_s]
-    # The model internally rescales base/slope so that average variable cost at
-    # full dispatch remains equal to MarginalCost (backward-compatible aggregate level).
-    StageCapacityShares: [0.40, 0.35, 0.25]        # Share of total capacity in each stage (normalized internally)
-    StageBaseCostMultipliers: [0.70, 1.30, 1.90]   # Relative start MC per stage (before internal rescaling)
-    StageSlopeMultipliers: [0.40, 0.50, 0.60]      # Relative slope per stage (before internal rescaling)
+    # Slopes are derived internally so stage transitions are continuous:
+    #   end(MC_1)=base_2, end(MC_2)=base_3, end(MC_3)=FinalMarginalCost.
+    # IMPORTANT: there is no global rescaling; changing StageCapacityShares
+    # changes the aggregate average variable cost of the conventional fleet.
+    StageCapacityShares: [0.333333, 0.333333, 0.333333]  # Capacity split across coal/biomass/NG stages (normalized internally)
+    StageBaseCosts: [35.0, 55.0, 85.0]                   # €/MWh start MC for coal, biomass, NG stages
+    FinalMarginalCost: 140.0                             # €/MWh MC at end of stage 3 (high-load NG tail)
 
   # Electricity consumer with elastic (quadratic) demand
   # Quadratic utility: U(d) = A_E·d − ½·B_E·d²  →  inverse demand p(d) = A_E − B_E·d

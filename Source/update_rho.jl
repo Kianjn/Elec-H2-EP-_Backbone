@@ -32,9 +32,18 @@
 #   Per-market parameters (current implementation):
 #     • elec / elec_GC — inc/dec factor 1.05, ρ_max = 5,000
 #     • H2 / EP        — inc/dec factor 1.01, ρ_max = 100
-#     • H2_GC / cap    — inc/dec factor 1.05, ρ_max = 100
+#     • H2_GC          — inc/dec factor 1.05, ρ_max = 100
 #       (more conservative in tightly coupled or thin markets to avoid
 #        oscillation when capacities/investments are binding).
+#
+#   Capacity ADMM:
+#     Capacity consensus uses a PER-AGENT equality split (x_cap = z_cap) with
+#     per-agent ρ_m, λ_m, residuals. The single old "cap" market entry has
+#     been removed from this controller. A separate per-agent loop at the
+#     END of this function applies the SAME three-regime rule to each
+#     capacity-owning agent's ρ_m using its own r_m, s_m, best-residuals
+#     and R-history (all stored in ADMM_state["Capacity"]). See
+#     DOCUMENTATION.md §5.4 for the full justification.
 #
 #   Tolerance basis:
 #     market_tol is computed from the SAME Boyd-style scaled tolerances used
@@ -44,13 +53,18 @@
 # ARGUMENTS:
 #   ADMM_state — Must contain Residuals["Primal"] and ["Dual"] per market, and
 #     ρ[key] as a list (we use the last element and push a new one).
+#     For capacity, ADMM_state["Capacity"] holds per-agent state.
 #   iter — Current iteration index.
 #
 # ==============================================================================
 
 function update_rho!(ADMM_state::Dict, iter::Int)
     mod(iter, 1) == 0 || return
-    for key in ("elec", "H2", "elec_GC", "H2_GC", "EP", "cap")
+    ctrl = get!(ADMM_state, "RhoController", Dict{String,Any}())
+    prev_merit = get!(ctrl, "PrevMerit", Dict{String,Float64}())
+    last_dir = get!(ctrl, "LastDir", Dict{String,Int}())
+    step_scale_map = get!(ctrl, "StepScale", Dict{String,Float64}())
+    for key in ("elec", "H2", "elec_GC", "H2_GC", "EP")
         isempty(ADMM_state["Residuals"]["Primal"][key]) && continue
         isempty(ADMM_state["Residuals"]["Dual"][key]) && continue
         rp = ADMM_state["Residuals"]["Primal"][key][end]
@@ -86,11 +100,6 @@ function update_rho!(ADMM_state::Dict, iter::Int)
             # H2_GC is hourly but still a thin certificate market.
             # Moderate adaptation avoids destabilizing the tightly-coupled
             # electrolyzer (which also participates in elec, elec_GC, H2).
-            inc_factor = 1.05
-            dec_factor = 1.0 / 1.05
-            ρ_max = 100.0
-        elseif key == "cap"
-            # Capacity consensus: moderate adaptation (investment coupled to flows).
             inc_factor = 1.05
             dec_factor = 1.0 / 1.05
             ρ_max = 100.0
@@ -135,10 +144,20 @@ function update_rho!(ADMM_state::Dict, iter::Int)
         R_hist = ADMM_state["R_hist"][key]
         diverging = length(R_hist) >= 3 && R_hist[end] > R_hist[end-1] > R_hist[end-2]
 
-        # === Regime (1): normal Boyd updates when rp and rd are imbalanced ===
+        # Decide a direction first (increase/decrease/hold), then pass it
+        # through a merit-aware controller that keeps changes which improve the
+        # normalized residual score and dampens/reverses harmful moves.
+        dir = 0
         if diverging
-            # Residuals increasing: overshooting. Decrease ρ to damp.
-            push!(ADMM_state["ρ"][key], max(1e-4, dec_factor * ρ))
+            # Residuals increasing: use residual-balance direction instead of
+            # always decreasing rho (which can be harmful when rp >> rd).
+            if rp > balance_threshold * rd
+                dir = +1
+            elseif rd > balance_threshold * rp
+                dir = -1
+            else
+                dir = -1
+            end
         elseif rp > balance_threshold * rd
             # Primal >> dual: increase ρ to enforce feasibility more strongly,
             # but only if doing so has not been worsening residuals over the
@@ -152,13 +171,11 @@ function update_rho!(ADMM_state::Dict, iter::Int)
                 end
             end
             if can_increase
-                push!(ADMM_state["ρ"][key], min(ρ_max, inc_factor * ρ))
-            else
-                push!(ADMM_state["ρ"][key], ρ)
+                dir = +1
             end
         elseif rd > balance_threshold * rp
             # Dual >> primal: decrease ρ to avoid overshooting.
-            push!(ADMM_state["ρ"][key], max(1e-4, dec_factor * ρ))
+            dir = -1
         else
             # rp and rd are of comparable magnitude.
             if rp <= mid_resid_factor * market_tol && rd <= mid_resid_factor * market_tol
@@ -171,7 +188,6 @@ function update_rho!(ADMM_state::Dict, iter::Int)
                 if close_to_best
                     ADMM_state["ρ_frozen"][key] = true
                 end
-                push!(ADMM_state["ρ"][key], ρ)
             elseif rp > high_resid_factor * market_tol && rd > high_resid_factor * market_tol
                 # === Regime (2): far from tol but rp≈rd — gentle push ===
                 # We are clearly far from convergence (both residuals large) but
@@ -188,18 +204,213 @@ function update_rho!(ADMM_state::Dict, iter::Int)
                     end
                 end
                 if can_increase && !diverging
-                    push!(ADMM_state["ρ"][key], min(ρ_max, mild_inc * ρ))
-                else
-                    push!(ADMM_state["ρ"][key], ρ)
+                    dir = +1
                 end
-            else
-                # Intermediate band: rp≈rd but not too far from tol and not yet
-                # clearly in the near-convergence zone. Keep ρ unchanged so that
-                # the algorithm behaves like fixed-ρ ADMM while residuals
-                # naturally decay.
-                push!(ADMM_state["ρ"][key], ρ)
             end
         end
+
+        merit = max(rp / max(eps_pr, 1e-9), rd / max(eps_du, 1e-9))
+        prev = get(prev_merit, key, Inf)
+        last = get(last_dir, key, 0)
+        step_scale = get(step_scale_map, key, 1.0)
+        forced_backoff = false
+        if isfinite(prev)
+            if merit > 1.01 * prev
+                # Last move likely harmful: damp and reverse if we would repeat it.
+                step_scale = max(0.5, 0.8 * step_scale)
+                if last != 0 && (dir == 0 || dir == last)
+                    dir = -last
+                end
+            elseif merit < 0.995 * prev
+                # Improvement: allow slightly larger steps in the same direction.
+                if dir != 0 && dir == last
+                    step_scale = min(1.5, 1.05 * step_scale)
+                else
+                    step_scale = min(1.5, 1.02 * step_scale)
+                end
+            end
+        end
+        if dir > 0
+            eff_inc = 1.0 + (inc_factor - 1.0) * step_scale
+            push!(ADMM_state["ρ"][key], min(ρ_max, eff_inc * ρ))
+        elseif dir < 0
+            eff_dec = 1.0 - (1.0 - dec_factor) * step_scale
+            push!(ADMM_state["ρ"][key], max(1e-4, eff_dec * ρ))
+        else
+            push!(ADMM_state["ρ"][key], ρ)
+        end
+        prev_merit[key] = merit
+        last_dir[key] = dir
+        step_scale_map[key] = step_scale
     end
+
+    # ----------------------------------------------------------------------
+    # PER-AGENT capacity ρ controller (equality-split formulation)
+    #
+    # Each capacity-owning agent m has its own ρ_m, its own (r_m, s_m), and
+    # its own R-history / best-residual anchors. We apply EXACTLY the same
+    # three-regime Boyd rule used for flow markets above, but evaluated per
+    # agent. Two implementation choices, both justified in §5.4:
+    #
+    #   (a) inc/dec factor = 1.05 and ρ_max = 30 (configurable via data.yaml
+    #       keys `rho_cap_inc_factor`, `rho_cap_max`). Capacity penalties
+    #       interact with binding investment limits; aggressive growth can
+    #       cause limit cycles around the kinked capacity bound.
+    #   (b) tolerance basis uses sqrt(n_yr) (not sqrt(n_slots)) because
+    #       the cap residual has length n_yr (years), not nh·nd·n_yr.
+    # ----------------------------------------------------------------------
+    cap_state = get(ADMM_state, "Capacity", nothing)
+    if cap_state !== nothing
+        cap_prev_merit = get!(ctrl, "PrevMeritCap", Dict{String,Float64}())
+        cap_last_dir   = get!(ctrl, "LastDirCap",   Dict{String,Int}())
+        cap_step_scale = get!(ctrl, "StepScaleCap", Dict{String,Float64}())
+        cap_best_pr    = get!(ctrl, "BestPrimalCap", Dict{String,Float64}())
+        cap_best_du    = get!(ctrl, "BestDualCap",   Dict{String,Float64}())
+
+        eps_abs = get(ADMM_state, "EpsilonAbs", 1.0)
+        eps_rel = get(ADMM_state, "EpsilonRel", 0.0)
+        n_yr    = get(ADMM_state, "n_yr", 1)
+        sqrt_y  = sqrt(max(1, n_yr))
+
+        # Defaults match the flow-market H2_GC settings (moderate adaptation,
+        # tight upper bound) since capacity has the same "thin" character
+        # (few decision variables per year, strong CAPEX coupling).
+        inc_factor_cap = get(ADMM_state, "rho_cap_inc_factor", 1.05)
+        dec_factor_cap = 1.0 / inc_factor_cap
+        ρ_max_cap      = get(ADMM_state, "rho_cap_max", 30.0)
+        ρ_min_cap      = 0.05
+
+        balance_threshold = 1.2
+        mid_resid_factor  = 5.0
+        high_resid_factor = 2.0
+        window_len = 10
+        improve_tol = 1.02
+
+        for m in get(cap_state, "agents", String[])
+            isempty(cap_state["Primal"][m]) && continue
+            isempty(cap_state["Dual"][m])   && continue
+            rp = cap_state["Primal"][m][end]
+            rd = cap_state["Dual"][m][end]
+            ρ  = cap_state["ρ"][m][end]
+
+            # First iteration: dual residual is undefined (no z^{k-1}); keep
+            # ρ fixed for one step so the controller has a finite reference.
+            if !isfinite(rd)
+                push!(cap_state["ρ"][m], ρ)
+                push!(cap_state["R_hist"][m], isfinite(rp) ? rp : 0.0)
+                continue
+            end
+
+            # Anchor best-seen residuals (used by the freeze guard).
+            best_pr = get(cap_best_pr, m, Inf)
+            best_du = get(cap_best_du, m, Inf)
+            if isfinite(rp) && rp < best_pr; best_pr = rp; end
+            if isfinite(rd) && rd < best_du; best_du = rd; end
+            cap_best_pr[m] = best_pr
+            cap_best_du[m] = best_du
+
+            R = (isfinite(rp) ? rp : 0.0) + (isfinite(rd) ? rd : 0.0)
+            push!(cap_state["R_hist"][m], R)
+
+            # Frozen: keep ρ_m fixed for the rest of the run.
+            if cap_state["ρ_frozen"][m]
+                push!(cap_state["ρ"][m], ρ)
+                continue
+            end
+
+            # Boyd-style scaled tolerances at the AGENT level.
+            scale_pr = max(cap_state["ResidualScale_Primal"][m], 1.0)
+            scale_du = max(cap_state["ResidualScale_Dual"][m],   1.0)
+            eps_pr = eps_abs * sqrt_y + eps_rel * scale_pr
+            eps_du = eps_abs * sqrt_y + eps_rel * scale_du
+            market_tol = max(eps_pr, eps_du)
+
+            R_hist = cap_state["R_hist"][m]
+            diverging = length(R_hist) >= 3 && R_hist[end] > R_hist[end-1] > R_hist[end-2]
+
+            dir = 0
+            if diverging
+                if rp > balance_threshold * rd
+                    dir = +1
+                elseif rd > balance_threshold * rp
+                    dir = -1
+                else
+                    dir = -1
+                end
+            elseif rp > balance_threshold * rd
+                can_increase = true
+                if length(R_hist) >= window_len
+                    R_now  = R_hist[end]
+                    R_past = R_hist[end - window_len + 1]
+                    if R_now > improve_tol * R_past
+                        can_increase = false
+                    end
+                end
+                if can_increase
+                    dir = +1
+                end
+            elseif rd > balance_threshold * rp
+                dir = -1
+            else
+                # Balanced residuals.
+                if rp <= mid_resid_factor * market_tol && rd <= mid_resid_factor * market_tol
+                    # Near-convergence freeze (regime 3).
+                    close_to_best = (rp <= improve_tol * best_pr) && (rd <= improve_tol * best_du)
+                    if close_to_best
+                        cap_state["ρ_frozen"][m] = true
+                    end
+                elseif rp > high_resid_factor * market_tol && rd > high_resid_factor * market_tol
+                    # Gentle push (regime 2) — only if R-window not worsening.
+                    can_increase = true
+                    if length(R_hist) >= window_len
+                        R_now  = R_hist[end]
+                        R_past = R_hist[end - window_len + 1]
+                        if R_now > improve_tol * R_past
+                            can_increase = false
+                        end
+                    end
+                    if can_increase && !diverging
+                        dir = +1
+                    end
+                end
+            end
+
+            merit = max(rp / max(eps_pr, 1e-9), isfinite(rd) ? rd / max(eps_du, 1e-9) : 0.0)
+            prev = get(cap_prev_merit, m, Inf)
+            last = get(cap_last_dir, m, 0)
+            step_scale = get(cap_step_scale, m, 1.0)
+            if isfinite(prev)
+                if merit > 1.01 * prev
+                    step_scale = max(0.5, 0.8 * step_scale)
+                    if last != 0 && (dir == 0 || dir == last)
+                        dir = -last
+                    end
+                elseif merit < 0.995 * prev
+                    if dir != 0 && dir == last
+                        step_scale = min(1.5, 1.05 * step_scale)
+                    else
+                        step_scale = min(1.5, 1.02 * step_scale)
+                    end
+                end
+            end
+            # Cap-specific gain cap: investment is stiff (kinked CAPEX). Limit
+            # the per-step controller gain to 1.0 to avoid limit cycles.
+            step_scale = min(step_scale, 1.0)
+
+            if dir > 0
+                eff_inc = 1.0 + (inc_factor_cap - 1.0) * step_scale
+                push!(cap_state["ρ"][m], min(ρ_max_cap, eff_inc * ρ))
+            elseif dir < 0
+                eff_dec = 1.0 - (1.0 - dec_factor_cap) * step_scale
+                push!(cap_state["ρ"][m], max(ρ_min_cap, eff_dec * ρ))
+            else
+                push!(cap_state["ρ"][m], ρ)
+            end
+            cap_prev_merit[m] = merit
+            cap_last_dir[m]   = dir
+            cap_step_scale[m] = step_scale
+        end
+    end
+
     return nothing
 end

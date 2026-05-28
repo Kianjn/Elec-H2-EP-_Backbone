@@ -66,9 +66,16 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
         @warn "Social planner did NOT solve to optimality (status: $status). " *
               "Cannot extract duals or variable values."
-        if status == MOI.INFEASIBLE || status == MOI.INFEASIBLE_OR_UNBOUNDED
+        if status == MOI.INFEASIBLE
             @error "Model is INFEASIBLE. Check that demand ≤ total supply capacity " *
                    "for all markets (especially EP: D_EP = Total_Demand × LOAD_EP ≤ Σ EP capacities)."
+        elseif status == MOI.INFEASIBLE_OR_UNBOUNDED
+            @error "Model status is INFEASIBLE_OR_UNBOUNDED. " *
+                   "Run LP dual-recovery with DualReductions=0 to disambiguate; " *
+                   "if infeasible, check market-capacity feasibility (especially EP)."
+        elseif status == MOI.DUAL_INFEASIBLE
+            @error "Model appears unbounded in LP dual-recovery (DUAL_INFEASIBLE). " *
+                   "Check that all welfare-linked variables in quadratic terms were fixed before LP re-solve."
         end
         return
     end

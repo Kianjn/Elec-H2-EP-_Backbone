@@ -48,6 +48,10 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
     ph_slice(mkt) = length(ph(mkt)) == n_it + 1 ? ph(mkt)[2:end] : ph(mkt)
 
     # ── ADMM_Convergence.csv (with per-VRES contract columns) ─────────────────
+    # In addition to the 5 base markets and the PPA/HPA contract columns, we
+    # now also expose aggregate (Σ over agents) and PER-AGENT capacity
+    # residuals from the new equality-split formulation; see
+    # DOCUMENTATION.md §5.4.
     conv_cols = Dict(
         :iter => 1:n_it,
         :elec_primal => ADMM_state["Residuals"]["Primal"]["elec"],
@@ -60,7 +64,19 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         :H2_GC_dual => ADMM_state["Residuals"]["Dual"]["H2_GC"],
         :EP_primal => ADMM_state["Residuals"]["Primal"]["EP"],
         :EP_dual => ADMM_state["Residuals"]["Dual"]["EP"],
+        :cap_primal => ADMM_state["Residuals"]["Primal"]["cap"],
+        :cap_dual   => ADMM_state["Residuals"]["Dual"]["cap"],
     )
+    cap_state_save = get(ADMM_state, "Capacity", Dict())
+    cap_agents_save = get(cap_state_save, "agents", String[])
+    for m in cap_agents_save
+        rp = get(get(cap_state_save, "Primal", Dict()), m, Float64[])
+        rd = get(get(cap_state_save, "Dual",   Dict()), m, Float64[])
+        rp_aligned = length(rp) >= n_it ? rp[1:n_it] : vcat(rp, fill(NaN, n_it - length(rp)))
+        rd_aligned = length(rd) >= n_it ? rd[1:n_it] : vcat(rd, fill(NaN, n_it - length(rd)))
+        conv_cols[Symbol("cap_primal_$(m)")] = rp_aligned
+        conv_cols[Symbol("cap_dual_$(m)")]   = rd_aligned
+    end
     C = get(ADMM_state, "ppa", Dict())
     for vres_id in ppa_vres
         haskey(C, "Primal") || break
@@ -103,6 +119,13 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         :EP_price_mean => ph_slice("EP"),
         :EP_imb_mean => ADMM_state["ImbalanceMean"]["EP"],
     )
+    # Per-agent capacity ρ_m columns (new equality-split formulation).
+    for m in cap_agents_save
+        ρhist = get(get(cap_state_save, "ρ", Dict()), m, Float64[])
+        ρ_aligned = length(ρhist) >= n_it ? ρhist[1:n_it] :
+                    vcat(ρhist, fill(isempty(ρhist) ? NaN : ρhist[end], n_it - length(ρhist)))
+        diag_cols[Symbol("cap_rho_$(m)")] = ρ_aligned
+    end
     for vres_id in ppa_vres
         haskey(C, "ρ") || break
         diag_cols[Symbol("ppa_$(vres_id)_rho")] = C["ρ"][vres_id][1:n_it]
@@ -122,6 +145,54 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
     diag_df = DataFrame(diag_cols)
     _move_first!(diag_df, :iter)
     CSV.write(joinpath(results_dir, "ADMM_Diagnostics.csv"), diag_df)
+
+    # ── Capacity_Consensus.csv ──────────────────────────────────────────
+    # Per-iteration, per-agent, per-year snapshot of the capacity ADMM split.
+    # Mirrors save_results.jl; see DOCUMENTATION.md §5.4 and §11.
+    if !isempty(cap_agents_save)
+        cap_rows = NamedTuple[]
+        for m in cap_agents_save
+            xhist = if !isempty(get(results["Cap_VRES"], m, []))
+                results["Cap_VRES"][m]
+            elseif !isempty(get(results["Cap_Elec_H2"], m, []))
+                results["Cap_Elec_H2"][m]
+            elseif !isempty(get(results["Cap_EP_Green"], m, []))
+                results["Cap_EP_Green"][m]
+            else
+                Vector{Vector{Float64}}()
+            end
+            zhist = get(get(cap_state_save, "z", Dict()), m, Vector{Vector{Float64}}())
+            λhist = get(get(cap_state_save, "λ", Dict()), m, Vector{Vector{Float64}}())
+            ρhist = get(get(cap_state_save, "ρ", Dict()), m, Float64[])
+            rp_hist = get(get(cap_state_save, "Primal", Dict()), m, Float64[])
+            rd_hist = get(get(cap_state_save, "Dual",   Dict()), m, Float64[])
+            nrec = min(length(xhist), length(zhist))
+            for i in 1:nrec
+                xvec = xhist[i]
+                zvec = zhist[i]
+                λvec = i <= length(λhist) ? λhist[i] : zeros(length(xvec))
+                ρ_i  = i <= length(ρhist) ? ρhist[i] : (isempty(ρhist) ? NaN : ρhist[end])
+                rp_i = i <= length(rp_hist) ? rp_hist[i] : NaN
+                rd_i = i <= length(rd_hist) ? rd_hist[i] : NaN
+                for jy in 1:length(xvec)
+                    push!(cap_rows, (
+                        iter         = i,
+                        AgentID      = m,
+                        jy           = jy,
+                        x_cap        = xvec[jy],
+                        z_cap        = zvec[jy],
+                        lambda_cap   = jy <= length(λvec) ? λvec[jy] : 0.0,
+                        rho_cap      = ρ_i,
+                        primal_local = rp_i,
+                        dual_local   = rd_i,
+                    ))
+                end
+            end
+        end
+        if !isempty(cap_rows)
+            CSV.write(joinpath(results_dir, "Capacity_Consensus.csv"), DataFrame(cap_rows))
+        end
+    end
 
     # ── Per-market history (5 base markets only; contract focal info in PPAs/HPAs CSVs) ─
     markets = Dict(
@@ -616,6 +687,21 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         λh = get(λ_hpa_dict, h2_id, [])
         m = isempty(λh) ? 0.0 : mean(λh[end])
         println("  HPA_$(h2_id) mean = ", round(m, digits=6))
+    end
+
+    # Capacity consensus summary (per-agent equality split). See §5.4.
+    if !isempty(cap_agents_save)
+        println()
+        println("Capacity consensus (per-agent equality split, x_cap = z_cap):")
+        for m in cap_agents_save
+            rp = get(get(cap_state_save, "Primal", Dict()), m, Float64[])
+            rd = get(get(cap_state_save, "Dual",   Dict()), m, Float64[])
+            ρh = get(get(cap_state_save, "ρ",      Dict()), m, Float64[])
+            rp_v = isempty(rp) ? NaN : rp[end]
+            rd_v = isempty(rd) ? NaN : rd[end]
+            ρ_v  = isempty(ρh) ? NaN : ρh[end]
+            @printf("  %-20s  primal = %.3e,  dual = %.3e,  ρ = %.3f\n", m, rp_v, rd_v, ρ_v)
+        end
     end
 
     return nothing

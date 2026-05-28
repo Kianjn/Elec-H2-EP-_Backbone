@@ -162,14 +162,37 @@ function define_common_parameters!(m::String, mod::Model, data::Dict, ts::Dict, 
     mod.ext[:parameters][:ρ_EP]      = 1.0
 
     # Investment consensus: agents with endogenous capacity (VRES, H2 producer,
-    # GreenOfftaker) get cap_bar[jy] = capacity needed to support flow consensus,
-    # and ρ_cap for the penalty (ρ_cap/2)*(cap - cap_bar)². Couples investment
-    # to flow ADMM so ME converges to SP when γ=1. Use low initial ρ_cap to
-    # avoid over-constraining early iterations.
+    # GreenOfftaker) participate in a PER-AGENT ADMM EQUALITY SPLIT for
+    # capacity. For each such agent m and year y we maintain three local
+    # parameters that ADMM_subroutine refreshes every iteration:
+    #
+    #   :z_cap[y]   — auxiliary capacity target derived from flow consensus
+    #                 (this is the analogue of g_bar for the capacity split)
+    #   :λ_cap[y]   — Lagrange multiplier for the equality x_cap = z_cap
+    #   :ρ_cap     — scalar penalty weight for this agent
+    #
+    # The agent objective then adds, per year:
+    #   λ_cap[y] · (x_cap[y] - z_cap[y]) + (ρ_cap/2) · (x_cap[y] - z_cap[y])²
+    #
+    # WHY the equality split (vs. a pure quadratic penalty against a derived
+    # target):
+    #   * The dual λ_cap provides the missing first-order force that drives
+    #     x_cap towards z_cap exactly in the limit. With only a quadratic
+    #     penalty, once ρ_cap saturates the CAPEX gradient dominates and
+    #     leaves a persistent residual; convergence stalls regardless of how
+    #     smart the ρ controller is.
+    #   * Per-agent ρ_cap lets the controller specialise per agent type
+    #     (VRES vs electrolyzer vs green offtaker) instead of compromising
+    #     on a single global value. See update_rho.jl and DOCUMENTATION.md
+    #     §5.4 for the full justification.
+    #
+    # All three parameters are initialised here as zeros / `rho_cap_initial`;
+    # ADMM_subroutine overwrites them each iteration from ADMM["Capacity"][m].
     rho_cap = get(data, "rho_cap_initial", 0.1)
     if agent_type in ("VRES", "GreenProducer", "GreenOfftaker")
-        mod.ext[:parameters][:cap_bar] = zeros(n_years)
-        mod.ext[:parameters][:ρ_cap]   = rho_cap
+        mod.ext[:parameters][:z_cap]  = zeros(n_years)
+        mod.ext[:parameters][:λ_cap]  = zeros(n_years)
+        mod.ext[:parameters][:ρ_cap]  = rho_cap
     end
 
     return mod, agents

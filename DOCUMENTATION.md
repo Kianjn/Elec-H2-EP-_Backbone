@@ -162,7 +162,7 @@ The two parties would generally choose different capacities if unconstrained. AD
 - **Supplier side** minimises: `(ρ_cap/2) × (cap − ḡ_cap)²`
 - **Buyer side** minimises: `(ρ_cap/2) × (−cap − ḡ_cap)²`
 
-Here `ḡ_cap` is the consensus target from the sharing-ADMM formula (see §5.5). As iterations proceed, capacity imbalance shrinks and `ḡ_cap` moves toward a value both can accept.
+Here `ḡ_cap` is the consensus target `z_cap` from the per-agent capacity ADMM equality split (see §5.4). As iterations proceed, the capacity residual `‖x_cap − z_cap‖` shrinks and `λ_cap` accumulates the missing first-order force that drives `x_cap → z_cap` exactly in the limit.
 
 **3. Equilibrium outcome**
 
@@ -198,7 +198,7 @@ In the **contracts case**:
 | Agent | Type | Description |
 |---|---|---|
 | `Gen_VRES_01` | `VRES` | Variable renewable (e.g. solar). Zero marginal cost. Produces both electricity and elec GCs (1:1). Constrained by hourly availability factor × **endogenous capacity**. Decides yearly installed capacity and investment (MW), incurring fixed annualised CAPEX `FixedCost_per_MW × capacity`. In `market_exposure_contracts.jl`: splits generation into `g_EOM` (pool) and `g_ppa` (PPA); `g_ppa ≤ ppa_cap` at every hour; revenue includes `λ_ppa × g_ppa`. |
-| `Gen_Conv_01` | `Conventional` | Dispatchable thermal fleet proxy. Constant availability (AF = 1). Uses a calibrated 3-stage increasing marginal-cost curve (coal-like, nuclear-like, gas-like blocks) with the same total capacity and full-load average cost as the original single-block parameterisation. No GC production. |
+| `Gen_Conv_01` | `Conventional` | Dispatchable thermal fleet proxy. Constant availability (AF = 1). Uses a 3-stage increasing marginal-cost curve (coal-like, biomass-like, NG-like blocks) with configurable stage shares, stage-start marginal costs, and a final high-load marginal cost. No GC production. |
 | `Cons_Elec_01` | `Consumer` | Elastic electricity demand. Quadratic utility `U(d) = A_E·d − ½B_E·d²` gives inverse demand `p(d) = A_E − B_E·d`. Bounded by `PeakLoad × load_profile`. |
 
 ### 3.2 Hydrogen-Sector Agent
@@ -307,7 +307,17 @@ min Σ W × ( Σ_s (base_s×g_s + 0.5×slope_s×g_s²) − λ_elec×g )  +  (ρ_
 
 subject to: g = Σ_s g_s,   0 ≤ g_s ≤ cap_s
 ```
-where stage capacities/costs are calibrated from `Capacity`, `MarginalCost`, `StageCapacityShares`, `StageBaseCostMultipliers`, and `StageSlopeMultipliers` in `data.yaml`, preserving total capacity and full-load average variable cost.
+where stage capacities/costs are built from `Capacity`, `StageCapacityShares`, `StageBaseCosts`, and `FinalMarginalCost` in `data.yaml`. Shares are normalized internally, and slopes are derived to ensure continuity across stage boundaries (`end MC_1 = base_2`, `end MC_2 = base_3`, `end MC_3 = FinalMarginalCost`). Changing shares changes the conventional fleet's aggregate average variable cost.
+
+**Why these parameter values are used (default case):**
+- `StageBaseCosts = [35, 55, 85]` €/MWh represents a stylized thermal merit order (lower-cost baseload-like block, medium-cost block, higher-cost flexible block).
+- `FinalMarginalCost = 140` €/MWh captures the high-load tail where less efficient/flexible thermal generation sets marginal cost.
+- Equal default shares (1/3 each) are neutral starting assumptions; users can rebalance shares to encode system-specific thermal composition.
+
+**Why linear-within-stage is realistic enough:**
+- Real unit commitment/economic dispatch stacks are piecewise and heterogeneous; aggregated systems are commonly approximated by piecewise-linear or piecewise-quadratic supply curves.
+- Over a limited dispatch band per stage, a linear marginal-cost profile is a practical local approximation to heat-rate/fuel/emissions variability.
+- Enforcing continuity across stage boundaries avoids artificial price jumps while preserving increasing scarcity cost as dispatch moves to higher-cost blocks.
 
 **Consumer:**
 ```
@@ -679,14 +689,15 @@ That extra context is the key reason convergence is more reliable in this multi-
 | `elec`, `elec_GC` | 1.05 | 1/1.05 | 5,000 | Large-volume core markets; can tolerate moderately faster adaptation. |
 | `H2`, `EP` | 1.01 | 1/1.01 | 100 | More kink-sensitive due to coupling and capacity effects; slower updates reduce oscillation risk. |
 | `H2_GC` | 1.05 | 1/1.05 | 100 | Thin but hourly market; moderate adaptation with conservative cap. |
-| `cap` | 1.05 | 1/1.05 | 100 | Consensus over investment-capacity variables; moderate damping preferred. |
 | `ppa`, `ppa_cap` | 1.05 | 1/1.05 | 500 | Thin bilateral pool; conservative but responsive. |
 | `hpa`, `hpa_cap` | 1.05 | 1/1.05 | 500 | Same logic as PPA for hydrogen contracts. |
+
+Capacity consensus is **no longer a single market** in this table: the per-agent ADMM equality split (§5.4) runs an independent three-regime controller on every capacity-owning agent's `ρ_cap[m]`. The controller parameters are kept identical to the H2_GC row (inc/dec = 1.05, ρ_max = 30 by default, configurable via `data.yaml` keys `rho_cap_inc_factor` and `rho_cap_max`) — capacity has the same "thin" character as H2_GC (few decision variables per year, strong CAPEX coupling, kinked at the investment bound). *Why per-agent*: a single global `ρ_cap` makes the controller compromise across very different agent types (VRES vs electrolyzer vs green offtaker); one stiff agent then forces all others into a poor regime. Per-agent ρ_m lets each capacity type adapt independently and is structurally closer to standard ADMM theory.
 
 #### 5.3.9 Pseudo-code (current behavior)
 
 ```text
-for each market k:
+for each flow market k in {elec, H2, elec_GC, H2_GC, EP}:
     rp = primal_residual(k); rd = dual_residual(k)
     tol = max(ε_pri_k, ε_dual_k)
     update best residual anchors and R_hist[k] with R = rp + rd
@@ -711,9 +722,130 @@ for each market k:
             apply mild increase (1.01) only if history is not worsening
         else
             keep ρ unchanged
+
+# Capacity uses the SAME three-regime rule, but per agent (see §5.4).
+for each capacity-owning agent m in cap_agents:
+    rp_m = ||x_cap_m - z_cap_m||                # primal (over years)
+    rd_m = ||ρ_m * (z_cap_m^k - z_cap_m^{k-1})|| # dual (Δz, Boyd Eq. 3.12)
+    apply the same regime logic to ρ_cap[m], independently for each m
 ```
 
-### 5.4 Convergence Tolerances (Boyd-style)
+### 5.4 Capacity ADMM (Equality Split per Agent)
+
+Capacity consensus is treated as a **textbook ADMM equality split** at the agent level, not as a soft penalty against a derived target. This subsection gives the formal model, residual definitions, and the rationale for each design choice.
+
+#### 5.4.1 Formal model
+
+For every capacity-owning agent `m ∈ {VRES, GreenProducer, GreenOfftaker}` and year `y` we introduce:
+
+- **Primal** `x_{m,y}` — the agent's own capacity variable (`cap_VRES`, `cap_H2_y`, or `cap_EP_y` depending on agent type);
+- **Auxiliary** `z_{m,y}` — a *capacity target* derived from the current flow consensus (the analogue of `g_bar` for capacities). For VRES, `z = max_{h,d} g_bar_elec / AF`; for electrolyzers, `z = max_{h,d} g_bar_H2`; for green offtakers, `z = max_{h,d} g_bar_EP`. In the contracts case, `g_bar` is replaced by the sum of pool and contract flow consensus.
+- **Dual** `λ_{m,y}` — Lagrange multiplier for the equality `x_{m,y} = z_{m,y}`;
+- **Per-agent penalty** `ρ_m` — scalar weight, one per agent.
+
+The agent solves, each ADMM iteration:
+
+```
+x_m^k = argmin_{x ≥ 0}  f_m(x, ...)
+                       + Σ_y [ λ_{m,y}^{k-1} · (x_y - z_{m,y}^k)
+                              + (ρ_m^{k-1}/2) · (x_y - z_{m,y}^k)² ]
+```
+
+where `f_m` is the agent's own economic loss (operational + CAPEX − revenue, plus CVaR / risk and other ADMM market penalties). After all agents solve we perform the **dual ascent**:
+
+```
+λ_{m,y}^k = λ_{m,y}^{k-1} + ρ_m^{k-1} · (x_{m,y}^k - z_{m,y}^k)
+```
+
+This is the standard equality-split ADMM update (Boyd et al. 2011, §3.1).
+
+#### 5.4.2 Residuals
+
+Per-agent residuals follow the Boyd definition for the `x = z` split:
+
+```
+Primal:  r_m^k = || x_m^k - z_m^k ||_2     (over years)
+Dual:    s_m^k = || ρ_m^{k-1} · (z_m^k - z_m^{k-1}) ||_2     (Δz, not Δx)
+```
+
+The dual residual uses the change in the **auxiliary** `z` (not the change in the primal `x`). This is the ADMM-correct definition: if `x` has frozen but `z` is still drifting, a Δx-based residual would falsely declare convergence; Δz captures the true ADMM dual progress (Boyd et al. 2011, Eq. 3.12).
+
+For diagnostics and the one-line summary, the aggregate residuals reported in `ADMM_Convergence.csv` as `cap_primal` / `cap_dual` are the L2 norms over agents:
+
+```
+r_cap^k = sqrt(Σ_m r_m^k²),    s_cap^k = sqrt(Σ_m s_m^k²)
+```
+
+#### 5.4.3 Stopping rule
+
+Convergence is checked **per agent**, not on the aggregate. For each capacity-owning agent the Boyd absolute + relative test:
+
+```
+ε_pri_m  = ε_abs · sqrt(n_yr) + ε_rel · ResidualScale_Primal_m
+ε_dual_m = ε_abs · sqrt(n_yr) + ε_rel · ResidualScale_Dual_m
+```
+
+with `ResidualScale_*_m` initialised from the first non-zero observation per agent. Capacity is converged iff `r_m ≤ ε_pri_m` and `s_m ≤ ε_dual_m` for **every** `m`. *Why per-agent and not aggregate*: averaging residuals across agents can hide a single laggard whose split is still far from feasibility; an aggregate test would declare convergence even when one agent type (e.g. a strongly binding electrolyzer) has not satisfied the equality. The per-agent test is direction-correct: capacity is "done" when every agent's split is satisfied.
+
+The optional knob `cap_tol_relax` (default 100 in the contracts case) multiplies the right-hand side of the per-agent test; see §5.7.
+
+#### 5.4.4 Per-agent ρ controller
+
+Each agent has an independent three-regime controller (same regimes as §5.3) operating on its own `r_m`, `s_m`, best-residual anchors, and R-history (sum-of-residuals window). Default per-agent parameters: increase factor 1.05, decrease factor 1/1.05, `ρ_max = 30`, `ρ_min = 0.05`. Configurable via `data.yaml`:
+
+```yaml
+ADMM:
+  rho_cap_initial: 0.1
+  rho_cap_inc_factor: 1.05
+  rho_cap_max: 30.0
+```
+
+The per-step controller gain is additionally capped at 1.0 (`step_scale = min(step_scale, 1.0)`): capacity has kinked CAPEX gradients at the investment bounds, and aggressive multiplicative steps cause limit cycles around the kink. This is the same conservatism applied to the H2_GC market in §5.3.8.
+
+#### 5.4.5 Why the equality split (and why a pure quadratic penalty was not enough)
+
+The previous formulation used only the quadratic term, with `cap_bar` (the derived target) as the consensus reference and a single shared `ρ_cap`:
+
+```
+cap_pen_old = (ρ_cap / 2) · Σ_y (x_{m,y} - cap_bar_{m,y})²
+```
+
+This produces a soft penalty, **not** an equality constraint. Two consequences observed in practice (and motivating this refactor):
+
+1. **Persistent capacity residual under bounded `ρ_cap`.** The agent's first-order condition for `x` includes a CAPEX gradient `F_cap` plus the penalty derivative `ρ_cap · (x - z)`. As long as `ρ_cap · (x - z)` is comparable to `F_cap`, the residual cannot vanish — the agent prefers to leave a small gap rather than over-invest. Raising `ρ_cap` indefinitely would close the gap but causes ill-conditioning, oscillation around the kinked investment bound, and instability of all other markets that share the agent (e.g. an electrolyzer's elec, elec_GC, H2, H2_GC, and EP couplings). The original design therefore kept `ρ_cap ≤ 30` and accepted a persistent residual.
+2. **No first-order force at the equilibrium.** ADMM theory says `x = z` is recovered exactly only when the dual term `λ · (x - z)` is in the Lagrangian. Without `λ`, the equilibrium gap is governed entirely by the (bounded) quadratic gradient — there is no mechanism that drives the gap to zero in the limit.
+
+Adding the dual term and updating it via `λ ← λ + ρ · (x - z)` solves both problems at once: the linear term provides the missing first-order force, while the quadratic term continues to act as a curvature-providing regulariser. This is exactly the structure used in the older stable ADMM pattern that motivated this refactor; we adapt it to the *investment-only* setting (no capacity *market*; no clearing constraint) by deriving `z` from flow consensus rather than from a market imbalance.
+
+#### 5.4.6 Why per-agent ρ (and not a single global ρ_cap)
+
+A single global `ρ_cap` forces a compromise across very heterogeneous agent types:
+
+- **VRES**: capacity grows by tens of MW per step; CAPEX is moderate; the binding constraint is `cap ≥ peak(g)/AF`.
+- **Electrolyzer**: capacity is tightly coupled to four markets simultaneously (elec, elec_GC, H2, H2_GC); CAPEX is high; the binding constraint is `cap ≥ peak(h2_out)`.
+- **Green offtaker**: capacity is decoupled from elec but tied to EP flow; CAPEX is small relative to operational margin.
+
+When the controller picks a single `ρ_cap` that suits one of these, the others sit either in the dead band (no progress) or over the kink (limit cycles). Per-agent `ρ_m` removes this compromise; each agent's controller specialises to its own residual scale.
+
+#### 5.4.7 Units check (and why penalties don't bias the social-planner equivalence)
+
+The economic loss `f_m` is in € (currency); `λ · (x - z)` has units `[€/MW] · [MW] = €`; `(ρ/2) · (x - z)²` has units `[€/MW²] · [MW²] = €`. All three terms add cleanly. Because the ADMM penalty and dual terms vanish exactly at consensus (`x = z`), they have no effect on the centralised social-planner optimum: the planner does not solve a per-agent subproblem, hence has no `λ_cap` / `ρ_cap` / `z_cap` parameters (`add_*_to_planner!` functions never touch these). At γ = 1 (risk-neutral) the ADMM equilibrium therefore converges to the same primal/dual solution as the planner by the first welfare theorem — see §5.5 for the SP warm-start that we rely on for fast convergence.
+
+#### 5.4.8 Iteration order in the main loop
+
+Each ADMM iteration `k` for the capacity block runs:
+
+1. **Derive `z^k`**: `ADMM_subroutine` computes `z_m^k` for every cap agent from the just-set flow consensus and pushes it to history (`ADMM["Capacity"]["z"][m]`).
+2. **Set parameters on agent model**: `:z_cap = z_m^k`, `:λ_cap = λ_m^{k-1}` (read from history), `:ρ_cap = ρ_m^{k-1}` (read from history).
+3. **Agent solves**: produces `x_m^k`.
+4. **Dual ascent**: `λ_m^k = λ_m^{k-1} + ρ_m^{k-1} · (x_m^k - z_m^k)`, pushed to history.
+5. **Residuals**: `r_m^k`, `s_m^k` computed and pushed.
+6. **Controller**: `update_rho!` updates `ρ_m^k` per agent using the three-regime rule.
+7. **Convergence**: per-agent test (§5.4.3).
+
+This ordering is identical for `market_exposure` and `market_exposure_contracts`; only the `z` derivation differs (the contracts case adds the PPA / HPA flow contributions when computing the peak of `g_bar + g_bar_ppa`, etc.).
+
+### 5.5 Convergence Tolerances (Boyd-style)
 
 Instead of a single scalar tolerance, the implementation follows the **absolute + relative** stopping criteria proposed by Boyd et al. (2011) for ADMM. For each market `k` we define:
 
@@ -760,15 +892,15 @@ The **contracts case** (`market_exposure_contracts`) has more coupled markets (s
 - **`epsilon`** — Used by `market_exposure`. Default 2.
 - **`epsilon_contracts`** — Used by `market_exposure_contracts` when set in `data.yaml`. More relaxed (e.g. 5) so that convergence can be declared when residuals are acceptable (~50 iterations), before adaptive ρ or price updates destabilize the system. If `epsilon_contracts` is not set, the contracts case falls back to `epsilon`.
 
-Both cases use the same convergence logic; only the tolerance value differs. The capacity consensus in the contracts case additionally uses `cap_tol_relax` (see §5.6).
+Both cases use the same convergence logic; only the tolerance value differs. The capacity consensus in the contracts case additionally uses `cap_tol_relax` (see §5.7).
 
-### 5.5 Warm-start from Social Planner
+### 5.6 Warm-start from Social Planner
 
 Warm-starting ADMM from the social planner solution is **critical** for fast convergence. Without it, agents start with zero consensus targets and zero capacity seeds, which biases them toward suboptimal quantities.
 
 Three warm-start components: (1) **Price (λ)**: Load hourly prices from `Market_Prices.csv`. (2) **Primal (quantities)**: Load from `SP_Primal_Quantities.csv` so iteration 1 has ḡ = SP; without this, ḡ = 0 biases agents toward zero. (3) **Capacity**: Load from `SP_Capacities.csv` and `set_start_value` on capacity variables. Run `social_planner.jl` first, then `market_exposure.jl`. A single message is printed: `ADMM warm-start: λ from SP prices, primal quantities from SP, capacity seeds for N agents`.
 
-### 5.6 Contract Pools ADMM (market_exposure_contracts.jl)
+### 5.7 Contract Pools ADMM (market_exposure_contracts.jl)
 
 In the contracts case, the ADMM loop (`ADMM_contracts.jl`) extends the standard loop with:
 
@@ -780,12 +912,12 @@ In the contracts case, the ADMM loop (`ADMM_contracts.jl`) extends the standard 
 
 **Relaxed tolerances for the contracts case.** Because the contracts case has more coupled markets and stronger interdependence (VRES splits pool vs contract; capacity consensus depends on both `g_bar_elec` and `g_bar_ppa`), two additional parameters relax convergence criteria:
 
-- **`epsilon_contracts`** — More relaxed base tolerance (e.g. 5) for all flow markets. See §5.4 *Two epsilon values*.
+- **`epsilon_contracts`** — More relaxed base tolerance (e.g. 5) for all flow markets. See §5.5 *Two epsilon values*.
 - **`cap_tol_relax`** — Multiplier for the capacity consensus tolerance. Effective cap tolerance = standard (ε_pri, ε_dual) × `cap_tol_relax`. Default 100. This allows convergence when flow markets have cleared even if capacity consensus lags, since capacity is tightly coupled to flows that are still settling.
 
 For details on how both pools choose contract capacities under pay-as-produced logic, see §2 *Contract pools* → *How contract capacity is determined*.
 
-### 5.7 Sign Convention
+### 5.8 Sign Convention
 
 | Role | Net position sign | Example |
 |---|---|---|
@@ -794,7 +926,7 @@ For details on how both pools choose contract capacities under pay-as-produced l
 
 Market imbalance = Σ (net positions). Positive imbalance = excess supply → price decreases. Negative imbalance = excess demand → price increases.
 
-### 5.8 Practical Convergence Behavior and Monotonicity
+### 5.9 Practical Convergence Behavior and Monotonicity
 
 With coupled multi-market ADMM (especially with endogenous investments and contract couplings), strict **per-iteration monotonic decrease** of every residual is generally not guaranteed. What the controller is designed to guarantee in practice is stronger **best-so-far progress** and anti-stall recovery:
 
@@ -812,7 +944,7 @@ This design avoids the common "improve-then-wander" ADMM behavior in hard regime
 
 ## 6. Social Planner Benchmark
 
-The social planner (`social_planner.jl`) solves a single centralised convex QCP (quadratically constrained program) that maximises risk-adjusted social welfare subject to all individual agent constraints plus market-clearing balance constraints. It serves as the theoretical first-best benchmark. When `γ=1` (risk-neutral), the CVaR term vanishes and the planner reduces to a standard QP, matching the ADMM risk-neutral equilibrium.
+The social planner (`social_planner.jl`) solves a single centralised convex QCP (quadratically constrained program) that maximises risk-adjusted social welfare subject to all individual agent constraints plus market-clearing balance constraints. It serves as the theoretical first-best benchmark. When `γ=1` (risk-neutral), the CVaR term drops from the objective economically; in this codebase we still keep the unified epigraph/QCP structure and recover prices through the same QCP→LP dual-recovery pipeline for consistency across runs.
 
 ### 6.1 Market-Clearing Constraints
 
@@ -826,7 +958,8 @@ The social planner (`social_planner.jl`) solves a single centralised convex QCP 
 
 ### 6.2 Price Recovery (Two-Step QCP Dual Recovery)
 
-Equilibrium prices are the **dual variables** (shadow prices) of the market-clearing constraints. However, the epigraph formulation (§6.4) makes the model a QCP, and **Gurobi does not provide dual variables for QCP models**.
+Equilibrium prices are the **dual variables** (shadow prices) of the market-clearing constraints.  
+With social CVaR active through the epigraph construction, the planner is solved as a convex QCP. In this workflow, we recover market prices via an equivalent LP re-solve because solver-accessible duals for the needed balance constraints are taken from the LP model used for reporting.
 
 The solution is a **two-step dual recovery** procedure:
 
@@ -843,12 +976,60 @@ The solution is a **two-step dual recovery** procedure:
 
 5. **Step 5 — Cleanup**: Unfix demand + conventional stage variables, delete linear epigraph constraints, restore original quadratic epigraph constraints (model back to QCP form for potential re-use).
 
-This approach is **exact**: the LP has the same feasible allocation as the QCP (all quadratic-welfare variables fixed at optimal values), so the duals represent the correct marginal prices at the risk-averse optimal allocation.
+#### Why This Is Exact (Mathematical Argument)
 
-**Why fixing quadratic-welfare variables works**: The only quadratic constraints are the epigraph constraints `sw_aux[y] ≤ social_welfare[y]`, where `social_welfare[y]` contains:
+Let:
+- `x` be all planner variables,
+- `z` be the subset that enters quadratically in social welfare (`d_E`, `d_GC_E`, `d_EP`, `q_stage`),
+- `w` be the remaining variables,
+- `φ(z, w)` be social welfare expression,
+- epigraph constraints `sw_aux[y] ≤ φ_y(z, w)`.
+
+After Step 1, we have an optimal QCP point `(z*, w*, sw_aux*)`.  
+In Step 2, we fix `z = z*` and replace each epigraph QC by:
+
+`sw_aux[y] ≤ φ_y(z*, w)` ,
+
+which is linear in `w` because all quadratic terms were in `z` and are now constants.
+
+Define:
+- `F_QCP(z*) := { (w, sw_aux) | original linear constraints + original epigraph constraints with z=z* }`,
+- `F_LP(z*)  := { (w, sw_aux) | original linear constraints + linearized epigraph constraints with z=z* }`.
+
+By direct substitution, `F_QCP(z*) = F_LP(z*)` (same inequalities, just algebraically evaluated at fixed `z*`).  
+Hence the LP in Step 3 is **not an approximation** of a different problem; it is the same feasible set slice at the Step-1 optimum `z*`. Therefore:
+- primal point `(w*, sw_aux*)` remains feasible;
+- marginal values (duals) computed at that point correspond to the same local economic allocation represented by Step 1.
+
+This is the standard epigraph-freeze dual-recovery logic in convex modeling: fix nonlinear/convex components at the optimum, re-solve the equivalent linear slice, then read duals from the LP.
+
+#### Why fixing quadratic-welfare variables works in this model
+
+The only quadratic constraints are the epigraph constraints `sw_aux[y] ≤ social_welfare[y]`, where `social_welfare[y]` contains:
 - `−B/2 × d²` terms from elastic demand agents, and
 - `−0.5 × slope_s × q_stage[s]^2` terms from conventional stage costs.
+
 Fixing these variables makes all squared terms constants, so the epigraph constraints become linear. The replacement constraints use numerically evaluated quadratic welfare constants plus still-variable linear welfare terms, producing a pure LP for dual extraction.
+
+#### Practical notes
+
+- We keep one unified QCP→LP recovery pipeline for all social-planner runs (risk-neutral and risk-averse) for methodological consistency in price extraction.
+- Representative-day weights `W[jd,jy]` are in the objective; raw LP duals are divided by `W[jd,jy]` when writing `Market_Prices.csv`, yielding per-MWh prices.
+
+#### Numerical robustness used in this implementation
+
+In large multi-scenario runs (e.g., 10 years × 8 representative days × 24 hours), QCP→LP recovery can be numerically fragile if thousands of variables are fixed exactly at solver-returned floating-point values. The implementation therefore applies three safeguards:
+
+1. **Deduplicate fixed-variable targets**: a variable can be reachable through multiple containers; each variable is fixed once.
+2. **Temporary bound relaxation for tiny violations**: if a QCP-optimal value is marginally outside its declared bound (typically ~1e-10 to 1e-9 due to numeric tolerances), the corresponding bound is temporarily relaxed to that value before `fix()`, and restored in cleanup.
+3. **Fixed-point-consistent epigraph constants**: quadratic welfare constants used in the linearized epigraph are evaluated at the actual fixed-point values used in LP conversion.
+
+These safeguards do **not** change the economic model; they prevent artificial LP infeasibility caused by numerical inconsistencies in the conversion step. The solved LP remains the same fixed-point slice of the original QCP used for dual extraction.
+
+#### ADMM note on capacity tolerance scaling
+
+In `market_exposure` ADMM, flow-market tolerances use Boyd-style horizon scaling (`ε_abs * sqrt(n_slots) + ε_rel * scale`), where `n_slots = nHours × nReprDays × nYears`.  
+Capacity consensus is not a full flow tensor; it is low-dimensional (yearly scalar/vector). Therefore, capacity convergence is checked on a scalar basis (`sqrt(1)`), avoiding premature convergence declarations from over-loose `sqrt(n_slots)` scaling on the capacity channel.
 
 ### 6.3 Code Architecture
 
@@ -910,7 +1091,7 @@ Both the social planner and market exposure include **endogenous investment** in
 |---|---|---|---|
 | Hours | `JH = 1:nTimesteps` | 24 | Hours within each representative day |
 | Representative days | `JD = 1:nReprDays` | 8 | Representative days (configured in `data.yaml`) |
-| Years | `JY = 1:nYears` | 1 (SP) / 10 (ADMM scenarios) | `social_planner.jl` uses `General.nYears`; ADMM entry points can use `ADMM.nScenarioYears` |
+| Years | `JY = 1:nYears` | typically 10 scenarios | Active horizon uses `ADMM.nScenarioYears` when set (for both SP and ADMM); otherwise falls back to `General.nYears` |
 
 ### 7.2 Representative-Day Weights
 
@@ -944,9 +1125,12 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 | `rho_initial` | 1.0 | Default penalty weight (neutral starting point) |
 | `nScenarioYears` | 10 | Scenario years used by `market_exposure*.jl` (e.g., 2021..2030) |
 | `max_iter` | 1,000 | Maximum ADMM iterations |
-| `epsilon` | 2 | Convergence tolerance for `market_exposure`; see §5.4 for choosing ε. Recommended: 2 for typical energy-system models. |
+| `epsilon` | 2 | Convergence tolerance for `market_exposure`; see §5.5 for choosing ε. Recommended: 2 for typical energy-system models. |
 | `epsilon_contracts` | 5 | [market_exposure_contracts only] More relaxed tolerance for the contracts case (more coupled markets). If unset, falls back to `epsilon`. |
-| `cap_tol_relax` | 100 | [market_exposure_contracts only] Multiplier for capacity consensus tolerance. See §5.6. |
+| `cap_tol_relax` | 100 | [market_exposure_contracts only] Multiplier for capacity consensus tolerance. See §5.7. |
+| `rho_cap_initial` | 0.1 | Initial per-agent capacity penalty for the equality split (§5.4). |
+| `rho_cap_inc_factor` | 1.05 | Per-agent capacity controller increase factor; decrease factor is the reciprocal. See §5.4.4. |
+| `rho_cap_max` | 30 | Per-agent capacity penalty upper bound. See §5.4.4 for justification. |
 
 ### 8.3 Market Parameters
 
@@ -974,7 +1158,7 @@ PPA and HPA both clear energy at their λ prices and enforce scalar capacity con
 See `Data/data.yaml` for the full annotated configuration. Key parameters:
 
 - **VRES**: `Capacity`, `Profile_Column`, `MarginalCost`
-- **Conventional**: `Capacity`, `MarginalCost` (reference full-load average), `StageCapacityShares`, `StageBaseCostMultipliers`, `StageSlopeMultipliers`
+- **Conventional**: `Capacity`, `StageCapacityShares`, `StageBaseCosts`, `FinalMarginalCost` (`MarginalCost` kept only as legacy fallback)
 - **Consumer**: `PeakLoad`, `Load_Column`, `A_E`, `B_E` (quadratic utility)
 - **Electrolyzer**: `Capacity_Electrolyzer`, `Capacity_H2_Output`, `SpecificConsumption`, `OperationalCost`
 - **Green offtaker**: `Capacity_H2_In`, `Capacity_EP_Out`, `Alpha`, `ProcessingCost`
@@ -1106,7 +1290,7 @@ Now/
 | File | Role |
 |---|---|
 | `define_common_parameters.jl` | Creates `mod.ext` dictionaries (sets, parameters, timeseries, variables, constraints, expressions). Fills JH/JD/JY, W, P, γ, β. Determines market participation from agent type. Pre-allocates ADMM placeholder arrays. |
-| `define_power_parameters.jl` | VRES: capacity, AF profile. Conventional: capacity, AF=1, 3-stage calibrated cost curve (`ConvStageCap`, `ConvStageBaseCost`, `ConvStageSlope`) built from stage-share/multiplier inputs while preserving full-load average cost. Consumer: PeakLoad, LOAD_E profile, A_E, B_E. |
+| `define_power_parameters.jl` | VRES: capacity, AF profile. Conventional: capacity, AF=1, 3-stage cost curve (`ConvStageCap`, `ConvStageBaseCost`, `ConvStageSlope`) built from share + absolute stage-cost inputs (coal/biomass/NG style), with no global average-cost rescaling. Consumer: PeakLoad, LOAD_E profile, A_E, B_E. |
 | `define_H2_parameters.jl` | Electrolyzer: Capacity_Electrolyzer, Capacity_H2_Output, SpecificConsumption, OperationalCost, η_elec_H2. |
 | `define_offtaker_parameters.jl` | Copies all keys from agent block; sets gamma_GC = 0.42 (regulatory mandate). |
 | `define_elec_GC_demand_parameters.jl` | PeakLoad, Load_Column, A_GC, B_GC, LOAD_GC timeseries. |
@@ -1132,7 +1316,7 @@ Now/
 
 | File | Role |
 |---|---|
-| `solve_power_agent.jl` | Rebuilds objective with current λ, ḡ, ρ. For VRES: recomputes loss expressions with current λ, deletes and re-adds CVaR shortfall/linking constraints. For conventional: applies the calibrated 3-stage convex variable cost (with fallback to linear MC if stage inputs are absent). Calls `optimize!`. |
+| `solve_power_agent.jl` | Rebuilds objective with current λ, ḡ, ρ. For VRES: recomputes loss expressions with current λ, deletes and re-adds CVaR shortfall/linking constraints. For conventional: applies the 3-stage convex variable cost (with legacy linear-MC fallback only if stage inputs are absent). Calls `optimize!`. |
 | `solve_H2_agent.jl` | Rebuilds objective with current λ, ḡ, ρ. Recomputes loss expressions with current λ (4-market), deletes and re-adds CVaR shortfall/linking constraints. Calls `optimize!`. |
 | `solve_offtaker_agent.jl` | Rebuilds objective for green/grey/importer. For GreenOfftaker: recomputes loss expressions with current λ, deletes and re-adds CVaR shortfall/linking constraints. Calls `optimize!`. |
 | `solve_elec_GC_demand_agent.jl` | Rebuilds utility − expenditure + ADMM penalty; calls `optimize!`. |
@@ -1165,18 +1349,19 @@ Now/
 
 | File | Contents |
 |---|---|
-| `ADMM_Convergence.csv` | Columns: `iter`, `{market}_primal`, `{market}_dual` for each of the 5 markets. One row per ADMM iteration. Used for convergence plots. |
-| `ADMM_Diagnostics.csv` | Columns: `iter`, `{market}_rho`, `{market}_price_mean`, `{market}_imb_mean` for each market. Used for price/imbalance evolution analysis. |
+| `ADMM_Convergence.csv` | Columns: `iter`, `{market}_primal`, `{market}_dual` for each of the 5 markets, plus `cap_primal` / `cap_dual` (aggregate L2 over agents) and **per-agent** `cap_primal_<m>` / `cap_dual_<m>` columns from the equality-split capacity ADMM (§5.4). One row per ADMM iteration. Used for convergence plots. |
+| `ADMM_Diagnostics.csv` | Columns: `iter`, `{market}_rho`, `{market}_price_mean`, `{market}_imb_mean` for each flow market, plus per-agent `cap_rho_<m>` columns (one per cap-owning agent). The legacy single `cap_rho` column has been removed because capacity uses a per-agent ρ controller. |
+| `Capacity_Consensus.csv` | (new) Per-iteration, per-agent, per-year snapshot of the capacity equality split. Columns: `iter`, `AgentID`, `jy`, `x_cap`, `z_cap`, `lambda_cap`, `rho_cap`, `primal_local`, `dual_local`. Use this to identify the agent / year that gates capacity convergence; analogous to `{Market}_Market_History.csv` but at the (iter, agent, year) granularity that the per-agent split naturally produces. See §5.4 for the formal model. |
 | `{Market}_Market_History.csv` | Per-market CSV with: `iter`, `rho`, `price_mean`, `imb_mean`, `primal_res`, `dual_res`. |
 | `Agent_Summary.csv` | Columns: `AgentID`, `Group`. Group membership table. |
 | `Agent_Quantities_Final.csv` | Columns: `AgentID`, `Group`, `elec_net_sum`, `H2_net_sum`, `elec_GC_net_sum`, `H2_GC_net_sum`, `EP_net_sum`. Sum of final-iteration 3D quantities. |
 | `Offtaker_GC_Diagnostics.csv` | Columns: `AgentID`, `Type`, `EP_total`, `H2_in_total`, `H2_GC_total`, `GC_share`, `GC_mandate`, `GC_slack`. |
 | `H2_Producer_Diagnostics.csv` | Columns: `AgentID`, `H2_total`, `H2_GC_total`, `GC_per_H2`. |
-| `TimerOutput.yaml` | Profiling: time spent in imbalances, residuals, price updates, solve, etc. |
+| `TimerOutput.yaml` | Profiling: time spent in imbalances, residuals, capacity dual update, price updates, solve, etc. |
 
 ### 11.2 Market Exposure with Contracts Results (`market_exposure_contracts_results/`)
 
-`market_exposure_contracts.jl` produces the same major ADMM outputs as market_exposure (ADMM_Convergence, ADMM_Diagnostics, 5× Market_History, Agent_Summary, Market_Prices), with additional PPA/HPA and corresponding cap-consensus columns in convergence and diagnostics. It adds focal contract outputs:
+`market_exposure_contracts.jl` produces the same major ADMM outputs as market_exposure (ADMM_Convergence, ADMM_Diagnostics, `Capacity_Consensus.csv`, 5× Market_History, Agent_Summary, Market_Prices), with additional PPA/HPA and corresponding cap-consensus columns in convergence and diagnostics. The per-agent capacity columns and `Capacity_Consensus.csv` are mirrored from the base case (§5.4). It adds focal contract outputs:
 
 | File | Contents |
 |---|---|
@@ -1247,3 +1432,22 @@ data.yaml  ──→  define_common_parameters!  ──→  mod.ext[:parameters]
                         ▼
                CSV files in *_results/
 ```
+
+---
+
+## 13. References
+
+1. S. Boyd and L. Vandenberghe, *Convex Optimization*, Cambridge University Press, 2004.  
+   Core references used here: epigraph reformulation, convex duality, and KKT optimality conditions.
+
+2. R. T. Rockafellar and S. Uryasev, “Optimization of Conditional Value-at-Risk,” *Journal of Risk*, 2(3), 2000.  
+   Foundational CVaR optimization reformulation used for the planner risk term.  
+   Open copy: [University of Washington PDF](https://sites.math.washington.edu/~rtr/papers/rtr179-CVaR1.pdf)
+
+3. Gurobi Optimizer Documentation (current release), model classes, attributes, and QCP behavior.  
+   Main docs: [Gurobi Documentation](https://docs.gurobi.com/projects/optimizer/en/current/)  
+   (Used to justify LP-based dual extraction workflow in this project implementation.)
+
+4. A. Eichfelder, A. Schöbel, L. Schmitz, “A tutorial on properties of the epigraph reformulation,” *Optimization Online*, 2024.  
+   Additional modern reference for epigraph reformulation properties and KKT interpretation.  
+   PDF: [Optimization Online](https://optimization-online.org/wp-content/uploads/2024/10/Epigraph_reformulation-1.pdf)

@@ -23,8 +23,10 @@
 #   (quadratically constrained program). Gurobi solves convex QCPs to
 #   global optimality but does not provide dual variables (prices).
 #   A two-step solve is used: (1) solve QCP for optimal quantities,
-#   (2) fix demand variables and replace QC constraints with linear
-#   equivalents, then re-solve the resulting LP to obtain duals.
+#   (2) fix all variables that appear quadratically in social welfare
+#   (elastic-demand vars + conventional stage-dispatch vars), replace
+#   QC constraints with linear equivalents, then re-solve the resulting
+#   LP to obtain duals.
 #   The duals of market-clearing constraints are equilibrium prices.
 #
 #   All problem definition (objectives, constraints, variables) lives in Source/.
@@ -52,9 +54,9 @@
 #   7. Define agent parameters (common + type-specific) via define_*_parameters!
 #   8. Build centralized planner model via build_social_planner!
 #   9. Solve the planner (convex QCP — epigraph formulation); check optimality
-#  10. Dual recovery: fix demand variables at optimal values → LP re-solve
+#  10. Dual recovery: fix all quadratic-welfare variables at optimal values → LP re-solve
 #  11. Save results (prices + agent summary) via save_social_planner_results!
-#  12. Unfix demand variables (cleanup)
+#  12. Unfix LP-fixed variables (cleanup)
 #
 # ==============================================================================
 
@@ -182,14 +184,19 @@ order_matrix = Dict()
 # periods (day index 1–365), weights (frequency), selected_periods.
 repr_days = Dict()
 
-# Determine modeled years from data["General"] so the horizon is configurable
-# via data.yaml only. For example:
+# Determine modeled years for the social planner.
+# We intentionally align SP and ADMM scenario horizons by default so benchmark
+# comparisons are apples-to-apples in multi-scenario studies. SP uses:
+#   ADMM.nScenarioYears (if provided), else General.nYears.
+# For example:
 #   base_year = 2021, nYears = 1  -> {1 => 2021}
 #   base_year = 2021, nYears = 5  -> {1 => 2021, 2 => 2022, ..., 5 => 2025}
 # years Dict: maps scenario index (1, 2, ...) to calendar year (2021, 2022, ...).
 # WHY: timeseries and repr_days are keyed by calendar year, while the model
 # uses integer scenario indices (JY). This mapping bridges the two.
-gen = data["General"]
+run_general = merge(data["General"])
+run_general["nYears"] = get(data["ADMM"], "nScenarioYears", get(data["General"], "nYears", 1))
+gen = run_general
 base_year = haskey(gen, "base_year") ? gen["base_year"] : 2021
 n_years = haskey(gen, "nYears") ? gen["nYears"] : 1
 years = Dict(i => base_year + (i - 1) for i in 1:n_years)
@@ -264,11 +271,11 @@ EP_market = Dict{String, Any}()
 # uses EP_market["D_EP"] in the end-product balance constraint; other fields
 # (initial_price, rho_initial) are populated for interface consistency with
 # define_*_parameters! but are not used by the planner optimization itself.
-define_electricity_market_parameters!(elec_market, merge(data["General"], data["ADMM"], data["elec_market"]), ts_dict, repr_days)
-define_H2_market_parameters!(H2_market, merge(data["General"], data["ADMM"], data["H2_market"]), ts_dict, repr_days)
-define_electricity_GC_market_parameters!(elec_GC_market, merge(data["General"], data["ADMM"], data["elec_GC_market"]), ts_dict, repr_days)
-define_H2_GC_market_parameters!(H2_GC_market, merge(data["General"], data["ADMM"], data["H2_GC_market"]), ts_dict, repr_days)
-define_EP_market_parameters!(EP_market, merge(data["General"], data["ADMM"], data["EP_market"]), ts_dict, repr_days)
+define_electricity_market_parameters!(elec_market, merge(run_general, data["ADMM"], data["elec_market"]), ts_dict, repr_days)
+define_H2_market_parameters!(H2_market, merge(run_general, data["ADMM"], data["H2_market"]), ts_dict, repr_days)
+define_electricity_GC_market_parameters!(elec_GC_market, merge(run_general, data["ADMM"], data["elec_GC_market"]), ts_dict, repr_days)
+define_H2_GC_market_parameters!(H2_GC_market, merge(run_general, data["ADMM"], data["H2_GC_market"]), ts_dict, repr_days)
+define_EP_market_parameters!(EP_market, merge(run_general, data["ADMM"], data["EP_market"]), ts_dict, repr_days)
 
 # ------------------------------------------------------------------------------
 # SECTION 9: AGENT PARAMETER DEFINITION
@@ -286,36 +293,36 @@ end
 
 for m in agents[:power]
     # Common: sets (JY, JD, JH), weights W, P, γ, β, market flags, ADMM arrays.
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Power"][m], data["ADMM"]), ts_dict, repr_days, agents)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Power"][m], data["ADMM"]), ts_dict, repr_days, agents)
     # Power-specific: capacity, profile column, costs, or consumer utility/load.
-    define_power_parameters!(m, mdict[m], merge(data["General"], data["Power"][m]), ts_dict, repr_days)
+    define_power_parameters!(m, mdict[m], merge(run_general, data["Power"][m]), ts_dict, repr_days)
 end
 
 for m in agents[:H2]
     # Common + H2-specific: electrolyzer capacity, H2 output capacity,
     # specific consumption, operational cost, efficiency η.
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen"][m], data["ADMM"]), ts_dict, repr_days, agents)
-    define_H2_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen"][m]), ts_dict, repr_days)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Hydrogen"][m], data["ADMM"]), ts_dict, repr_days, agents)
+    define_H2_parameters!(m, mdict[m], merge(run_general, data["Hydrogen"][m]), ts_dict, repr_days)
 end
 
 for m in agents[:offtaker]
     # Common + offtaker-specific: type (Green/Grey/Importer), capacities,
     # alpha, processing cost, marginal cost, gamma_GC, gamma_NH3, import cost.
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m], data["ADMM"]), ts_dict, repr_days, agents)
-    define_offtaker_parameters!(m, mdict[m], merge(data["General"], data["Hydrogen_Offtaker"][m]), ts_dict, repr_days)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Hydrogen_Offtaker"][m], data["ADMM"]), ts_dict, repr_days, agents)
+    define_offtaker_parameters!(m, mdict[m], merge(run_general, data["Hydrogen_Offtaker"][m]), ts_dict, repr_days)
 end
 
 for m in agents[:elec_GC_demand]
     # Common + GC demand-specific: peak load, load column, A_GC, B_GC
     # (quadratic utility for GC demand).
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["Electricity_GC_Demand"][m], data["ADMM"]), ts_dict, repr_days, agents)
-    define_elec_GC_demand_parameters!(m, mdict[m], merge(data["General"], data["Electricity_GC_Demand"][m]), ts_dict, repr_days)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["Electricity_GC_Demand"][m], data["ADMM"]), ts_dict, repr_days, agents)
+    define_elec_GC_demand_parameters!(m, mdict[m], merge(run_general, data["Electricity_GC_Demand"][m]), ts_dict, repr_days)
 end
 
 for m in agents[:EP_demand]
     # Common + EP demand-specific: placeholder for future elastic EP demand.
-    define_common_parameters!(m, mdict[m], merge(data["General"], data["EP_Demand"][m], data["ADMM"]), ts_dict, repr_days, agents)
-    define_EP_demand_parameters!(m, mdict[m], merge(data["General"], data["EP_Demand"][m]), ts_dict, repr_days)
+    define_common_parameters!(m, mdict[m], merge(run_general, data["EP_Demand"][m], data["ADMM"]), ts_dict, repr_days, agents)
+    define_EP_demand_parameters!(m, mdict[m], merge(run_general, data["EP_Demand"][m]), ts_dict, repr_days)
 end
 
 # ------------------------------------------------------------------------------
@@ -357,14 +364,16 @@ planner, planner_state = build_social_planner!(mdict, agents, elec_market, H2_ma
 # DUAL RECOVERY STRATEGY:
 #   Step 1 — Solve the QCP to obtain optimal primal values (quantities).
 #            Accept LOCALLY_SOLVED because for a convex QCP, local = global.
-#   Step 2 — Fix the demand variables (d_E, d_GC_E, d_EP) at their optimal
-#            values. With d² replaced by constants, the epigraph QC constraints
-#            become linear → the entire model reduces to an LP.
+#   Step 2 — Fix all variables that appear quadratically in social welfare
+#            (elastic-demand vars and conventional stage-dispatch vars) at
+#            their optimal values. With squared terms replaced by constants,
+#            the epigraph QC constraints become linear → the entire model
+#            reduces to an LP.
 #   Step 3 — Re-solve the LP. Gurobi provides full dual variables for LPs.
 #            The duals of the market-clearing constraints are the equilibrium
 #            prices at the risk-averse optimal allocation.
 #   Step 4 — Save results (primals from step 1, duals from step 3).
-#   Step 5 — Unfix demand variables (cleanup / restore original model).
+#   Step 5 — Unfix LP-fixed quadratic-term variables (cleanup / restore original model).
 #
 # This approach is exact: the LP has the same optimal allocation as the QCP
 # (demand variables are fixed at QCP-optimal values), so the duals are the
@@ -452,33 +461,73 @@ if haskey(var_dict, :power_q_E_stage)
     end
 end
 
-# (b) Per-year quadratic welfare terms evaluated at optimal quantities.
-#     These become constants in the replacement linear epigraph constraints.
-quadratic_welfare_const = Dict{Int, Float64}()
-for jy in JY
-    quadratic_welfare_const[jy] = sum(
-        value(agent_welfare_per_year[id][jy]) for id in quadratic_welfare_agent_ids;
-        init = 0.0
-    )
+# Deduplicate fix targets (a variable can appear through multiple containers).
+fix_val_by_var = Dict{JuMP.VariableRef, Float64}()
+for (v, val) in demand_vars_and_vals
+    if !haskey(fix_val_by_var, v)
+        fix_val_by_var[v] = val
+    end
 end
 
 # ── Phase B: Modify the model ────────────────────────────────────────────
 
-# (b1) Fix demand variables at QCP-optimal values.
+# (b1) Fix quadratic-term variables at QCP-optimal values.
+# If tiny numerical noise puts a value slightly outside variable bounds,
+# temporarily relax that bound to preserve feasibility of the fixed-point slice.
 fixed_vars = JuMP.VariableRef[]
-for (v, val) in demand_vars_and_vals
+# Save original bounds for cleanup: (var, :lb/:ub, old_bound_value)
+bound_patches = Tuple{JuMP.VariableRef, Symbol, Float64}[]
+bound_relax_count = Ref(0)
+max_bound_relax = Ref(0.0)
+for (v, val_raw) in fix_val_by_var
+    if !isfinite(val_raw)
+        error("Non-finite QCP value encountered while fixing $(name(v)); cannot build LP dual-recovery model.")
+    end
+    val = val_raw
+    if JuMP.has_lower_bound(v)
+        lb = JuMP.lower_bound(v)
+        if val < lb
+            push!(bound_patches, (v, :lb, lb))
+            JuMP.set_lower_bound(v, val)
+            bound_relax_count[] += 1
+            max_bound_relax[] = max(max_bound_relax[], lb - val)
+        end
+    end
+    if JuMP.has_upper_bound(v)
+        ub = JuMP.upper_bound(v)
+        if val > ub
+            push!(bound_patches, (v, :ub, ub))
+            JuMP.set_upper_bound(v, val)
+            bound_relax_count[] += 1
+            max_bound_relax[] = max(max_bound_relax[], val - ub)
+        end
+    end
+    fix_val_by_var[v] = val
     fix(v, val; force = true)
     push!(fixed_vars, v)
 end
+if bound_relax_count[] > 0
+    @info "Step 2 note: relaxed $(bound_relax_count[]) variable bounds to match QCP fixed values (max relax = $(max_bound_relax[]))."
+end
 
-# (b2) Delete quadratic epigraph constraints (the ONLY QC in the model).
+# (b2) Per-year quadratic welfare terms evaluated at the ACTUAL fixed values.
+# This avoids inconsistency between fixed-point values and epigraph constants.
+quadratic_welfare_const = Dict{Int, Float64}()
+for jy in JY
+    quadratic_welfare_const[jy] = sum(
+        JuMP.value(v -> fix_val_by_var[v], agent_welfare_per_year[id][jy]) for id in quadratic_welfare_agent_ids;
+        init = 0.0
+    )
+end
+
+# (b3) Delete quadratic epigraph constraints (the ONLY QC in the model).
 epigraph_refs = planner[:social_welfare_epigraph]
 for jy in JY
     delete(planner, epigraph_refs[jy])
 end
 unregister(planner, :social_welfare_epigraph)
 
-# (b3) Re-add epigraph as purely LINEAR constraints:
+# (b4) Re-add epigraph as purely LINEAR constraints:
 #   sw_aux[jy] ≤ Σ(linear welfare)[jy] + quadratic_welfare_const[jy]
 # where quadratic welfare (demand utility + conventional staged cost) has been
 # evaluated at the QCP optimum and absorbed into constants.
@@ -492,9 +541,16 @@ unregister(planner, :social_welfare_epigraph)
       "replaced QC epigraph with linear constraints — model is now LP."
 
 # ── Step 3: Re-solve as LP for dual variables ────────────────────────────
+set_optimizer_attribute(planner, "FeasibilityTol", 1e-5)
 optimize!(planner)
 
 lp_status = termination_status(planner)
+if lp_status == MOI.INFEASIBLE_OR_UNBOUNDED
+    @warn("LP re-solve returned INFEASIBLE_OR_UNBOUNDED; retrying with DualReductions=0 to disambiguate.")
+    set_optimizer_attribute(planner, "DualReductions", 0)
+    optimize!(planner)
+    lp_status = termination_status(planner)
+end
 if lp_status != MOI.OPTIMAL
     @warn("LP re-solve returned status $lp_status (expected OPTIMAL). Duals may be unavailable.")
 end
@@ -513,9 +569,18 @@ save_social_planner_results!(planner, planner_state, agents, mdict, results_fold
 # Restore the model to its original QCP form so it can be re-used (e.g.
 # with different gamma values) without rebuilding from scratch.
 
-# (a) Unfix demand variables.
+# (a) Unfix LP-fixed variables.
 for v in fixed_vars
     unfix(v)
+end
+
+# Restore temporary bound relaxations (if any).
+for (v, btype, oldb) in bound_patches
+    if btype == :lb
+        JuMP.set_lower_bound(v, oldb)
+    else
+        JuMP.set_upper_bound(v, oldb)
+    end
 end
 
 # (b) Delete the linear epigraph constraints and restore the original
@@ -530,5 +595,8 @@ social_welfare = planner_state[:social_welfare]
 @constraint(planner, social_welfare_epigraph[jy in JY],
     sw_aux[jy] <= social_welfare[jy]
 )
+
+set_optimizer_attribute(planner, "DualReductions", 1)
+set_optimizer_attribute(planner, "FeasibilityTol", 1e-6)
 
 @info "Step 5 complete: Demand variables unfixed, QC epigraph restored — model back to QCP form."
