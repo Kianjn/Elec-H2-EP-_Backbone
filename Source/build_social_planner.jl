@@ -22,7 +22,7 @@
 #     :var_dict, :agent_welfare (total per agent), :agent_welfare_per_year,
 #     :social_welfare (aggregate per year), :sw_aux (epigraph proxy variables),
 #     :gamma, :beta, :demand_var_keys (var_dict keys for quadratic-utility
-#       demand variables — needed for QCP→LP dual recovery in social_planner.jl),
+#       demand variables; retained for diagnostics/extensions),
 #     :elec_balance, :elec_GC_balance, :H2_balance, :H2_GC_balance, :EP_balance,
 #     :power_consumers, :power_vres, :power_conv, :H2_producers, :H2_consumers,
 #     :offtaker_green, :offtaker_grey, :offtaker_import, :JH, :JD, :JY, :W.
@@ -31,17 +31,25 @@
 
 # data: full data.yaml dict; gamma and beta are read from data["ADMM"] so that
 #       changing them there updates both social planner and ADMM simultaneously.
-# env: optional Gurobi environment for license reuse. When provided, the
-# planner model shares the same Gurobi license token as the caller, avoiding
-# the overhead of acquiring a new license. If nothing, a fresh Env is created.
+# env: optional Gurobi environment for license reuse (used only when the
+# optimizer factory is Gurobi). For non-Gurobi solvers this is ignored.
+# optimizer_factory: JuMP optimizer constructor/factory (e.g., Gurobi.Optimizer,
+# Ipopt.Optimizer). This lets social_planner.jl switch SP solver without
+# touching ADMM solvers.
 function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_market::Dict,
                                elec_GC_market::Dict, H2_GC_market::Dict, EP_market::Dict,
-                               data::Dict; env::Union{Gurobi.Env, Nothing} = nothing)
+                               data::Dict;
+                               env::Union{Gurobi.Env, Nothing} = nothing,
+                               optimizer_factory = Gurobi.Optimizer)
     if isempty(agents[:all])
         error("No agents defined in data.yaml; cannot build social planner problem.")
     end
 
-    planner = env !== nothing ? Model(() -> Gurobi.Optimizer(env)) : Model(Gurobi.Optimizer)
+    planner = if optimizer_factory === Gurobi.Optimizer
+        env !== nothing ? Model(() -> Gurobi.Optimizer(env)) : Model(Gurobi.Optimizer)
+    else
+        Model(optimizer_factory)
+    end
     set_silent(planner)
 
     m0 = mdict[agents[:all][1]]
@@ -308,8 +316,7 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
     #   :power_*/H2_*/offtaker_* — agent ID lists by sub-type
     #   :JH, :JD, :JY, :W     — index sets and weights
     #   :gamma, :beta          — risk parameters (shared by all agents)
-    #   :demand_var_keys       — var_dict keys for demand agents whose
-    #                            variables must be fixed for dual recovery
+    #   :demand_var_keys       — var_dict keys for demand agents (diagnostics/extensions)
     planner_state = Dict(
         :var_dict => var_dict,
         :agent_welfare => agent_welfare,

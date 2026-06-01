@@ -151,67 +151,100 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
         # derivation, residual definitions, and units check.
         # ----------------------------------------------------------------
         if haskey(mod.ext[:parameters], :z_cap)
-            agent_type = String(get(mod.ext[:parameters], :Type, ""))
-            JY = mod.ext[:sets][:JY]
-            z_cap = zeros(length(JY))
-            # Capacity dynamics are nondecreasing (inv >= 0). The floor
-            # prevents z_cap from asking for a smaller value than the
-            # previous iterate already installed.
-            cap_floor = zeros(length(JY))
-            if !isempty(get(results["Cap_VRES"], m, []))
-                cap_floor = results["Cap_VRES"][m][end]
-            elseif !isempty(get(results["Cap_Elec_H2"], m, []))
-                cap_floor = results["Cap_Elec_H2"][m][end]
-            elseif !isempty(get(results["Cap_EP_Green"], m, []))
-                cap_floor = results["Cap_EP_Green"][m][end]
-            end
-            if agent_type == "VRES"
-                # In contracts, VRES capacity supports BOTH the EOM and the
-                # PPA flow consensus; sum them before computing the peak.
-                g_bar = mod.ext[:parameters][:g_bar_elec]
-                AF = mod.ext[:timeseries][:AF]
-                g_bar_ppa = get(mod.ext[:parameters], :g_bar_ppa, zeros_shp)
-                g_bar_total = g_bar .+ g_bar_ppa
-                for (iy, jy) in enumerate(JY)
-                    mx = 0.0
-                    for jh in 1:n_ts, jd in 1:n_rd
-                        af = AF[jh, jd, jy]
-                        mx = max(mx, af > 1e-9 ? max(0.0, g_bar_total[jh, jd, jy] / af) : 0.0)
-                    end
-                    z_cap[iy] = mx
-                end
-            elseif agent_type == "GreenProducer"
-                # Electrolyzer H₂ capacity supports pool + HPA combined.
-                g_bar = mod.ext[:parameters][:g_bar_H2]
-                g_bar_hpa = get(mod.ext[:parameters], :g_bar_hpa, zeros_shp)
-                g_bar_total = g_bar .+ g_bar_hpa
-                for (iy, jy) in enumerate(JY)
-                    z_cap[iy] = max(0.0, maximum(g_bar_total[:, :, jy]))
-                end
-            elseif agent_type == "GreenOfftaker"
-                # Green offtaker EP capacity supports the EP flow consensus.
-                g_bar = mod.ext[:parameters][:g_bar_EP]
-                for (iy, jy) in enumerate(JY)
-                    z_cap[iy] = max(0.0, maximum(g_bar[:, :, jy]))
-                end
-            end
-            # Same projection as base subroutine: nondecreasing across years
-            # and not below the previous capacity floor.
-            for iy in eachindex(z_cap)
-                if iy > 1
-                    z_cap[iy] = max(z_cap[iy], z_cap[iy - 1])
-                end
-                if iy <= length(cap_floor)
-                    z_cap[iy] = max(z_cap[iy], cap_floor[iy])
-                end
-            end
-
             cap_state = ADMM_state["Capacity"]
-            push!(cap_state["z"][m], copy(z_cap))
+            # On the first ADMM iteration, if z was warm-started from SP
+            # capacities, use that target directly to keep x and z aligned.
+            if get(ADMM_state, "n_iter", 0) == 0 && !isempty(cap_state["z"][m])
+                z_cap = copy(cap_state["z"][m][end])
+                mod.ext[:parameters][:z_cap] = z_cap
+                mod.ext[:parameters][:λ_cap] = copy(cap_state["λ"][m][end])
+                mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
+            else
+                agent_type = String(get(mod.ext[:parameters], :Type, ""))
+                JY = mod.ext[:sets][:JY]
+                z_cap = zeros(length(JY))
+                # Structural feasibility floor: x_cap cannot drop below the
+                # model's initial installed capacity (inv >= 0). Project z to
+                # the same floor so ADMM does not target infeasible x=z.
+                cap_floor = if agent_type == "VRES"
+                    get(mod.ext[:parameters], :Capacity, 0.0)
+                elseif agent_type == "GreenProducer"
+                    get(mod.ext[:parameters], :Capacity_H2_Output, 0.0)
+                elseif agent_type == "GreenOfftaker"
+                    get(mod.ext[:parameters], :Capacity_EP_Out, 0.0)
+                else
+                    0.0
+                end
+                if agent_type == "VRES"
+                    # In contracts, VRES capacity supports EOM + PPA. Use latest
+                    # realized flows when available; fallback to consensus targets.
+                    flow_eom = isempty(get(results["g"], m, [])) ?
+                               mod.ext[:parameters][:g_bar_elec] : results["g"][m][end]
+                    AF = mod.ext[:timeseries][:AF]
+                    flow_ppa = isempty(get(results["ppa"], m, [])) ?
+                               get(mod.ext[:parameters], :g_bar_ppa, zeros_shp) :
+                               results["ppa"][m][end]
+                    flow_total = flow_eom .+ flow_ppa
+                    for (iy, jy) in enumerate(JY)
+                        mx = 0.0
+                        for jh in 1:n_ts, jd in 1:n_rd
+                            af = AF[jh, jd, jy]
+                            mx = max(mx, af > 1e-9 ? max(0.0, flow_total[jh, jd, jy] / af) : 0.0)
+                        end
+                        z_cap[iy] = mx
+                    end
+                elseif agent_type == "GreenProducer"
+                    # Electrolyzer H2 capacity supports pool + HPA combined.
+                    flow_pool = isempty(get(results["h2"], m, [])) ?
+                                mod.ext[:parameters][:g_bar_H2] : results["h2"][m][end]
+                    flow_hpa = isempty(get(results["hpa"], m, [])) ?
+                               get(mod.ext[:parameters], :g_bar_hpa, zeros_shp) :
+                               results["hpa"][m][end]
+                    flow_total = flow_pool .+ flow_hpa
+                    for (iy, jy) in enumerate(JY)
+                        z_cap[iy] = max(0.0, maximum(flow_total[:, :, jy]))
+                    end
+                elseif agent_type == "GreenOfftaker"
+                    # Green offtaker EP capacity from latest realized EP flow.
+                    flow_ref = isempty(get(results["EP"], m, [])) ?
+                               mod.ext[:parameters][:g_bar_EP] : results["EP"][m][end]
+                    for (iy, jy) in enumerate(JY)
+                        z_cap[iy] = max(0.0, maximum(flow_ref[:, :, jy]))
+                    end
+                end
+                # Same projection as base subroutine: enforce only
+                # nondecreasing capacity across years.
+                for iy in eachindex(z_cap)
+                    if iy > 1
+                        z_cap[iy] = max(z_cap[iy], z_cap[iy - 1])
+                    end
+                    z_cap[iy] = max(z_cap[iy], cap_floor)
+                end
 
-            mod.ext[:parameters][:z_cap] = z_cap
-            mod.ext[:parameters][:λ_cap] = copy(cap_state["λ"][m][end])
-            mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
+                # Optional under-relaxation of z update (same as base case):
+                # damps jumpy target motion from tightly-coupled pool+contract
+                # consensus signals.
+                z_alpha = get(get(data, "ADMM", Dict()), "cap_z_relax", 1.0)
+                z_alpha = min(1.0, max(0.05, z_alpha))
+                if !isempty(cap_state["z"][m])
+                    z_prev = cap_state["z"][m][end]
+                    if length(z_prev) == length(z_cap)
+                        z_cap .= z_alpha .* z_cap .+ (1.0 - z_alpha) .* z_prev
+                        # Re-apply monotonic projection after damping.
+                        for iy in eachindex(z_cap)
+                            if iy > 1
+                                z_cap[iy] = max(z_cap[iy], z_cap[iy - 1])
+                            end
+                            z_cap[iy] = max(z_cap[iy], cap_floor)
+                        end
+                    end
+                end
+                push!(cap_state["z"][m], copy(z_cap))
+
+                mod.ext[:parameters][:z_cap] = z_cap
+                mod.ext[:parameters][:λ_cap] = copy(cap_state["λ"][m][end])
+                mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
+            end
         end
     end
 

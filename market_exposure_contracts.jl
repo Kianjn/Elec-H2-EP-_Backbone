@@ -323,7 +323,8 @@ admm_data = merge(run_general, data["ADMM"])
 if haskey(data["ADMM"], "epsilon_contracts")
     admm_data = merge(admm_data, Dict("epsilon" => data["ADMM"]["epsilon_contracts"], "epsilon_abs" => data["ADMM"]["epsilon_contracts"]))
 end
-define_results_contracts!(admm_data, results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, ppa_market, hpa_market; sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, use_primal_warmstart=true)
+define_results_contracts!(admm_data, results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, ppa_market, hpa_market;
+    sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, sp_cap_file=sp_cap_file, use_primal_warmstart=true)
 
 # Single consolidated warm-start message (same as market_exposure)
 ws = results["warmstart"]

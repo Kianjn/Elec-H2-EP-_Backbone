@@ -23,7 +23,8 @@
 function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dict,
                         elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
                         H2_GC_market::Dict, EP_market::Dict;
-                        sp_prices_file::String = "", sp_primal_file::String = "", use_primal_warmstart::Bool = true)
+                        sp_prices_file::String = "", sp_primal_file::String = "",
+                        sp_cap_file::String = "", use_primal_warmstart::Bool = true)
     n_ts = admm_data["nTimesteps"]
     n_rd = admm_data["nReprDays"]
     n_yr = admm_data["nYears"]
@@ -344,6 +345,52 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
         "ResidualScale_Dual"   => Dict{String, Float64}(m => 0.0 for m in cap_agents),
     )
 
+    # Capacity ADMM state warm-start from social-planner capacities:
+    # if SP capacities are available, preload z_cap history with the SP vector
+    # so the very first ADMM iteration can start from a capacity target that is
+    # already economically consistent with the SP solution.
+    #
+    # WHY this choice:
+    # set_start_value(cap) initializes variable starts, but ADMM penalties act
+    # on (x - z). If z starts far from SP while x starts at SP, iter-1 can
+    # immediately create artificial capacity mismatch. Preloading z with SP
+    # aligns the split state at startup.
+    cap_state_warm_loaded = false
+    if !isempty(sp_cap_file) && isfile(sp_cap_file) && !isempty(cap_agents)
+        try
+            cap_df = CSV.read(sp_cap_file, DataFrame)
+            # Expected columns from save_social_planner_results.jl:
+            # AgentID, jy, cap
+            if all(sym -> hasproperty(cap_df, sym), (:AgentID, :jy, :cap))
+                for m in cap_agents
+                    z_init = zeros(n_yr)
+                    have_all = true
+                    for jy in 1:n_yr
+                        row = cap_df[(cap_df.AgentID .== m) .& (cap_df.jy .== jy), :]
+                        if nrow(row) == 0
+                            # Fallback: if SP file has one-year rows only, reuse jy=1.
+                            row = cap_df[(cap_df.AgentID .== m) .& (cap_df.jy .== 1), :]
+                        end
+                        if nrow(row) > 0
+                            z_init[jy] = Float64(row.cap[1])
+                        else
+                            have_all = false
+                            break
+                        end
+                    end
+                    if have_all
+                        push!(ADMM["Capacity"]["z"][m], z_init)
+                        # Keep λ neutral at startup; we only warm-start target z.
+                        ADMM["Capacity"]["λ"][m][1] .= 0.0
+                    end
+                end
+                cap_state_warm_loaded = true
+            end
+        catch e
+            @warn "Could not read SP capacities for capacity-state warm-start ($sp_cap_file): $e"
+        end
+    end
+
     # Absolute and relative tolerances for the ADMM stopping rule:
     #   ε_abs: base absolute tolerance (MW-scale), taken from epsilon if no
     #          dedicated epsilon_abs is given in data.yaml.
@@ -376,6 +423,6 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     ADMM["n_slots"]  = n_ts * n_rd * n_yr
 
     # Warm-start flags for consolidated logging (read by market_exposure.jl)
-    results["warmstart"] = Dict("λ" => sp_loaded, "primal" => primal_loaded)
+    results["warmstart"] = Dict("λ" => sp_loaded, "primal" => primal_loaded, "capacity_state" => cap_state_warm_loaded)
     return results, ADMM
 end

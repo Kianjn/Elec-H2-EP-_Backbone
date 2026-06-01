@@ -765,8 +765,24 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     # --------------------------------------------------------------------------
     # Comparison with social planner benchmark (if available)
     # --------------------------------------------------------------------------
+    admm_prices_path = joinpath(results_dir, "Market_Prices.csv")
     sp_path = joinpath(@__DIR__, "..", "social_planner_results", "Market_Prices.csv")
     if isfile(sp_path)
+        # Guard against stale benchmark comparisons:
+        # ADMM writes market_exposure_results/Market_Prices.csv in this function.
+        # If the SP prices file is older than the just-written ADMM file, the
+        # benchmark likely comes from a previous model/config run.
+        try
+            sp_mtime = stat(sp_path).mtime
+            admm_mtime = isfile(admm_prices_path) ? stat(admm_prices_path).mtime : time()
+            if sp_mtime < admm_mtime
+                println("  (Warning: social planner Market_Prices.csv is older than this ADMM run.")
+                println("   Rerun social_planner.jl before using the benchmark comparison.)")
+            end
+        catch
+            # Keep benchmark printing robust if filesystem metadata is unavailable.
+        end
+
         sp_df = CSV.read(sp_path, DataFrame)
         # Compare like-for-like horizon:
         # - If SP and ADMM have same number of slots, compare all-scenario means.

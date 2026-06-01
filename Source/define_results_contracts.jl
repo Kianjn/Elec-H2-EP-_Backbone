@@ -17,11 +17,13 @@
 function define_results_contracts!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dict,
                                   elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
                                   H2_GC_market::Dict, EP_market::Dict, ppa_market::Dict, hpa_market::Dict;
-                                  sp_prices_file::String = "", sp_primal_file::String = "", use_primal_warmstart::Bool = true)
+                                  sp_prices_file::String = "", sp_primal_file::String = "",
+                                  sp_cap_file::String = "", use_primal_warmstart::Bool = true)
     # Call base define_results! for the five standard markets (same warm-start as market_exposure)
     define_results!(admm_data, results, ADMM, agents, elec_market, H2_market,
                     elec_GC_market, H2_GC_market, EP_market;
-                    sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, use_primal_warmstart=use_primal_warmstart)
+                    sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file,
+                    sp_cap_file=sp_cap_file, use_primal_warmstart=use_primal_warmstart)
 
     n_ts = admm_data["nTimesteps"]
     n_rd = admm_data["nReprDays"]

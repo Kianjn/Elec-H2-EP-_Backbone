@@ -67,7 +67,7 @@ Both the ADMM and social planner use the **same problem definition** from the `S
 - **Three-stage adaptive penalty (Boyd rule)**: Market-specific ρ adaptation with (1) normal rp/rd balancing, (2) a gentle push far from tolerance, and (3) a fixed-ρ stability zone near convergence. The same three regimes are applied PER AGENT to the capacity penalties `ρ_cap[m]`, so each capacity-owning agent has an independent controller.
 - **Advanced ADMM controller**: Scale-aware dual-step damping, per-market step-scale adaptation, and best-iterate checkpoint/restart logic for anti-stall robustness in multi-scenario runs.
   - Implemented consistently in both `market_exposure.jl` and `market_exposure_contracts.jl`; contracts adds only PPA/HPA-specific states and updates.
-- **Centralised benchmark**: Social planner with dual-variable price recovery and the same physical/investment structure as ADMM (dual recovery fixes all quadratic-welfare variables before LP re-solve, including conventional stage-dispatch variables)
+- **Centralised benchmark**: Social planner solved with IPOPT (SP only) for stable direct QCP dual price extraction; ADMM remains on Gurobi
 - **Green certificate mandate**: 42% H₂ GC requirement for offtakers (configurable)
 - **Representative days**: Temporal reduction from 8760 hours to a small set of representative days with weights
 - **Quadratic demand**: Elastic electricity and GC demand with inverse-demand parameterisation
@@ -118,7 +118,8 @@ This reads `Project.toml` and `Manifest.toml` to install the exact package versi
 | Package | Purpose |
 |---|---|
 | `JuMP` | Algebraic modelling for optimization |
-| `Gurobi` | QP solver (requires Gurobi installation + license) |
+| `Gurobi` | ADMM solver backend (requires Gurobi installation + license) |
+| `Ipopt` | Social-planner QCP solver backend (SP-only) |
 | `DataFrames` | Tabular data manipulation |
 | `CSV` | Read/write CSV files |
 | `YAML` | Parse `data.yaml` configuration |
@@ -369,8 +370,13 @@ julia --project=. social_planner.jl
 This will:
 1. Load the same configuration and timeseries.
 2. Build a single centralised social-planner model (epigraph + social CVaR structure).
-3. Solve it and run the two-step dual recovery (QCP solve, then LP re-solve for prices).
+3. Solve it as a convex QCP with the SP-only solver from `Data/data.yaml` (`SocialPlanner.solver`, default `ipopt`), then extract equilibrium prices from solver duals.
 4. Write results to `social_planner_results/`.
+
+Why SP uses IPOPT by default:
+- On this model family, Gurobi can return a primal-optimal convex QCP solution but still fail to return usable QCP duals (prices) on large/scaled runs.
+- IPOPT provides stable dual multipliers for the social-planner QCP benchmark in this workflow.
+- ADMM subproblems continue using Gurobi; only `social_planner.jl` switches solver.
 
 ### Comparing Results
 
@@ -483,9 +489,12 @@ Each iteration:
    ```
 
    where $r_k^{(t)}$ is the current imbalance (sum of net positions), $\rho_k^{(t)}$ is the penalty weight, and $\eta_k^{(t)} \in (0,1]$ is a residual-aware step size. **Excess supply** ($r_k>0$) reduces prices; **excess demand** ($r_k<0$) increases prices.
-4. **Penalty + controller adaptation**:
-   - `update_rho!` applies market-wise three-regime adaptive ρ logic with hysteresis and freeze-near-convergence.
-   - The ADMM controller also adapts per-market dual step scales and can restart from the best checkpoint if residual merit stalls/worsens over a long window.
+4. **Penalty update**:
+   - `update_rho!` applies residual-balancing updates:
+     - increase `ρ` when primal residual dominates dual,
+     - decrease `ρ` when dual residual dominates primal,
+     - otherwise keep `ρ`.
+   - The same pattern is used for per-agent capacity penalties.
 5. **Convergence**: Stops when all markets have both primal and dual residuals below tolerance.
 
 ### Social Planner
@@ -577,7 +586,7 @@ Simply edit the relevant `build_*_agent.jl` file. Both the ADMM version (`build_
 - **Interpret tolerance correctly**: raw residuals are L2 norms over all slots; with more scenarios they are naturally larger.
 - **Check `ADMM_Diagnostics.csv` and `ADMM_Convergence.csv` together**:
   - If one market oscillates while others settle, inspect that market’s `rho`, price, and imbalance histories.
-  - If progress stalls, the ADMM best-checkpoint restart (in `ADMM.jl`) should recover the best basin; if not, tune that market’s `rho` limits/factors.
+  - If progress stalls, tune that market’s `rho_initial` / `rho_cap_initial` and verify residual-balance behavior in `update_rho!`.
 - **Increase `epsilon` only if justified by your accepted RMS imbalance budget**, not only to force a stop.
 - **Check residuals**: if primal residuals plateau above tolerance, the L2 norm may be hitting an "error floor" due to the representative-day discretisation. The solution may still be economically meaningful (compare against the social planner).
 

@@ -19,15 +19,12 @@
 #   reduces to standard welfare maximization — matching the ADMM
 #   risk-neutral equilibrium by the first welfare theorem.
 #
-#   DUAL RECOVERY: The epigraph formulation creates a convex QCP
-#   (quadratically constrained program). Gurobi solves convex QCPs to
-#   global optimality but does not provide dual variables (prices).
-#   A two-step solve is used: (1) solve QCP for optimal quantities,
-#   (2) fix all variables that appear quadratically in social welfare
-#   (elastic-demand vars + conventional stage-dispatch vars), replace
-#   QC constraints with linear equivalents, then re-solve the resulting
-#   LP to obtain duals.
-#   The duals of market-clearing constraints are equilibrium prices.
+#   PRICE RECOVERY:
+#   We solve the planner as a convex QCP and extract equilibrium prices from
+#   solver duals of the market-clearing constraints. By default this script
+#   uses IPOPT for the social planner because in large/scaled instances Gurobi
+#   can return primal-optimal QCP points but fail to provide usable QCP duals.
+#   ADMM remains on Gurobi.
 #
 #   All problem definition (objectives, constraints, variables) lives in Source/.
 #   Changes to build_* files propagate automatically to both market_exposure
@@ -54,9 +51,8 @@
 #   7. Define agent parameters (common + type-specific) via define_*_parameters!
 #   8. Build centralized planner model via build_social_planner!
 #   9. Solve the planner (convex QCP — epigraph formulation); check optimality
-#  10. Dual recovery: fix all quadratic-welfare variables at optimal values → LP re-solve
+#  10. Extract duals directly from QCP and verify availability
 #  11. Save results (prices + agent summary) via save_social_planner_results!
-#  12. Unfix LP-fixed variables (cleanup)
 #
 # ==============================================================================
 
@@ -78,9 +74,11 @@ using JuMP
 # planner model (variables, constraints, objective) and to query duals/values.
 
 using Gurobi
-# Gurobi: QP solver for the social planner problem. Must be installed and
-# licensed. A single shared Env is created below to avoid multiple license
-# tokens.
+# Gurobi: still used by ADMM and available as optional SP solver.
+
+using Ipopt
+# Ipopt: default solver for social_planner.jl to obtain reliable QCP duals
+# on this model family when Gurobi QCP dual recovery is numerically fragile.
 
 using DataFrames
 # Tabular data; used when reading CSVs (timeseries, representative days) and
@@ -101,11 +99,14 @@ using YAML
 # found an optimal solution; without it we cannot compare against MOI.OPTIMAL.
 import MathOptInterface as MOI
 
-# Single shared Gurobi environment for the entire process. WHY: each Gurobi
-# Env consumes a license token; sharing one Env across the planner model (and
-# any parameter-container models) avoids acquiring multiple licenses and
-# significantly reduces solver-startup overhead.
-const GUROBI_ENV = Gurobi.Env()
+# Lazy Gurobi environment. Created only if SP solver is set to Gurobi.
+const GUROBI_ENV_REF = Ref{Union{Nothing, Gurobi.Env}}(nothing)
+function get_gurobi_env()
+    if GUROBI_ENV_REF[] === nothing
+        GUROBI_ENV_REF[] = Gurobi.Env()
+    end
+    return GUROBI_ENV_REF[]::Gurobi.Env
+end
 
 # ------------------------------------------------------------------------------
 # SECTION 3: DIRECTORY SETUP
@@ -347,256 +348,83 @@ end
 #   planner_state — Dict collecting variable dicts, welfare expressions,
 #                   balance constraints, agent classification lists, index
 #                   sets, risk parameters, demand_var_keys, and sw_aux
-#                   needed by the two-step solve and save_social_planner_results!.
+#                   needed by direct QCP solve and save_social_planner_results!.
+# Social planner solver selection (SP only).
+sp_cfg = get(data, "SocialPlanner", Dict{String, Any}())
+sp_solver = lowercase(String(get(sp_cfg, "solver", "ipopt")))
+optimizer_factory = sp_solver == "gurobi" ? Gurobi.Optimizer : Ipopt.Optimizer
+sp_env = sp_solver == "gurobi" ? get_gurobi_env() : nothing
 planner, planner_state = build_social_planner!(mdict, agents, elec_market, H2_market,
                                               elec_GC_market, H2_GC_market, EP_market,
-                                              data; env = GUROBI_ENV)
+                                              data; env = sp_env, optimizer_factory = optimizer_factory)
 
 # ------------------------------------------------------------------------------
-# SECTION 11: TWO-STEP SOLVE WITH DUAL RECOVERY
+# SECTION 11: DIRECT QCP SOLVE + DIRECT DUAL EXTRACTION
 # ------------------------------------------------------------------------------
 #
-# The epigraph formulation (sw_aux[jy] ≤ social_welfare[jy]) makes the model
-# a convex QCP: the epigraph constraints are quadratic (consumer utility terms
-# contain −B/2·d²). Gurobi solves convex QCPs to global optimality but does
-# NOT provide dual variables (Pi attribute) for QCP models.
-#
-# DUAL RECOVERY STRATEGY:
-#   Step 1 — Solve the QCP to obtain optimal primal values (quantities).
-#            Accept LOCALLY_SOLVED because for a convex QCP, local = global.
-#   Step 2 — Fix all variables that appear quadratically in social welfare
-#            (elastic-demand vars and conventional stage-dispatch vars) at
-#            their optimal values. With squared terms replaced by constants,
-#            the epigraph QC constraints become linear → the entire model
-#            reduces to an LP.
-#   Step 3 — Re-solve the LP. Gurobi provides full dual variables for LPs.
-#            The duals of the market-clearing constraints are the equilibrium
-#            prices at the risk-averse optimal allocation.
-#   Step 4 — Save results (primals from step 1, duals from step 3).
-#   Step 5 — Unfix LP-fixed quadratic-term variables (cleanup / restore original model).
-#
-# This approach is exact: the LP has the same optimal allocation as the QCP
-# (demand variables are fixed at QCP-optimal values), so the duals are the
-# correct shadow prices at that allocation.
+# The planner is solved directly as a convex QCP and market prices are read from
+# duals of the market-clearing constraints.
 # ------------------------------------------------------------------------------
+qcp_status = MOI.OTHER_ERROR
+duals_ok = false
+if sp_solver == "gurobi"
+    # Gurobi path: retry with tighter barrier settings if QCP duals are missing.
+    admm_cfg = get(data, "ADMM", Dict{String, Any}())
+    base_tol = Float64(get(admm_cfg, "BarQCPConvTol", 1e-8))
+    tol_candidates = unique([base_tol, min(base_tol, 1e-9), 1e-10])
+    status_hist = String[]
+    let _status = MOI.OTHER_ERROR, _duals = false
+        for (attempt, tol) in enumerate(tol_candidates)
+            set_optimizer_attribute(planner, "QCPDual", 1)
+            set_optimizer_attribute(planner, "Method", 2)      # barrier
+            set_optimizer_attribute(planner, "Crossover", 0)   # keep barrier point
+            set_optimizer_attribute(planner, "NumericFocus", min(3, attempt))
+            set_optimizer_attribute(planner, "BarQCPConvTol", tol)
 
-# ── Step 1: Solve QCP for optimal primal values ─────────────────────────
-set_optimizer_attribute(planner, "NumericFocus", 1)
-optimize!(planner)
-
-qcp_status = termination_status(planner)
-if qcp_status != MOI.OPTIMAL && qcp_status != MOI.LOCALLY_SOLVED
-    @error("QCP solve failed with status $qcp_status. Cannot proceed with dual recovery.")
-    error("Social planner QCP solve failed (status: $qcp_status)")
-end
-@info "Step 1 complete: QCP solved with status $qcp_status — primal values available."
-
-# ── Step 2: Convert QCP → LP (fix demand vars + replace QC constraints) ──
-# demand_var_keys lists the var_dict keys for elastic demand agents whose
-# utility functions contain quadratic terms (A·d − B/2·d²). Fixing these
-# variables turns the quadratic terms into constants. However, Gurobi still
-# classifies the epigraph constraints as QC based on their structural form,
-# so the model remains a QCP in Gurobi's view and Pi is still unavailable.
-#
-# Full conversion to LP requires TWO modifications:
-#   (a) Fix demand variables at QCP-optimal values.
-#   (b) Delete the quadratic epigraph constraints and re-add them as LINEAR
-#       constraints. The supply-side welfare terms are already linear; we
-#       replace the demand-side quadratic welfare with its evaluated constant.
-# After both modifications the model is a true LP — Gurobi provides duals.
-var_dict        = planner_state[:var_dict]
-demand_var_keys = planner_state[:demand_var_keys]
-JY              = planner_state[:JY]
-sw_aux          = planner_state[:sw_aux]
-agent_welfare_per_year = planner_state[:agent_welfare_per_year]
-
-# Identify agents with quadratic welfare terms that must be fixed for LP dual recovery:
-# - demand agents (quadratic utility),
-# - conventional generator (stagewise convex variable cost).
-demand_agent_ids = Set{String}()
-union!(demand_agent_ids, planner_state[:power_consumers])
-union!(demand_agent_ids, agents[:elec_GC_demand])
-union!(demand_agent_ids, agents[:EP_demand])
-quadratic_welfare_agent_ids = Set{String}(demand_agent_ids)
-union!(quadratic_welfare_agent_ids, planner_state[:power_conv])
-all_welfare_ids   = collect(keys(agent_welfare_per_year))
-linear_welfare_agent_ids  = filter(id -> !(id in quadratic_welfare_agent_ids), all_welfare_ids)
-
-# ── Phase A: Query ALL optimal values BEFORE any model modification ──────
-# The first fix() call invalidates JuMP's solution cache, so every value()
-# query must happen here.
-
-# (a) Variable optimal values to be fixed before LP re-solve.
-#     Start with elastic-demand variables.
-demand_vars_and_vals = Tuple{JuMP.VariableRef, Float64}[]
-for key in demand_var_keys
-    if haskey(var_dict, key)
-        vars = var_dict[key]
-        for v in values(vars)
-            if v isa JuMP.VariableRef
-                push!(demand_vars_and_vals, (v, value(v)))
-            elseif v isa AbstractArray
-                for vi in v
-                    push!(demand_vars_and_vals, (vi, value(vi)))
-                end
+            optimize!(planner)
+            _status = termination_status(planner)
+            _duals = has_duals(planner)
+            push!(status_hist, "attempt=$(attempt), BarQCPConvTol=$(tol), status=$(_status), has_duals=$(_duals)")
+            if (_status == MOI.OPTIMAL || _status == MOI.LOCALLY_SOLVED) && _duals
+                @info "Gurobi QCP duals available (attempt=$(attempt), BarQCPConvTol=$(tol))."
+                break
             end
         end
+        qcp_status = _status
+        duals_ok = _duals
     end
-end
 
-# Also fix conventional stage variables because they appear quadratically
-# in the social welfare epigraph after introducing staged convex cost.
-if haskey(var_dict, :power_q_E_stage)
-    for id in planner_state[:power_conv]
-        if haskey(var_dict[:power_q_E_stage], id)
-            qstage = var_dict[:power_q_E_stage][id]
-            if qstage isa AbstractArray
-                for vi in qstage
-                    push!(demand_vars_and_vals, (vi, value(vi)))
-                end
-            elseif qstage isa JuMP.VariableRef
-                push!(demand_vars_and_vals, (qstage, value(qstage)))
-            end
-        end
+    if qcp_status != MOI.OPTIMAL && qcp_status != MOI.LOCALLY_SOLVED
+        @error("Social planner QCP solve failed. Attempts: " * join(status_hist, " | "))
+        error("Social planner QCP solve failed (see attempt log in output).")
     end
-end
-
-# Deduplicate fix targets (a variable can appear through multiple containers).
-fix_val_by_var = Dict{JuMP.VariableRef, Float64}()
-for (v, val) in demand_vars_and_vals
-    if !haskey(fix_val_by_var, v)
-        fix_val_by_var[v] = val
+    if !duals_ok
+        error("Gurobi solved SP QCP but did not return duals after retries. " *
+              "Attempts: " * join(status_hist, " | ") * ". " *
+              "Set SocialPlanner.solver=ipopt to obtain SP prices from QCP duals.")
     end
-end
-
-# ── Phase B: Modify the model ────────────────────────────────────────────
-
-# (b1) Fix quadratic-term variables at QCP-optimal values.
-# If tiny numerical noise puts a value slightly outside variable bounds,
-# temporarily relax that bound to preserve feasibility of the fixed-point slice.
-fixed_vars = JuMP.VariableRef[]
-# Save original bounds for cleanup: (var, :lb/:ub, old_bound_value)
-bound_patches = Tuple{JuMP.VariableRef, Symbol, Float64}[]
-bound_relax_count = Ref(0)
-max_bound_relax = Ref(0.0)
-for (v, val_raw) in fix_val_by_var
-    if !isfinite(val_raw)
-        error("Non-finite QCP value encountered while fixing $(name(v)); cannot build LP dual-recovery model.")
-    end
-    val = val_raw
-    if JuMP.has_lower_bound(v)
-        lb = JuMP.lower_bound(v)
-        if val < lb
-            push!(bound_patches, (v, :lb, lb))
-            JuMP.set_lower_bound(v, val)
-            bound_relax_count[] += 1
-            max_bound_relax[] = max(max_bound_relax[], lb - val)
-        end
-    end
-    if JuMP.has_upper_bound(v)
-        ub = JuMP.upper_bound(v)
-        if val > ub
-            push!(bound_patches, (v, :ub, ub))
-            JuMP.set_upper_bound(v, val)
-            bound_relax_count[] += 1
-            max_bound_relax[] = max(max_bound_relax[], val - ub)
-        end
-    end
-    fix_val_by_var[v] = val
-    fix(v, val; force = true)
-    push!(fixed_vars, v)
-end
-if bound_relax_count[] > 0
-    @info "Step 2 note: relaxed $(bound_relax_count[]) variable bounds to match QCP fixed values (max relax = $(max_bound_relax[]))."
-end
-
-# (b2) Per-year quadratic welfare terms evaluated at the ACTUAL fixed values.
-# This avoids inconsistency between fixed-point values and epigraph constants.
-quadratic_welfare_const = Dict{Int, Float64}()
-for jy in JY
-    quadratic_welfare_const[jy] = sum(
-        JuMP.value(v -> fix_val_by_var[v], agent_welfare_per_year[id][jy]) for id in quadratic_welfare_agent_ids;
-        init = 0.0
-    )
-end
-
-# (b3) Delete quadratic epigraph constraints (the ONLY QC in the model).
-epigraph_refs = planner[:social_welfare_epigraph]
-for jy in JY
-    delete(planner, epigraph_refs[jy])
-end
-unregister(planner, :social_welfare_epigraph)
-
-# (b4) Re-add epigraph as purely LINEAR constraints:
-#   sw_aux[jy] ≤ Σ(linear welfare)[jy] + quadratic_welfare_const[jy]
-# where quadratic welfare (demand utility + conventional staged cost) has been
-# evaluated at the QCP optimum and absorbed into constants.
-# Gurobi now classifies the model as a pure LP.
-@constraint(planner, social_welfare_epigraph_lp[jy in JY],
-    sw_aux[jy] <= sum(agent_welfare_per_year[id][jy] for id in linear_welfare_agent_ids)
-                + quadratic_welfare_const[jy]
-)
-
-@info "Step 2 complete: Fixed $(length(fixed_vars)) quadratic-term variables, " *
-      "replaced QC epigraph with linear constraints — model is now LP."
-
-# ── Step 3: Re-solve as LP for dual variables ────────────────────────────
-set_optimizer_attribute(planner, "FeasibilityTol", 1e-5)
-optimize!(planner)
-
-lp_status = termination_status(planner)
-if lp_status == MOI.INFEASIBLE_OR_UNBOUNDED
-    @warn("LP re-solve returned INFEASIBLE_OR_UNBOUNDED; retrying with DualReductions=0 to disambiguate.")
-    set_optimizer_attribute(planner, "DualReductions", 0)
+else
+    # IPOPT path (default): solve QCP directly and use returned multipliers.
+    set_optimizer_attribute(planner, "tol", Float64(get(sp_cfg, "ipopt_tol", 1e-8)))
+    set_optimizer_attribute(planner, "max_iter", Int(get(sp_cfg, "ipopt_max_iter", 5000)))
+    set_optimizer_attribute(planner, "print_level", 0)
     optimize!(planner)
-    lp_status = termination_status(planner)
+    qcp_status = termination_status(planner)
+    duals_ok = has_duals(planner)
+    if qcp_status != MOI.OPTIMAL && qcp_status != MOI.LOCALLY_SOLVED
+        error("IPOPT social planner solve failed with status $qcp_status")
+    end
+    if !duals_ok
+        error("IPOPT solved SP QCP but duals are unavailable.")
+    end
+    @info "IPOPT QCP solve complete with duals available."
 end
-if lp_status != MOI.OPTIMAL
-    @warn("LP re-solve returned status $lp_status (expected OPTIMAL). Duals may be unavailable.")
-end
-@info "Step 3 complete: LP solved with status $lp_status — dual variables available."
 
 # ------------------------------------------------------------------------------
 # SECTION 12: SAVE RESULTS
 # ------------------------------------------------------------------------------
 
-# Write Market_Prices.csv (equilibrium prices from dual variables of balance
-# constraints) and Agent_Summary.csv (per-agent total quantity and welfare
-# contribution) to the social_planner_results folder.
+# Write Market_Prices.csv (equilibrium prices from QCP dual variables of balance
+# constraints) and Agent_Summary.csv (per-agent quantities and objective values)
+# to the social_planner_results folder.
 save_social_planner_results!(planner, planner_state, agents, mdict, results_folder)
-
-# ── Step 5: Restore original QCP model (cleanup) ─────────────────────────
-# Restore the model to its original QCP form so it can be re-used (e.g.
-# with different gamma values) without rebuilding from scratch.
-
-# (a) Unfix LP-fixed variables.
-for v in fixed_vars
-    unfix(v)
-end
-
-# Restore temporary bound relaxations (if any).
-for (v, btype, oldb) in bound_patches
-    if btype == :lb
-        JuMP.set_lower_bound(v, oldb)
-    else
-        JuMP.set_upper_bound(v, oldb)
-    end
-end
-
-# (b) Delete the linear epigraph constraints and restore the original
-#     quadratic epigraph constraints (sw_aux[jy] ≤ social_welfare[jy]).
-lp_epigraph = planner[:social_welfare_epigraph_lp]
-for jy in JY
-    delete(planner, lp_epigraph[jy])
-end
-unregister(planner, :social_welfare_epigraph_lp)
-
-social_welfare = planner_state[:social_welfare]
-@constraint(planner, social_welfare_epigraph[jy in JY],
-    sw_aux[jy] <= social_welfare[jy]
-)
-
-set_optimizer_attribute(planner, "DualReductions", 1)
-set_optimizer_attribute(planner, "FeasibilityTol", 1e-6)
-
-@info "Step 5 complete: Demand variables unfixed, QC epigraph restored — model back to QCP form."

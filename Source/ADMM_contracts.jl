@@ -53,6 +53,8 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     stall_count = 0
     restart_patience = 40
     restart_factor = 1.15
+    # Reform: disable checkpoint/recovery steering and rely on plain ADMM updates.
+    enable_recovery_steering = false
     rollback_count = 0
     max_rollbacks = 2
     rollback_cooldown = 80
@@ -545,6 +547,12 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                     push!(ADMM_state["Residuals"]["Dual"][key], Inf)
                 end
                 push!(ADMM_state["Residuals"]["Dual"]["cap"], Inf)
+                # Keep per-agent capacity dual history aligned with iterations
+                # (iter 1 has undefined dual because z^{k-1} does not exist).
+                cap_state = ADMM_state["Capacity"]
+                for m in cap_agents
+                    push!(cap_state["Dual"][m], Inf)
+                end
                 C = ADMM_state["ppa"]
                 for vres_id in get(ppa_market, "ppa_vres", String[])
                     push!(C["Dual"][vres_id], Inf)
@@ -747,7 +755,8 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         # checkpoint for a long window, damp steps immediately and only
         # occasionally blend toward checkpoint λ/ρ. This preserves anti-drift
         # benefits while avoiding repeating hard-reset cycles.
-        if stall_count >= restart_patience && score > restart_factor * best_score && !isempty(best_λ)
+        if enable_recovery_steering && stall_count >= restart_patience &&
+           score > restart_factor * best_score && !isempty(best_λ)
             for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
                 η_scale[mkt] = max(0.15, 0.9 * η_scale[mkt])
             end

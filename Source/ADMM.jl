@@ -75,15 +75,55 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
     stall_count = 0
     restart_patience = 40
     restart_factor = 1.15
+    # Reform: disable checkpoint/recovery steering and rely on plain ADMM updates.
+    enable_recovery_steering = false
     rollback_count = 0
-    max_rollbacks = 2
+    # Keep this large: in strongly coupled systems, we may need several
+    # best-region re-entry attempts over long runs.
+    max_rollbacks = 999
     rollback_cooldown = 80
     last_rollback_iter = -rollback_cooldown
     rollback_blend = 0.35
+    # Coordinated rho exploration factors around global-best region.
+    explore_idx = 0
+    explore_factors = (0.90, 1.00, 1.10)
     best_λ = Dict{String,Array{Float64,3}}()
     best_ρ = Dict{String,Float64}()
     # Per-agent best ρ_cap for the rollback blend; populated alongside best_ρ.
     best_ρ_cap = Dict{String,Float64}()
+    # Per-agent best λ_cap snapshot for global best-region re-entry.
+    best_λ_cap = Dict{String,Vector{Float64}}()
+    # ------------------------------------------------------------------
+    # Per-market / per-agent basin guards
+    #
+    # Global best_score tracks only the worst market. To avoid the pattern
+    # where some markets enter a good basin and then drift away while waiting
+    # for others, we keep market-local and capacity-agent-local "best basin"
+    # anchors and pull states back when they drift too far.
+    #
+    # WHY this choice:
+    # - Addresses the observed "best iter ~100 then diverge for 100+ iters"
+    #   behaviour by preserving local progress.
+    # - Implements "stay in best area while others catch up" in a controlled,
+    #   blended way (no hard resets).
+    # ------------------------------------------------------------------
+    flow_markets = ("elec", "H2", "elec_GC", "H2_GC", "EP")
+    market_best_merit = Dict{String,Float64}(m => Inf for m in flow_markets)
+    market_best_λ = Dict{String,Array{Float64,3}}(m => copy(results["λ"][m][end]) for m in flow_markets)
+    market_best_ρ = Dict{String,Float64}(m => ADMM_state["ρ"][m][end] for m in flow_markets)
+    market_rho_hold_until = Dict{String,Int}(m => 0 for m in flow_markets)
+    # Persistent-drift detector per market; used by rescue mode.
+    market_bad_streak = Dict{String,Int}(m => 0 for m in flow_markets)
+    cap_best_merit = Dict{String,Float64}(m => Inf for m in cap_agents)
+    cap_best_λ = Dict{String,Vector{Float64}}(m => copy(ADMM_state["Capacity"]["λ"][m][end]) for m in cap_agents)
+    cap_rho_hold_until = Dict{String,Int}(m => 0 for m in cap_agents)
+    # Basin guards should only activate once a market/agent has reached a
+    # reasonably good neighborhood. Activating too early (far from convergence)
+    # can lock the run near a poor early iterate.
+    # Experimental local guard/re-entry logic is disabled by default because
+    # it can over-steer tightly coupled runs. Keep the value above max_iter
+    # so those branches are inactive unless explicitly re-enabled in code.
+    guard_min_iter = max_iter + 1
 
     function _market_eps(key::String, n_slots::Int)
         eps_abs = ADMM_state["EpsilonAbs"]
@@ -413,6 +453,12 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
                 push!(ADMM_state["Residuals"]["Dual"]["H2_GC"],  Inf)
                 push!(ADMM_state["Residuals"]["Dual"]["EP"],      Inf)
                 push!(ADMM_state["Residuals"]["Dual"]["cap"],     Inf)
+                # Keep per-agent capacity dual history aligned with iterations
+                # (iter 1 has undefined dual because z^{k-1} does not exist).
+                cap_state = ADMM_state["Capacity"]
+                for m in cap_agents
+                    push!(cap_state["Dual"][m], Inf)
+                end
             end
         end
 
@@ -429,17 +475,45 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
             merit[key] = isfinite(m) ? m : 1e12
         end
         score = maximum(values(merit))
+        # Track local best basin per flow market (independent of global score).
+        for mkt in flow_markets
+            if merit[mkt] < market_best_merit[mkt]
+                market_best_merit[mkt] = merit[mkt]
+                market_best_λ[mkt] = copy(results["λ"][mkt][end])
+                market_best_ρ[mkt] = ADMM_state["ρ"][mkt][end]
+            end
+        end
+        # Track local best basin per capacity-owning agent.
+        cap_state_merit = ADMM_state["Capacity"]
+        for m in cap_agents
+            rp_m = cap_state_merit["Primal"][m][end]
+            rd_m = cap_state_merit["Dual"][m][end]
+            eps_abs_local = ADMM_state["EpsilonAbs"]
+            eps_rel_local = ADMM_state["EpsilonRel"]
+            sqrt_y_local = sqrt(max(1, n_yr))
+            sp_m = max(cap_state_merit["ResidualScale_Primal"][m], 1.0)
+            sd_m = max(cap_state_merit["ResidualScale_Dual"][m], 1.0)
+            eps_pr_m = eps_abs_local * sqrt_y_local + eps_rel_local * sp_m
+            eps_du_m = eps_abs_local * sqrt_y_local + eps_rel_local * sd_m
+            mm = max(rp_m / max(eps_pr_m, 1e-9), isfinite(rd_m) ? rd_m / max(eps_du_m, 1e-9) : 1e12)
+            if isfinite(mm) && mm < cap_best_merit[m]
+                cap_best_merit[m] = mm
+                cap_best_λ[m] = copy(cap_state_merit["λ"][m][end])
+                best_ρ_cap[m] = cap_state_merit["ρ"][m][end]
+            end
+        end
         if score < best_score
             best_score = score
             best_iter = iter
             stall_count = 0
-            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+            for mkt in flow_markets
                 best_λ[mkt] = copy(results["λ"][mkt][end])
                 best_ρ[mkt] = ADMM_state["ρ"][mkt][end]
             end
             # Capacity is per-agent: snapshot every agent's current ρ_m.
             for m in cap_agents
                 best_ρ_cap[m] = ADMM_state["Capacity"]["ρ"][m][end]
+                best_λ_cap[m] = copy(ADMM_state["Capacity"]["λ"][m][end])
             end
         else
             stall_count += 1
@@ -447,7 +521,7 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
 
         # Adapt per-market step scales from one-step merit movement.
         if iter > 1
-            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+            for mkt in flow_markets
                 rp_prev = ADMM_state["Residuals"]["Primal"][mkt][end-1]
                 rd_prev = ADMM_state["Residuals"]["Dual"][mkt][end-1]
                 eps_pr_prev, eps_du_prev = _market_eps(mkt, n_slots)
@@ -486,7 +560,7 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
             sqrt_n = sqrt(n_slots)
             scale_pr = ADMM_state["ResidualScale"]["Primal"]
             scale_du = ADMM_state["ResidualScale"]["Dual"]
-            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+            for mkt in flow_markets
                 rp = ADMM_state["Residuals"]["Primal"][mkt][end]
                 rd = ADMM_state["Residuals"]["Dual"][mkt][end]
                 base = max(rp, rd)
@@ -526,29 +600,129 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         @timeit TO "Update ρ" begin
             update_rho!(ADMM_state, iter)
         end
-
-        # If we are clearly worse than the best point for a long window,
-        # damp steps immediately and, only occasionally, blend toward the best
-        # checkpoint. This keeps anti-drift protection while avoiding periodic
-        # hard-reset limit cycles.
-        if stall_count >= restart_patience && score > restart_factor * best_score && !isempty(best_λ)
-            for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
-                η_scale[mkt] = max(0.15, 0.9 * η_scale[mkt])
+        # Temporary rho hold windows (guard against immediate post-update
+        # overreaction after a basin rollback).
+        for mkt in flow_markets
+            if iter <= market_rho_hold_until[mkt] && length(ADMM_state["ρ"][mkt]) >= 2
+                ADMM_state["ρ"][mkt][end] = ADMM_state["ρ"][mkt][end-1]
             end
-            can_rollback = rollback_count < max_rollbacks && (iter - last_rollback_iter) >= rollback_cooldown
-            if can_rollback
-                α = rollback_blend
-                for mkt in ("elec", "H2", "elec_GC", "H2_GC", "EP")
-                    results["λ"][mkt][end] .= (1.0 - α) .* results["λ"][mkt][end] .+ α .* best_λ[mkt]
-                    ADMM_state["ρ"][mkt][end] = (1.0 - α) * ADMM_state["ρ"][mkt][end] + α * best_ρ[mkt]
-                    η_scale[mkt] = max(0.15, 0.85 * η_scale[mkt])
+        end
+        cap_state_hold = ADMM_state["Capacity"]
+        for m in cap_agents
+            if iter <= cap_rho_hold_until[m] && length(cap_state_hold["ρ"][m]) >= 2
+                cap_state_hold["ρ"][m][end] = cap_state_hold["ρ"][m][end-1]
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Per-market rescue mode (persistent drift recovery)
+        #
+        # If a market's normalized merit stays significantly above its local
+        # best for many consecutive iterations, local smooth updates can be too
+        # weak (observed in H2/EP drifts). Apply a decisive but bounded jump:
+        #   1) boost rho for that market,
+        #   2) pull λ back toward market-local best,
+        #   3) unfreeze rho so adaptation can continue from the new state.
+        # ------------------------------------------------------------------
+        if enable_recovery_steering
+            rescue_trigger = 1.20
+            rescue_streak_iters = 10
+            rescue_rho_boost = 1.35
+            rescue_blend = 0.60
+            for mkt in flow_markets
+                b = market_best_merit[mkt]
+                if b < Inf && merit[mkt] > rescue_trigger * b
+                    market_bad_streak[mkt] += 1
+                else
+                    market_bad_streak[mkt] = 0
                 end
-                # Capacity rollback: blend each agent's ρ_cap toward its best.
+                if market_bad_streak[mkt] >= rescue_streak_iters
+                    # rho jump (bounded by market-specific maxima)
+                    ρ_cur = ADMM_state["ρ"][mkt][end]
+                    ρ_max = mkt in ("elec", "elec_GC") ? 5_000.0 : 100.0
+                    ADMM_state["ρ"][mkt][end] = min(ρ_max, rescue_rho_boost * ρ_cur)
+                    # λ pullback to local-best basin
+                    results["λ"][mkt][end] .= (1.0 - rescue_blend) .* results["λ"][mkt][end] .+ rescue_blend .* market_best_λ[mkt]
+                    # ensure controller can react after rescue
+                    if haskey(ADMM_state["ρ_frozen"], mkt)
+                        ADMM_state["ρ_frozen"][mkt] = false
+                    end
+                    η_scale[mkt] = max(0.20, 0.85 * η_scale[mkt])
+                    market_bad_streak[mkt] = 0
+                end
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Local basin guard (per flow market + per capacity agent)
+        #
+        # If a market/agent drifts sufficiently away from its own best merit
+        # basin, blend λ and ρ back toward that local best and hold rho for a
+        # few iterations. This is a soft "stay near best area" mechanism.
+        # ------------------------------------------------------------------
+        guard_trigger = 1.25   # relative drift from local best merit
+        guard_blend = 0.15
+        guard_hold_iters = 4
+        for mkt in flow_markets
+            b = market_best_merit[mkt]
+            (b < Inf && iter >= guard_min_iter) || continue
+            if merit[mkt] > guard_trigger * b
+                results["λ"][mkt][end] .= (1.0 - guard_blend) .* results["λ"][mkt][end] .+ guard_blend .* market_best_λ[mkt]
+                ADMM_state["ρ"][mkt][end] = (1.0 - guard_blend) * ADMM_state["ρ"][mkt][end] + guard_blend * market_best_ρ[mkt]
+                η_scale[mkt] = max(0.10, 0.80 * η_scale[mkt])
+                market_rho_hold_until[mkt] = max(market_rho_hold_until[mkt], iter + guard_hold_iters)
+            end
+        end
+        cap_state_guard = ADMM_state["Capacity"]
+        eps_abs_guard = ADMM_state["EpsilonAbs"]
+        eps_rel_guard = ADMM_state["EpsilonRel"]
+        sqrt_y_guard = sqrt(max(1, n_yr))
+        for m in cap_agents
+            rp_m = cap_state_guard["Primal"][m][end]
+            rd_m = cap_state_guard["Dual"][m][end]
+            sp_m = max(cap_state_guard["ResidualScale_Primal"][m], 1.0)
+            sd_m = max(cap_state_guard["ResidualScale_Dual"][m], 1.0)
+            eps_pr_m = eps_abs_guard * sqrt_y_guard + eps_rel_guard * sp_m
+            eps_du_m = eps_abs_guard * sqrt_y_guard + eps_rel_guard * sd_m
+            mm = max(rp_m / max(eps_pr_m, 1e-9), isfinite(rd_m) ? rd_m / max(eps_du_m, 1e-9) : 1e12)
+            b = cap_best_merit[m]
+            if b < Inf && iter >= guard_min_iter && isfinite(mm) && mm > guard_trigger * b
+                cap_state_guard["λ"][m][end] .= (1.0 - guard_blend) .* cap_state_guard["λ"][m][end] .+ guard_blend .* cap_best_λ[m]
+                if haskey(best_ρ_cap, m)
+                    cap_state_guard["ρ"][m][end] = (1.0 - guard_blend) * cap_state_guard["ρ"][m][end] + guard_blend * best_ρ_cap[m]
+                end
+                cap_rho_hold_until[m] = max(cap_rho_hold_until[m], iter + guard_hold_iters)
+            end
+        end
+
+        # Global checkpoint recovery (active):
+        # If we drift well above the best score for a sustained window,
+        # HARD-restore λ and ρ to the best iterate and continue from there.
+        # This is intentionally simple and robust in tightly coupled systems.
+        stalled_and_worse = enable_recovery_steering &&
+                            stall_count >= restart_patience && score > restart_factor * best_score
+        if stalled_and_worse && !isempty(best_λ)
+            can_rollback = rollback_count < max_rollbacks &&
+                           (iter - last_rollback_iter) >= max(15, Int(0.35 * restart_patience))
+            if can_rollback
+                α = 1.0
+                for mkt in flow_markets
+                    results["λ"][mkt][end] .= best_λ[mkt]
+                    ADMM_state["ρ"][mkt][end] = best_ρ[mkt]
+                    η_scale[mkt] = max(0.20, 0.90 * η_scale[mkt])
+                    if haskey(ADMM_state["ρ_frozen"], mkt)
+                        ADMM_state["ρ_frozen"][mkt] = false
+                    end
+                end
+                cap_state_rb = ADMM_state["Capacity"]
                 for m in cap_agents
                     if haskey(best_ρ_cap, m)
-                        cur = ADMM_state["Capacity"]["ρ"][m][end]
-                        ADMM_state["Capacity"]["ρ"][m][end] = (1.0 - α) * cur + α * best_ρ_cap[m]
+                        cap_state_rb["ρ"][m][end] = best_ρ_cap[m]
                     end
+                    if haskey(best_λ_cap, m)
+                        cap_state_rb["λ"][m][end] .= best_λ_cap[m]
+                    end
+                    cap_state_rb["ρ_frozen"][m] = false
                 end
                 rollback_count += 1
                 last_rollback_iter = iter

@@ -116,72 +116,102 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
         # only push z^k and read back the previous-iteration λ^{k-1}.
         # ----------------------------------------------------------------
         if haskey(mod.ext[:parameters], :z_cap)
-            agent_type = String(get(mod.ext[:parameters], :Type, ""))
-            JY = mod.ext[:sets][:JY]
-            z_cap = zeros(length(JY))
-            # Feasible floor for the next-iteration capacity target.
-            # Capacity dynamics are nondecreasing (inv[jy] >= 0), so the
-            # next z_cap should never request a value below the previous
-            # iterate's installed capacity; otherwise the agent cannot
-            # match it and the primal residual is artificially inflated.
-            cap_floor = zeros(length(JY))
-            if !isempty(get(results["Cap_VRES"], m, []))
-                cap_floor = results["Cap_VRES"][m][end]
-            elseif !isempty(get(results["Cap_Elec_H2"], m, []))
-                cap_floor = results["Cap_Elec_H2"][m][end]
-            elseif !isempty(get(results["Cap_EP_Green"], m, []))
-                cap_floor = results["Cap_EP_Green"][m][end]
-            end
-            if agent_type == "VRES"
-                # VRES capacity needed to support the elec flow consensus:
-                # z[y] = max over (h,d) of g_bar_elec/AF (peak of derated profile)
-                g_bar = mod.ext[:parameters][:g_bar_elec]
-                AF = mod.ext[:timeseries][:AF]
-                for (iy, jy) in enumerate(JY)
-                    mx = 0.0
-                    for jh in 1:n_ts, jd in 1:n_rd
-                        af = AF[jh, jd, jy]
-                        mx = max(mx, af > 1e-9 ? max(0.0, g_bar[jh, jd, jy] / af) : 0.0)
-                    end
-                    z_cap[iy] = mx
-                end
-            elseif agent_type == "GreenProducer"
-                # Electrolyzer H₂ output capacity needed to support H₂ flow consensus.
-                g_bar = mod.ext[:parameters][:g_bar_H2]
-                for (iy, jy) in enumerate(JY)
-                    z_cap[iy] = max(0.0, maximum(g_bar[:, :, jy]))
-                end
-            elseif agent_type == "GreenOfftaker"
-                # Green offtaker EP capacity needed to support EP flow consensus.
-                g_bar = mod.ext[:parameters][:g_bar_EP]
-                for (iy, jy) in enumerate(JY)
-                    z_cap[iy] = max(0.0, maximum(g_bar[:, :, jy]))
-                end
-            end
-            # z_cap projection for feasibility (same intent as before):
-            # (1) nondecreasing across years (matches inv >= 0 dynamics),
-            # (2) never below previous iterate's capacity floor.
-            for iy in eachindex(z_cap)
-                if iy > 1
-                    z_cap[iy] = max(z_cap[iy], z_cap[iy - 1])
-                end
-                if iy <= length(cap_floor)
-                    z_cap[iy] = max(z_cap[iy], cap_floor[iy])
-                end
-            end
-
-            # Push z^k into history; ADMM.jl reads z^{k} and z^{k-1} after the
-            # solve to compute the dual residual s_m = ||ρ·(z^k - z^{k-1})||.
             cap_state = ADMM_state["Capacity"]
-            push!(cap_state["z"][m], copy(z_cap))
+            # On the first ADMM iteration, if z was warm-started from SP
+            # capacities, use that target directly to keep x and z aligned.
+            if get(ADMM_state, "n_iter", 0) == 0 && !isempty(cap_state["z"][m])
+                z_cap = copy(cap_state["z"][m][end])
+                mod.ext[:parameters][:z_cap] = z_cap
+                mod.ext[:parameters][:λ_cap] = copy(cap_state["λ"][m][end])
+                mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
+            else
+                agent_type = String(get(mod.ext[:parameters], :Type, ""))
+                JY = mod.ext[:sets][:JY]
+                z_cap = zeros(length(JY))
+                # Structural feasibility floor: capacity variables cannot go
+                # below model-internal initial installed capacity (inv >= 0 in
+                # all green agents). Enforce the same floor on z so ADMM does
+                # not chase impossible x=z targets.
+                cap_floor = if agent_type == "VRES"
+                    get(mod.ext[:parameters], :Capacity, 0.0)
+                elseif agent_type == "GreenProducer"
+                    get(mod.ext[:parameters], :Capacity_H2_Output, 0.0)
+                elseif agent_type == "GreenOfftaker"
+                    get(mod.ext[:parameters], :Capacity_EP_Out, 0.0)
+                else
+                    0.0
+                end
+                if agent_type == "VRES"
+                    # Use the agent's latest realized flow when available; this
+                    # keeps z tied to physically achieved dispatch instead of
+                    # raw consensus targets that can overshoot in coupled runs.
+                    flow_ref = isempty(get(results["g"], m, [])) ?
+                               mod.ext[:parameters][:g_bar_elec] : results["g"][m][end]
+                    AF = mod.ext[:timeseries][:AF]
+                    for (iy, jy) in enumerate(JY)
+                        mx = 0.0
+                        for jh in 1:n_ts, jd in 1:n_rd
+                            af = AF[jh, jd, jy]
+                            mx = max(mx, af > 1e-9 ? max(0.0, flow_ref[jh, jd, jy] / af) : 0.0)
+                        end
+                        z_cap[iy] = mx
+                    end
+                elseif agent_type == "GreenProducer"
+                    # Electrolyzer H2 output capacity from latest realized H2 flow.
+                    flow_ref = isempty(get(results["h2"], m, [])) ?
+                               mod.ext[:parameters][:g_bar_H2] : results["h2"][m][end]
+                    for (iy, jy) in enumerate(JY)
+                        z_cap[iy] = max(0.0, maximum(flow_ref[:, :, jy]))
+                    end
+                elseif agent_type == "GreenOfftaker"
+                    # Green offtaker EP capacity from latest realized EP flow.
+                    flow_ref = isempty(get(results["EP"], m, [])) ?
+                               mod.ext[:parameters][:g_bar_EP] : results["EP"][m][end]
+                    for (iy, jy) in enumerate(JY)
+                        z_cap[iy] = max(0.0, maximum(flow_ref[:, :, jy]))
+                    end
+                end
+                # z_cap projection for feasibility:
+                # enforce only nondecreasing across years (inv >= 0 dynamics).
+                for iy in eachindex(z_cap)
+                    if iy > 1
+                        z_cap[iy] = max(z_cap[iy], z_cap[iy - 1])
+                    end
+                    z_cap[iy] = max(z_cap[iy], cap_floor)
+                end
 
-            # Refresh JuMP model parameters from ADMM state. λ is the
-            # PREVIOUS iteration's dual (λ^{k-1}); ρ is the current per-agent
-            # penalty (ρ_m^{k-1}, updated by update_rho! at the end of the
-            # previous iteration).
-            mod.ext[:parameters][:z_cap] = z_cap
-            mod.ext[:parameters][:λ_cap] = copy(cap_state["λ"][m][end])
-            mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
+                # Optional under-relaxation of z update (damped target tracking):
+                # z^k <- α*z_raw^k + (1-α)*z^{k-1}. This suppresses jumpy target
+                # motion in tightly coupled runs and helps prevent dual blow-ups.
+                # α=1.0 recovers the original undamped behaviour.
+                z_alpha = get(get(data, "ADMM", Dict()), "cap_z_relax", 1.0)
+                z_alpha = min(1.0, max(0.05, z_alpha))
+                if !isempty(cap_state["z"][m])
+                    z_prev = cap_state["z"][m][end]
+                    if length(z_prev) == length(z_cap)
+                        z_cap .= z_alpha .* z_cap .+ (1.0 - z_alpha) .* z_prev
+                        # Re-apply monotonic projection after damping.
+                        for iy in eachindex(z_cap)
+                            if iy > 1
+                                z_cap[iy] = max(z_cap[iy], z_cap[iy - 1])
+                            end
+                            z_cap[iy] = max(z_cap[iy], cap_floor)
+                        end
+                    end
+                end
+
+                # Push z^k into history; ADMM.jl reads z^{k} and z^{k-1} after the
+                # solve to compute the dual residual s_m = ||ρ·(z^k - z^{k-1})||.
+                push!(cap_state["z"][m], copy(z_cap))
+
+                # Refresh JuMP model parameters from ADMM state. λ is the
+                # PREVIOUS iteration's dual (λ^{k-1}); ρ is the current per-agent
+                # penalty (ρ_m^{k-1}, updated by update_rho! at the end of the
+                # previous iteration).
+                mod.ext[:parameters][:z_cap] = z_cap
+                mod.ext[:parameters][:λ_cap] = copy(cap_state["λ"][m][end])
+                mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
+            end
         end
     end
 

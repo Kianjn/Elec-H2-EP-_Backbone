@@ -383,7 +383,8 @@ sp_primal_file = joinpath(home_dir, "social_planner_results", "SP_Primal_Quantit
 # Primal warm-start: pre-populate g_bar with SP quantities so iter 1 agents solve
 # with λ=SP and g_bar=SP → zero imbalance → prices stay at SP. Without it, g_bar=0
 # biases agents toward zero and causes immediate price drift.
-define_results!(merge(run_general, data["ADMM"]), results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market; sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, use_primal_warmstart=true)
+define_results!(merge(run_general, data["ADMM"]), results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market;
+    sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, sp_cap_file=sp_cap_file, use_primal_warmstart=true)
 
 # Single consolidated warm-start message
 ws = results["warmstart"]

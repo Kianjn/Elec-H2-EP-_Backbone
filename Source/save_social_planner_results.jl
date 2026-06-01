@@ -6,10 +6,8 @@
 #   Saves Market_Prices.csv (dual of balance constraints) and Agent_Summary.csv
 #   from the solved social planner model.
 #
-#   CONTEXT: This function is called after the two-step dual recovery solve in
-#   social_planner.jl. At the point of this call, the model has been re-solved
-#   as an LP (demand variables fixed, QC epigraph constraints replaced by linear
-#   equivalents), so Gurobi provides full dual variables (Pi attribute).
+#   CONTEXT: This function is called after direct QCP solve in
+#   social_planner.jl with solver duals available.
 #
 #   POST-PROCESSING: The social planner maximizes welfare (no prices in objective);
 #   prices emerge as dual variables. To match the ADMM Agent_Summary format
@@ -19,7 +17,7 @@
 #   prices. This ensures direct comparability with market_exposure_results.
 #
 # ARGUMENTS:
-#   planner — Solved JuMP model (LP after dual recovery; duals available).
+#   planner — Solved JuMP model (QCP with duals available).
 #   planner_state — Dict from build_social_planner! (:var_dict, :agent_welfare,
 #     :agent_welfare_per_year, :social_welfare, :sw_aux, :demand_var_keys,
 #     :elec_balance, :elec_GC_balance, :H2_balance, :H2_GC_balance, :EP_balance,
@@ -55,13 +53,13 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     H2_GC_balance = planner_state[:H2_GC_balance]
     EP_balance = planner_state[:EP_balance]
     W = planner_state[:W]   # Representative-day weights W[jd, jy]
+    # Uniform value helper for variables/expressions used below.
+    _val(v::JuMP.VariableRef) = value(v)
+    _val(x) = value(x)
 
     # ── Check solver status before extracting results ─────────────────
     status = termination_status(planner)
-    # This function is called after the two-step dual recovery solve in
-    # social_planner.jl: (1) QCP solve for primals, (2) LP re-solve with
-    # demand variables fixed for duals. At the point of this call the model
-    # has been re-solved as an LP, so the status should be OPTIMAL.
+    # This function is called after direct QCP solve.
     # LOCALLY_SOLVED is accepted as a fallback for convex models.
     if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
         @warn "Social planner did NOT solve to optimality (status: $status). " *
@@ -71,17 +69,17 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
                    "for all markets (especially EP: D_EP = Total_Demand × LOAD_EP ≤ Σ EP capacities)."
         elseif status == MOI.INFEASIBLE_OR_UNBOUNDED
             @error "Model status is INFEASIBLE_OR_UNBOUNDED. " *
-                   "Run LP dual-recovery with DualReductions=0 to disambiguate; " *
+                   "Check solver settings and convexity assumptions; " *
                    "if infeasible, check market-capacity feasibility (especially EP)."
         elseif status == MOI.DUAL_INFEASIBLE
-            @error "Model appears unbounded in LP dual-recovery (DUAL_INFEASIBLE). " *
-                   "Check that all welfare-linked variables in quadratic terms were fixed before LP re-solve."
+            @error "Model appears unbounded (DUAL_INFEASIBLE). " *
+                   "Check model scaling/convexity and solver settings."
         end
         return
     end
 
     # ── Market_Prices.csv — Equilibrium prices from dual variables ──────
-    # By LP/QP duality, the shadow price (dual value) of a market-clearing
+    # By convex duality, the shadow price (dual value) of a market-clearing
     # constraint equals the equilibrium price in that market at that
     # timestep. Extracting duals is the standard way to recover prices from
     # a centralized welfare-maximization problem. Includes all 5 markets.
@@ -128,40 +126,40 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
             g_EP = 0.0
             if id in power_consumers
                 d = var_dict[:power_d_E][id]
-                g_elec = -value(d[jh, jd, jy])
+                g_elec = -_val(d[jh, jd, jy])
             elseif id in power_vres || id in power_conv
                 q = var_dict[:power_q_E][id]
-                g_elec = value(q[jh, jd, jy])
+                g_elec = _val(q[jh, jd, jy])
                 if id in power_vres
-                    g_elec_GC = value(q[jh, jd, jy])
+                    g_elec_GC = _val(q[jh, jd, jy])
                 end
             elseif id in H2_producers
                 e_buy = var_dict[:H2_e_buy][id]
                 gc_e = var_dict[:H2_gc_e_buy][id]
                 h_sell = var_dict[:H2_h_sell][id]
                 gc_h = var_dict[:H2_gc_h_sell][id]
-                g_elec = -value(e_buy[jh, jd, jy])
-                g_elec_GC = -value(gc_e[jh, jd, jy])
-                g_H2 = value(h_sell[jh, jd, jy])
-                g_H2_GC = value(gc_h[jh, jd, jy])
+                g_elec = -_val(e_buy[jh, jd, jy])
+                g_elec_GC = -_val(gc_e[jh, jd, jy])
+                g_H2 = _val(h_sell[jh, jd, jy])
+                g_H2_GC = _val(gc_h[jh, jd, jy])
             elseif id in offtaker_green
                 h_buy = var_dict[:offtaker_h_buy][id]
                 gc_buy = var_dict[:offtaker_gc_h_buy][id]
                 ep_sell = var_dict[:offtaker_ep_sell][id]
-                g_H2 = -value(h_buy[jh, jd, jy])
-                g_H2_GC = -value(gc_buy[jh, jd, jy])
-                g_EP = value(ep_sell[jh, jd, jy])
+                g_H2 = -_val(h_buy[jh, jd, jy])
+                g_H2_GC = -_val(gc_buy[jh, jd, jy])
+                g_EP = _val(ep_sell[jh, jd, jy])
             elseif id in offtaker_grey
                 ep_sell = var_dict[:offtaker_ep_sell][id]
                 gc_buy = var_dict[:offtaker_gc_h_buy_G][id]
-                g_H2_GC = -value(gc_buy[jh, jd, jy])
-                g_EP = value(ep_sell[jh, jd, jy])
+                g_H2_GC = -_val(gc_buy[jh, jd, jy])
+                g_EP = _val(ep_sell[jh, jd, jy])
             elseif id in offtaker_import
                 ep_sell = var_dict[:offtaker_ep_sell_import][id]
-                g_EP = value(ep_sell[jh, jd, jy])
+                g_EP = _val(ep_sell[jh, jd, jy])
             elseif id in agents[:elec_GC_demand]
                 dgc = var_dict[:elec_GC_demand_d_GC_E][id]
-                g_elec_GC = -value(dgc[jh, jd, jy])
+                g_elec_GC = -_val(dgc[jh, jd, jy])
             end
             row[Symbol(id * "_elec")] = g_elec
             row[Symbol(id * "_H2")] = g_H2
@@ -183,13 +181,13 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
         cap_vec = Float64[]
         if id in power_vres && haskey(var_dict, :power_cap_VRES) && haskey(var_dict[:power_cap_VRES], id)
             cap_var = var_dict[:power_cap_VRES][id]
-            cap_vec = [value(cap_var[jy]) for jy in JY]
+            cap_vec = [_val(cap_var[jy]) for jy in JY]
         elseif id in H2_producers && haskey(var_dict, :H2_cap_elec) && haskey(var_dict[:H2_cap_elec], id)
             cap_var = var_dict[:H2_cap_elec][id]
-            cap_vec = [value(cap_var[jy]) for jy in JY]
+            cap_vec = [_val(cap_var[jy]) for jy in JY]
         elseif id in offtaker_green && haskey(var_dict, :offtaker_cap_EP_green) && haskey(var_dict[:offtaker_cap_EP_green], id)
             cap_var = var_dict[:offtaker_cap_EP_green][id]
-            cap_vec = [value(cap_var[jy]) for jy in JY]
+            cap_vec = [_val(cap_var[jy]) for jy in JY]
         end
         for (iy, jy) in enumerate(JY)
             if !isempty(cap_vec)
@@ -247,54 +245,54 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
 
         if id in power_consumers
             d = var_dict[:power_d_E][id]
-            quantities[:d] = [value(d[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:d] = [_val(d[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:power_consumer, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in power_vres
             q = var_dict[:power_q_E][id]
-            quantities[:g] = [value(q[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:g] = [_val(q[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :power_cap_VRES) && haskey(var_dict[:power_cap_VRES], id)
                 cap = var_dict[:power_cap_VRES][id]
-                quantities[:cap_VRES] = [value(cap[jy]) for jy in JY]
+                quantities[:cap_VRES] = [_val(cap[jy]) for jy in JY]
             end
             return compute_agent_objective_economic(:power_vres, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in power_conv
             q = var_dict[:power_q_E][id]
-            quantities[:g] = [value(q[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:g] = [_val(q[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:power_conv, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in H2_producers
-            quantities[:e_in] = [value(var_dict[:H2_e_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:q_elec_gc] = [value(var_dict[:H2_gc_e_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:h2_out] = [value(var_dict[:H2_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:q_h2gc] = [value(var_dict[:H2_gc_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:e_in] = [_val(var_dict[:H2_e_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_elec_gc] = [_val(var_dict[:H2_gc_e_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:h2_out] = [_val(var_dict[:H2_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_h2gc] = [_val(var_dict[:H2_gc_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :H2_cap_elec) && haskey(var_dict[:H2_cap_elec], id)
                 cap = var_dict[:H2_cap_elec][id]
-                quantities[:cap_H2_y] = [value(cap[jy]) for jy in JY]
+                quantities[:cap_H2_y] = [_val(cap[jy]) for jy in JY]
             end
             return compute_agent_objective_economic(:H2_producer, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in H2_consumers
-            quantities[:d_H] = [value(var_dict[:H2_d_H][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:d_H] = [_val(var_dict[:H2_d_H][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:H2_consumer, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in offtaker_green
-            quantities[:h2_in] = [value(var_dict[:offtaker_h_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:q_h2gc] = [value(var_dict[:offtaker_gc_h_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:ep] = [value(var_dict[:offtaker_ep_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:h2_in] = [_val(var_dict[:offtaker_h_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_h2gc] = [_val(var_dict[:offtaker_gc_h_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:ep] = [_val(var_dict[:offtaker_ep_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :offtaker_cap_EP_green) && haskey(var_dict[:offtaker_cap_EP_green], id)
                 cap = var_dict[:offtaker_cap_EP_green][id]
-                quantities[:cap_EP_y] = [value(cap[jy]) for jy in JY]
+                quantities[:cap_EP_y] = [_val(cap[jy]) for jy in JY]
             end
             return compute_agent_objective_economic(:offtaker_green, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in offtaker_grey
-            quantities[:ep] = [value(var_dict[:offtaker_ep_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:q_h2gc] = [value(var_dict[:offtaker_gc_h_buy_G][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:ep] = [_val(var_dict[:offtaker_ep_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_h2gc] = [_val(var_dict[:offtaker_gc_h_buy_G][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:offtaker_grey, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in offtaker_import
-            quantities[:ep] = [value(var_dict[:offtaker_ep_sell_import][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:ep] = [_val(var_dict[:offtaker_ep_sell_import][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:offtaker_import, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in agents[:elec_GC_demand]
-            quantities[:d_gc] = [value(var_dict[:elec_GC_demand_d_GC_E][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:d_gc] = [_val(var_dict[:elec_GC_demand_d_GC_E][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:elec_GC_demand, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in agents[:EP_demand]
-            quantities[:d_EP] = [value(var_dict[:EP_demand_d_EP][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:d_EP] = [_val(var_dict[:EP_demand_d_EP][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:EP_demand, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         else
             return haskey(agent_welfare, id) ? value(agent_welfare[id]) : 0.0
@@ -333,14 +331,14 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
 
         if id in power_consumers
             d = var_dict[:power_d_E][id]
-            elec_q -= sum(value.(d))
+            elec_q -= sum(_val.(d))
         elseif id in power_vres
             q = var_dict[:power_q_E][id]
-            elec_q += sum(value.(q))
-            elec_GC_q += sum(value.(q))
+            elec_q += sum(_val.(q))
+            elec_GC_q += sum(_val.(q))
         elseif id in power_conv
             q = var_dict[:power_q_E][id]
-            elec_q += sum(value.(q))
+            elec_q += sum(_val.(q))
         end
 
         if id in H2_producers
@@ -348,40 +346,40 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
             gc_e_buy = var_dict[:H2_gc_e_buy][id]
             h_sell = var_dict[:H2_h_sell][id]
             gc_h_sell = var_dict[:H2_gc_h_sell][id]
-            elec_q -= sum(value.(e_buy))
-            elec_GC_q -= sum(value.(gc_e_buy))
-            H2_q += sum(value.(h_sell))
-            H2_GC_q += sum(value.(gc_h_sell))
+            elec_q -= sum(_val.(e_buy))
+            elec_GC_q -= sum(_val.(gc_e_buy))
+            H2_q += sum(_val.(h_sell))
+            H2_GC_q += sum(_val.(gc_h_sell))
         elseif id in H2_consumers
             dH = var_dict[:H2_d_H][id]
-            H2_q -= sum(value.(dH))
+            H2_q -= sum(_val.(dH))
         end
 
         if id in offtaker_green
             h_buy = var_dict[:offtaker_h_buy][id]
             gc_h_buy = var_dict[:offtaker_gc_h_buy][id]
             ep_sell = var_dict[:offtaker_ep_sell][id]
-            H2_q -= sum(value.(h_buy))
-            H2_GC_q -= sum(value.(gc_h_buy))
-            EP_q += sum(value.(ep_sell))
+            H2_q -= sum(_val.(h_buy))
+            H2_GC_q -= sum(_val.(gc_h_buy))
+            EP_q += sum(_val.(ep_sell))
         elseif id in offtaker_grey
             ep_sell = var_dict[:offtaker_ep_sell][id]
             gc_h_buy_G = var_dict[:offtaker_gc_h_buy_G][id]
-            H2_GC_q -= sum(value.(gc_h_buy_G))
-            EP_q += sum(value.(ep_sell))
+            H2_GC_q -= sum(_val.(gc_h_buy_G))
+            EP_q += sum(_val.(ep_sell))
         elseif id in offtaker_import
             ep_sell_import = var_dict[:offtaker_ep_sell_import][id]
-            EP_q += sum(value.(ep_sell_import))
+            EP_q += sum(_val.(ep_sell_import))
         end
 
         if id in agents[:elec_GC_demand]
             dgc = var_dict[:elec_GC_demand_d_GC_E][id]
-            elec_GC_q -= sum(value.(dgc))
+            elec_GC_q -= sum(_val.(dgc))
         end
 
         if id in agents[:EP_demand]
             dep = var_dict[:EP_demand_d_EP][id]
-            EP_q -= sum(value.(dep))
+            EP_q -= sum(_val.(dep))
         end
 
         return elec_q, H2_q, elec_GC_q, H2_GC_q, EP_q
@@ -397,33 +395,33 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
             inv_dict = get(var_dict, :power_inv_VRES, nothing)
             if cap_dict !== nothing && haskey(cap_dict, id)
                 cap_var = cap_dict[id]
-                cap_final = value(cap_var[JY[end]])
+                cap_final = _val(cap_var[JY[end]])
             end
             if inv_dict !== nothing && haskey(inv_dict, id)
                 inv_var = inv_dict[id]
-                inv_total = sum(value(inv_var[jy]) for jy in JY)
+                inv_total = sum(_val(inv_var[jy]) for jy in JY)
             end
         elseif id in H2_producers
             cap_dict = get(var_dict, :H2_cap_elec, nothing)
             inv_dict = get(var_dict, :H2_inv_elec, nothing)
             if cap_dict !== nothing && haskey(cap_dict, id)
                 cap_var = cap_dict[id]
-                cap_final = value(cap_var[JY[end]])
+                cap_final = _val(cap_var[JY[end]])
             end
             if inv_dict !== nothing && haskey(inv_dict, id)
                 inv_var = inv_dict[id]
-                inv_total = sum(value(inv_var[jy]) for jy in JY)
+                inv_total = sum(_val(inv_var[jy]) for jy in JY)
             end
         elseif id in offtaker_green
             cap_dict = get(var_dict, :offtaker_cap_EP_green, nothing)
             inv_dict = get(var_dict, :offtaker_inv_EP_green, nothing)
             if cap_dict !== nothing && haskey(cap_dict, id)
                 cap_var = cap_dict[id]
-                cap_final = value(cap_var[JY[end]])
+                cap_final = _val(cap_var[JY[end]])
             end
             if inv_dict !== nothing && haskey(inv_dict, id)
                 inv_var = inv_dict[id]
-                inv_total = sum(value(inv_var[jy]) for jy in JY)
+                inv_total = sum(_val(inv_var[jy]) for jy in JY)
             end
         end
 
@@ -506,51 +504,51 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
         if id in power_consumers
             agent_type = :power_consumer
             d = var_dict[:power_d_E][id]
-            quantities[:d] = [value(d[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:d] = [_val(d[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
         elseif id in power_vres
             agent_type = :power_vres
             q = var_dict[:power_q_E][id]
-            quantities[:g] = [value(q[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:g] = [_val(q[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :power_cap_VRES) && haskey(var_dict[:power_cap_VRES], id)
-                quantities[:cap_VRES] = [value(var_dict[:power_cap_VRES][id][jy]) for jy in JY]
+                quantities[:cap_VRES] = [_val(var_dict[:power_cap_VRES][id][jy]) for jy in JY]
             end
         elseif id in power_conv
             agent_type = :power_conv
             q = var_dict[:power_q_E][id]
-            quantities[:g] = [value(q[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:g] = [_val(q[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
         elseif id in H2_producers
             agent_type = :H2_producer
-            quantities[:e_in] = [value(var_dict[:H2_e_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:q_elec_gc] = [value(var_dict[:H2_gc_e_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:h2_out] = [value(var_dict[:H2_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:q_h2gc] = [value(var_dict[:H2_gc_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:e_in] = [_val(var_dict[:H2_e_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_elec_gc] = [_val(var_dict[:H2_gc_e_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:h2_out] = [_val(var_dict[:H2_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_h2gc] = [_val(var_dict[:H2_gc_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :H2_cap_elec) && haskey(var_dict[:H2_cap_elec], id)
-                quantities[:cap_H2_y] = [value(var_dict[:H2_cap_elec][id][jy]) for jy in JY]
+                quantities[:cap_H2_y] = [_val(var_dict[:H2_cap_elec][id][jy]) for jy in JY]
             end
         elseif id in H2_consumers
             agent_type = :H2_consumer
-            quantities[:d_H] = [value(var_dict[:H2_d_H][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:d_H] = [_val(var_dict[:H2_d_H][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
         elseif id in offtaker_green
             agent_type = :offtaker_green
-            quantities[:h2_in] = [value(var_dict[:offtaker_h_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:q_h2gc] = [value(var_dict[:offtaker_gc_h_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:ep] = [value(var_dict[:offtaker_ep_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:h2_in] = [_val(var_dict[:offtaker_h_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_h2gc] = [_val(var_dict[:offtaker_gc_h_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:ep] = [_val(var_dict[:offtaker_ep_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :offtaker_cap_EP_green) && haskey(var_dict[:offtaker_cap_EP_green], id)
-                quantities[:cap_EP_y] = [value(var_dict[:offtaker_cap_EP_green][id][jy]) for jy in JY]
+                quantities[:cap_EP_y] = [_val(var_dict[:offtaker_cap_EP_green][id][jy]) for jy in JY]
             end
         elseif id in offtaker_grey
             agent_type = :offtaker_grey
-            quantities[:ep] = [value(var_dict[:offtaker_ep_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-            quantities[:q_h2gc] = [value(var_dict[:offtaker_gc_h_buy_G][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:ep] = [_val(var_dict[:offtaker_ep_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:q_h2gc] = [_val(var_dict[:offtaker_gc_h_buy_G][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
         elseif id in offtaker_import
             agent_type = :offtaker_import
-            quantities[:ep] = [value(var_dict[:offtaker_ep_sell_import][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:ep] = [_val(var_dict[:offtaker_ep_sell_import][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
         elseif id in get(agents, :elec_GC_demand, String[])
             agent_type = :elec_GC_demand
-            quantities[:d_gc] = [value(var_dict[:elec_GC_demand_d_GC_E][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:d_gc] = [_val(var_dict[:elec_GC_demand_d_GC_E][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
         elseif id in get(agents, :EP_demand, String[])
             agent_type = :EP_demand
-            quantities[:d_EP] = [value(var_dict[:EP_demand_d_EP][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
+            quantities[:d_EP] = [_val(var_dict[:EP_demand_d_EP][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
         end
         contrib = agent_type !== nothing ? compute_agent_objective_contributions(agent_type, quantities, prices_dict, params; JH=JH, JD=JD, JY=JY) : nothing
         return agent_type, quantities, contrib
