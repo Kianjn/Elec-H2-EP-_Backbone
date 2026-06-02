@@ -16,7 +16,7 @@
 11. [Output Files](#11-output-files)
 12. [Code Conventions](#12-code-conventions)
 
-> **Math on GitHub:** This file uses [GitHub math rendering](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/writing-mathematical-expressions). Inline formulas use `$\cdots$`; displayed equations use `$$\cdots$$`. **Do not put blank lines inside a `$$` block** — GitHub closes the math environment at the first blank line, so only the first line renders and the rest appears as broken plain text. Multi-line formulas use `\begin{aligned}...\end{aligned}` inside a single `$$` pair. **Code identifiers** (JuMP names, `data.yaml` keys) are in backticks — e.g. `elec_GC`, `sw_aux` — not inside math delimiters.
+> **Math on GitHub:** Inline: `$\cdots$`; display: `$$\cdots$$`. Inside one `$$` block: **no blank lines**; **do not wrap a single equation row across two source lines** (finish the row with `\\` on the same line, then start the next row). Otherwise GitHub may close math early and `_` subscripts look like italics (`CVaR_i` → broken text). Multi-line display math: `\begin{aligned}...\end{aligned}` inside one `$$` pair. **Code identifiers** (`elec_GC`, `sw_aux`) stay in backticks, not in `$...$`.
 
 ---
 
@@ -251,9 +251,7 @@ Each agent minimises its **augmented Lagrangian** (possibly risk-averse for some
 
 $$
 \begin{aligned}
-\min \quad
-& \gamma_i \sum_{h,d,y} W_{d,y}\bigl(\mathrm{cost}_i(h,d,y) - \mathrm{rev}_i(h,d,y)\bigr)
- + F_i^{\mathrm{cap}} \\
+\min \quad & \gamma_i \sum_{h,d,y} W_{d,y}\bigl(\mathrm{cost}_i(h,d,y) - \mathrm{rev}_i(h,d,y)\bigr) + F_i^{\mathrm{cap}} \\
 & \quad + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i) \\
 & \quad + \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\bigl(g_i^k(h,d,y)-\bar g_i^k(h,d,y)\bigr)^2
 \end{aligned}
@@ -266,7 +264,7 @@ where (symbols map to code names in backticks):
 - `ρ_k` is the penalty weight for market `k`.
 - `W[d,y]` scales representative days to a full year.
 - `γ_i` is a **per-agent risk weight** (`γ=1` → risk-neutral, `γ<1` → risk-averse). Non-trivial CVaR is used only for VRES, electrolyzer, and green offtaker.
-- `CVaR_i(loss_i)` is an agent-specific Conditional Value-at-Risk term constructed with auxiliary variables `(α_i, u_i[jy])` over yearly scenarios `jy ∈ JY`, at confidence level `β`.
+- $\mathrm{CVaR}_i(\ell_i)$ is an agent-specific Conditional Value-at-Risk on yearly loss scenarios, with auxiliary variables $\alpha_i$, $u_i(y)$ over $y \in JY$, at confidence level $\beta$.
 
 More explicitly:
 
