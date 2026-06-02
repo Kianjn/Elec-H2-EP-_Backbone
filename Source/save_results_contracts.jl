@@ -21,6 +21,7 @@
 # ==============================================================================
 
 include(joinpath(@__DIR__, "print_run_summary.jl"))
+include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
 
 function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict,
                                  elec_GC_market::Dict, H2_GC_market::Dict,
@@ -672,6 +673,10 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
     prices_df = DataFrame(prices_rows)
     _move_first!(prices_df, :Time)
     CSV.write(joinpath(results_dir, "Market_Prices.csv"), prices_df)
+
+    risk_metrics = write_admm_risk_outputs!(mdict, agents, results_dir;
+                                            case_label = "market_exposure_contracts")
+    print_risk_metrics_summary!(risk_metrics; title = "ADMM+contracts risk metrics (ex-post social CVaR)")
 
     print_admm_run_summary!(ADMM_state, results, agents;
                             results_dir=results_dir,

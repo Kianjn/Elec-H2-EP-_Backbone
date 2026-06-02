@@ -343,6 +343,9 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
         :beta => beta_conf,
         :demand_var_keys => [:power_d_E, :elec_GC_demand_d_GC_E, :EP_demand_d_EP],
         :sw_aux => sw_aux,
+        :cvar_social => cvar_social,
+        :alpha_social => alpha_social,
+        :u_social => u_social,
     )
 
     return planner, planner_state

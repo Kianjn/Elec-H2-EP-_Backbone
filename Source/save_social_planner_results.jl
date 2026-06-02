@@ -32,6 +32,7 @@
 # ==============================================================================
 
 include(joinpath(@__DIR__, "print_run_summary.jl"))
+include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
 
 function save_social_planner_results!(planner::Model, planner_state::Dict, agents::Dict,
                                       mdict::Dict, results_folder::String)
@@ -587,6 +588,10 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     present = [c for c in col_order if c in propertynames(ts_df)]
     ts_df = select(ts_df, present)
     CSV.write(joinpath(results_folder, "Agent_Objectives_Per_Timestep.csv"), ts_df)
+
+    # ── Risk metrics (social CVaR, expected welfare) ─────────────────────
+    risk_metrics = write_sp_risk_outputs!(planner, planner_state, mdict, agents, results_folder)
+    print_risk_metrics_summary!(risk_metrics; title = "Social planner risk metrics")
 
     return nothing
 end

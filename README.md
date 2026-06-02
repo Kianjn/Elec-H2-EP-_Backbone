@@ -409,7 +409,7 @@ Why SP uses IPOPT by default:
 ### Comparing Results
 
 - **`gamma = 1`:** Compare `market_exposure_results/` to `social_planner_results/` to verify that ADMM converges toward the SP benchmark (quantities and prices).
-- **`gamma < 1`:** SP (**complete risk trading**) and ME (**incomplete risk trading**) are different institutions; use SP for the risk-adjusted first-best benchmark and ME for the decentralised private-hedging outcome. Do not expect price or quantity equality. See `DOCUMENTATION.md` §4.4.3.
+- **`gamma < 1`:** SP (**complete risk trading**) and ME (**incomplete risk trading**) are different institutions; compare **`Risk_Metrics.csv`** (expected social welfare, ex-post social CVaR, gap vs SP). Do not expect price or quantity equality. See `DOCUMENTATION.md` §4.4.3 and §6.6.
 
 ---
 
@@ -456,7 +456,11 @@ Complete-risk-trading benchmark outputs:
 | File | Description |
 |---|---|
 | `Market_Prices.csv` | Commodity shadow prices (duals of balance constraints): expected marginal social value at `gamma = 1`, **risk-adjusted** marginal social value at `gamma < 1` |
+| `Risk_Metrics.csv` | Expected social welfare, social CVaR, $\alpha$; see `DOCUMENTATION.md` §6.6 |
+| `Social_Welfare_Per_Year.csv` | Aggregate welfare and loss per scenario year |
 | `Agent_Summary.csv` | Per-agent total quantity and ADMM-style objective value (cost − revenue) evaluated at planner prices |
+| `Risk_Metrics.csv` | Same metrics as SP; includes `sum_private_CVaR` and gap vs SP when planner results exist |
+| `Private_CVaR_By_Agent.csv` | Private CVaR per risk-averse agent (when `gamma < 1`) |
 | `Capacity_Investments_Planner.csv` | For VRES, electrolyzer, and green offtaker: per-year installed capacity and investment (MW) in the planner solution |
 
 ---

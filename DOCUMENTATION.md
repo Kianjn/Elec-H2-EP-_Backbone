@@ -16,7 +16,7 @@
 11. [Output Files](#11-output-files)
 12. [Code Conventions](#12-code-conventions)
 
-> **Math on GitHub:** This file uses [GitHub math rendering](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/writing-mathematical-expressions). Inline formulas use `$\cdots$`; displayed equations use `$$\cdots$$`. **Code identifiers** (JuMP names, `data.yaml` keys) are in backticks — e.g. `elec_GC`, `sw_aux` — not inside math delimiters, so underscores do not trigger LaTeX errors.
+> **Math on GitHub:** This file uses [GitHub math rendering](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/writing-mathematical-expressions). Inline formulas use `$\cdots$`; displayed equations use `$$\cdots$$`. **Do not put blank lines inside a `$$` block** — GitHub closes the math environment at the first blank line, so only the first line renders and the rest appears as broken plain text. Multi-line formulas use `\begin{aligned}...\end{aligned}` inside a single `$$` pair. **Code identifiers** (JuMP names, `data.yaml` keys) are in backticks — e.g. `elec_GC`, `sw_aux` — not inside math delimiters.
 
 ---
 
@@ -250,10 +250,13 @@ Currently empty (`EP_Demand: {}`). EP demand is inelastic and fully defined by `
 Each agent minimises its **augmented Lagrangian** (possibly risk-averse for some agents):
 
 $$
-\min \;\gamma_i \sum_{h,d,y} W_{d,y}\bigl(\mathrm{cost}_i(h,d,y) - \mathrm{rev}_i(h,d,y)\bigr)
-+ F_i^{\mathrm{cap}}
-+ (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i)
-+ \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\bigl(g_i^k(h,d,y)-\bar g_i^k(h,d,y)\bigr)^2
+\begin{aligned}
+\min \quad
+& \gamma_i \sum_{h,d,y} W_{d,y}\bigl(\mathrm{cost}_i(h,d,y) - \mathrm{rev}_i(h,d,y)\bigr)
+ + F_i^{\mathrm{cap}} \\
+& \quad + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i) \\
+& \quad + \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\bigl(g_i^k(h,d,y)-\bar g_i^k(h,d,y)\bigr)^2
+\end{aligned}
 $$
 
 where (symbols map to code names in backticks):
@@ -971,6 +974,66 @@ Both the social planner and market exposure include **endogenous investment** in
 
 **Why warm-start matters for investment**: Without capacity warm-start from the SP, the first ADMM iteration has `cap_bar` derived from zero flows (ḡ = 0), so `cap_bar = 0`. Agents are then penalised toward zero capacity, which is far from the equilibrium. With SP capacity seeds (`set_start_value`) and primal warm-start (ḡ = SP), `cap_bar` is consistent with SP flows and the capacity penalty pulls agents toward the SP investment levels from the first iteration. This dramatically speeds convergence of the investment consensus.
 
+### 6.6 Risk metrics post-processing (CVaR reporting)
+
+After each run, the project writes **`Risk_Metrics.csv`** and **`Social_Welfare_Per_Year.csv`** and prints a **risk metrics** block to the console. Implementation: `Source/compute_social_risk_metrics.jl`, called from `save_social_planner_results.jl`, `save_results.jl`, and `save_results_contracts.jl`.
+
+#### What is reported
+
+| Quantity | Social planner (SP) | ADMM (ME / ME+C) |
+|---|---|---|
+| **Expected social welfare** $E[SW]=\sum_y P_y\,SW_y$ | From solved `sw_aux` (binds to aggregate welfare) | **Ex-post**: recomputed from converged quantities using the same planner welfare accounting (no $\lambda$ transfers) |
+| **Social CVaR** | Value of `CVaR_social` from the solved planner | **Ex-post social CVaR**: same Rockafellar formula as SP applied to $L_y=-SW_y$ from the ADMM allocation |
+| **$\alpha$ (VaR proxy)** | `alpha_social` from the planner | From the ex-post CVaR calculation |
+| **Sum of private agent CVaRs** | n/a | $\mathrm{CVaR}_{\mathrm{VRES}}+\mathrm{CVaR}_{\mathrm{H2}}+\mathrm{CVaR}_{\mathrm{Green}}$ at ADMM convergence (internal to agent problems) |
+| **Gap vs SP** | 0 | `social_CVaR_gap_vs_SP` = ex-post ADMM social CVaR minus SP social CVaR (requires `social_planner_results/Risk_Metrics.csv` from a prior SP run) |
+
+**Important distinctions:**
+
+1. **Expected social welfare** is the **probability-weighted mean** $\sum_y P_y SW_y$, not the welfare in a single “most likely” year. With uniform $P_y=1/n_Y$, it is the arithmetic average across scenario years.
+
+2. **Social CVaR** in the code is **CVaR of social loss** $L_y = -SW_y$ (tail of bad aggregate outcomes). The planner **minimizes** $(1-\gamma)\,\mathrm{CVaR}^{\mathrm{social}}$ in the objective (equivalently penalizes bad tails). **Lower social CVaR is better** (less tail risk).
+
+3. **SP social CVaR** is the **complete risk trading** optimum: one coherent tail-risk measure on **aggregate** welfare.
+
+4. **ADMM ex-post social CVaR** answers: “If we take the decentralized equilibrium allocation and aggregate welfare by year, how bad is the tail?” It uses the **same** $\beta$ and $P_y$ as SP but reflects **incomplete risk trading** (private CVaRs in agents, no social CVaR in the ADMM iteration).
+
+5. **Sum of private CVaRs** is **not** additive social risk; it is reported for diagnostics only. Do not expect it to equal social CVaR.
+
+#### Theory-based comparison when $\gamma < 1$
+
+Under the usual ordering (same technology, same $\beta$, SP = centralized tail-risk management):
+
+- **Ex-post social CVaR (ADMM)** should be **$\geq$ SP social CVaR** (ADMM weakly worse tail on aggregate loss): the planner pools risk efficiently; decentralized private hedging generally cannot improve the **system** tail metric.
+
+- **Quantities and prices** need not match SP (§4.4.3); only the **risk metric** is constructed to be comparable ex post.
+
+When $\gamma = 1$, social CVaR is inactive in objectives; reported values should still compute but are not central to the optimum.
+
+#### Output files
+
+| File | Contents |
+|---|---|
+| `Risk_Metrics.csv` | One row per metric (`expected_social_welfare`, `social_CVaR`, `alpha_social`, `sum_private_CVaR`, `social_CVaR_gap_vs_SP`, …) |
+| `Social_Welfare_Per_Year.csv` | `scenario_year`, `probability`, `social_welfare`, `social_loss` per year |
+| `Private_CVaR_By_Agent.csv` | ADMM only: per risk-averse agent `CVaR_private` and `alpha_private` |
+
+#### Console log
+
+Example block (after the usual run summary):
+
+```
+------------------------------------------------------------------------
+  Social planner risk metrics
+------------------------------------------------------------------------
+  Case:                    social_planner
+  gamma:                   0.9500
+  E[social welfare]:            ...
+  Social CVaR (on loss):         ...
+```
+
+ADMM runs print the same fields plus **Sum private agent CVaR** and **Ex-post social CVaR gap vs SP** when a planner benchmark file exists.
+
 ---
 
 ## 7. Data and Indexing
@@ -1234,7 +1297,8 @@ Now/
 |---|---|
 | `save_results.jl` | Writes: ADMM_Convergence.csv, ADMM_Diagnostics.csv, per-market history CSVs, Agent_Summary.csv, Agent_Quantities_Final.csv, Offtaker_GC_Diagnostics.csv, H2_Producer_Diagnostics.csv. |
 | `save_results_contracts.jl` | Writes the same major ADMM outputs as save_results (with PPA/HPA columns) plus: PPAs.csv, HPAs.csv, Green_Agents_Detail.csv. Agent_Summary matches market_exposure structure (no explicit contract columns). |
-| `save_social_planner_results.jl` | Called after direct QCP solve with duals available. Writes: Market_Prices.csv (duals of balance constraints), Agent_Summary.csv (quantities + welfare), Capacity_Investments_Planner.csv. |
+| `compute_social_risk_metrics.jl` | Post-processing: social CVaR, $E[SW]$, private CVaR sum, SP comparison; writes Risk_Metrics.csv. |
+| `save_social_planner_results.jl` | Called after direct QCP solve with duals available. Writes: Market_Prices.csv, Agent_Summary.csv, Capacity_Investments_Planner.csv, Risk_Metrics.csv, Social_Welfare_Per_Year.csv; prints risk summary. |
 
 ---
 
@@ -1252,6 +1316,9 @@ Now/
 | `Agent_Quantities_Final.csv` | Columns: `AgentID`, `Group`, `elec_net_sum`, `H2_net_sum`, `elec_GC_net_sum`, `H2_GC_net_sum`, `EP_net_sum`. Sum of final-iteration 3D quantities. |
 | `Offtaker_GC_Diagnostics.csv` | Columns: `AgentID`, `Type`, `EP_total`, `H2_in_total`, `H2_GC_total`, `GC_share`, `GC_mandate`, `GC_slack`. |
 | `H2_Producer_Diagnostics.csv` | Columns: `AgentID`, `H2_total`, `H2_GC_total`, `GC_per_H2`. |
+| `Risk_Metrics.csv` | `expected_social_welfare`, `social_CVaR`, `sum_private_CVaR`, gap vs SP — §6.6. |
+| `Social_Welfare_Per_Year.csv` | Per-year aggregate welfare and loss at the ADMM allocation. |
+| `Private_CVaR_By_Agent.csv` | Per-agent private CVaR (VRES, electrolyzer, green offtaker) when $\gamma<1$. |
 | `TimerOutput.yaml` | Profiling: time spent in imbalances, residuals, capacity dual update, price updates, solve, etc. |
 
 ### 11.2 Market Exposure with Contracts Results (`market_exposure_contracts_results/`)
@@ -1271,6 +1338,8 @@ Outputs from the **complete risk trading** benchmark (`social_planner.jl`; §4.4
 | File | Contents |
 |---|---|
 | `Market_Prices.csv` | Columns: `Time`, `Elec_Price`, `H2_Price`, `Elec_GC_Price`, `H2_GC_Price`, `EP_Price`. One row per (jy, jd, jh) timestep. Prices = direct QCP duals of balance constraints (§6.2): expected marginal social values at $\gamma=1$, **risk-adjusted** social shadow prices at $\gamma<1$. Raw duals are divided by representative-day weights `W[jd,jy]` to recover the true per-MWh price. |
+| `Risk_Metrics.csv` | Social CVaR, expected social welfare, $\alpha$, and (for ADMM) gap vs SP — see §6.6. |
+| `Social_Welfare_Per_Year.csv` | Per scenario year: `social_welfare`, `social_loss`, `probability`. |
 | `Agent_Summary.csv` | Columns: `Agent`, `Type`, `Total_Quantity`, `Welfare_Contribution`. |
 | `Capacity_Investments_Planner.csv` | Per-agent yearly capacity and investment for VRES, electrolyzer, and green offtaker. |
 
