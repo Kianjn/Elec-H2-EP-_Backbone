@@ -20,6 +20,8 @@
 #
 # ==============================================================================
 
+include(joinpath(@__DIR__, "print_run_summary.jl"))
+
 function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict,
                                  elec_GC_market::Dict, H2_GC_market::Dict,
                                  ppa_market::Dict, hpa_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict)
@@ -671,38 +673,10 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
     _move_first!(prices_df, :Time)
     CSV.write(joinpath(results_dir, "Market_Prices.csv"), prices_df)
 
-    println()
-    println("Equilibrium prices (ADMM λ, saved to Market_Prices.csv):")
-    println("  Electricity     mean = ", round(mean(λ_elec), digits=6))
-    println("  Hydrogen        mean = ", round(mean(λ_H2), digits=6))
-    println("  Electricity_GC  mean = ", round(mean(λ_elec_GC), digits=6))
-    println("  H2_GC           mean = ", round(mean(λ_H2_GC), digits=6))
-    println("  End_Product     mean = ", round(mean(λ_EP), digits=6))
-    for vres_id in ppa_vres
-        λv = get(λ_ppa_dict, vres_id, [])
-        m = isempty(λv) ? 0.0 : mean(λv[end])
-        println("  Contract_$(vres_id) mean = ", round(m, digits=6))
-    end
-    for h2_id in hpa_h2
-        λh = get(λ_hpa_dict, h2_id, [])
-        m = isempty(λh) ? 0.0 : mean(λh[end])
-        println("  HPA_$(h2_id) mean = ", round(m, digits=6))
-    end
-
-    # Capacity consensus summary (per-agent equality split). See §5.4.
-    if !isempty(cap_agents_save)
-        println()
-        println("Capacity consensus (per-agent equality split, x_cap = z_cap):")
-        for m in cap_agents_save
-            rp = get(get(cap_state_save, "Primal", Dict()), m, Float64[])
-            rd = get(get(cap_state_save, "Dual",   Dict()), m, Float64[])
-            ρh = get(get(cap_state_save, "ρ",      Dict()), m, Float64[])
-            rp_v = isempty(rp) ? NaN : rp[end]
-            rd_v = isempty(rd) ? NaN : rd[end]
-            ρ_v  = isempty(ρh) ? NaN : ρh[end]
-            @printf("  %-20s  primal = %.3e,  dual = %.3e,  ρ = %.3f\n", m, rp_v, rd_v, ρ_v)
-        end
-    end
+    print_admm_run_summary!(ADMM_state, results, agents;
+                            results_dir=results_dir,
+                            ppa_market=ppa_market,
+                            hpa_market=hpa_market)
 
     return nothing
 end

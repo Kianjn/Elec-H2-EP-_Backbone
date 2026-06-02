@@ -906,88 +906,10 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     end
 
     println()
-    if convergence == 1
-        println("ADMM convergence achieved.")
-    else
-        println("ADMM reached max_iter without convergence.")
-        @printf("Best normalized residual score reached at iter %d: %.4f\n", best_iter, best_score)
-    end
-    n_it = ADMM_state["n_iter"]
-    println("Number of iterations: ", n_it)
-
-    market_labels = Dict(
-        "elec"    => "Electricity",
-        "H2"      => "Hydrogen",
-        "elec_GC" => "Electricity_GC",
-        "H2_GC"   => "H2_GC",
-        "EP"      => "End_Product",
-    )
-    println("Final residuals and mean prices per market:")
-    for key in ("elec", "H2", "elec_GC", "H2_GC", "EP")
-        primal = ADMM_state["Residuals"]["Primal"][key][end]
-        dual   = ADMM_state["Residuals"]["Dual"][key][end]
-        price  = ADMM_state["PriceHistory"][key][end]
-        @printf("  %-14s  primal = %.3e,  dual = %.3e,  price_mean = %.6f\n",
-                market_labels[key], primal, dual, price)
-    end
-    C = ADMM_state["ppa"]
-    for vres_id in get(ppa_market, "ppa_vres", String[])
-        primal = C["Primal"][vres_id][end]
-        dual   = C["Dual"][vres_id][end]
-        price  = C["PriceHistory"][vres_id][end]
-        @printf("  %-14s  primal = %.3e,  dual = %.3e,  price_mean = %.6f\n",
-                "contract_$(vres_id)", primal, dual, price)
-    end
-    for vres_id in get(ppa_market, "ppa_vres", String[])
-        primal = C["Primal_cap"][vres_id][end]
-        dual   = C["Dual_cap"][vres_id][end]
-        @printf("  %-14s  primal = %.3e,  dual = %.3e  (consensus, no price)\n",
-                "contract_cap_$(vres_id)", primal, dual)
-    end
-    C_hpa = ADMM_state["hpa"]
-    for h2_id in get(hpa_market, "hpa_h2", String[])
-        primal = C_hpa["Primal"][h2_id][end]
-        dual   = C_hpa["Dual"][h2_id][end]
-        price  = C_hpa["PriceHistory"][h2_id][end]
-        @printf("  %-14s  primal = %.3e,  dual = %.3e,  price_mean = %.6f\n",
-                "hpa_$(h2_id)", primal, dual, price)
-    end
-    for h2_id in get(hpa_market, "hpa_h2", String[])
-        primal = C_hpa["Primal_cap"][h2_id][end]
-        dual   = C_hpa["Dual_cap"][h2_id][end]
-        @printf("  %-14s  primal = %.3e,  dual = %.3e  (consensus, no price)\n",
-                "hpa_cap_$(h2_id)", primal, dual)
-    end
-    primal_cap = ADMM_state["Residuals"]["Primal"]["cap"][end]
-    dual_cap   = ADMM_state["Residuals"]["Dual"]["cap"][end]
-    @printf("  %-14s  primal = %.3e,  dual = %.3e  (aggregate over cap agents)\n",
-            "Capacity", primal_cap, dual_cap)
-
-    # Per-agent capacity consensus breakdown (equality-split formulation).
-    # Surfaces the worst-converged capacity agent — see DOCUMENTATION.md §5.4.
-    if !isempty(cap_agents)
-        println("Per-agent capacity consensus (x_cap = z_cap split):")
-        cap_state_print = ADMM_state["Capacity"]
-        worst_m   = ""
-        worst_val = -Inf
-        for m in cap_agents
-            rp_m = cap_state_print["Primal"][m][end]
-            rd_m = cap_state_print["Dual"][m][end]
-            ρ_m  = cap_state_print["ρ"][m][end]
-            λ_m  = cap_state_print["λ"][m][end]
-            λ_mean = isempty(λ_m) ? 0.0 : sum(λ_m) / length(λ_m)
-            @printf("  %-20s  primal = %.3e,  dual = %.3e,  ρ = %.3f,  mean(λ) = %.3e\n",
-                    m, rp_m, rd_m, ρ_m, λ_mean)
-            v = max(rp_m, isfinite(rd_m) ? rd_m : 0.0)
-            if v > worst_val
-                worst_val = v
-                worst_m   = m
-            end
-        end
-        if worst_m != ""
-            @printf("  Worst capacity agent: %s (max(primal, dual) = %.3e)\n",
-                    worst_m, worst_val)
-        end
+    ADMM_state["converged"] = (convergence == 1)
+    if !ADMM_state["converged"]
+        @printf("ADMM reached max_iter without convergence (best score %.4f at iter %d).\n",
+                best_score, best_iter)
     end
 
     return nothing

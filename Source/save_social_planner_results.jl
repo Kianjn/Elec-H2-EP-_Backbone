@@ -31,6 +31,8 @@
 #
 # ==============================================================================
 
+include(joinpath(@__DIR__, "print_run_summary.jl"))
+
 function save_social_planner_results!(planner::Model, planner_state::Dict, agents::Dict,
                                       mdict::Dict, results_folder::String)
     var_dict = planner_state[:var_dict]
@@ -200,18 +202,10 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
         CSV.write(joinpath(results_folder, "SP_Capacities.csv"), cap_df)
     end
 
-    # Print equilibrium prices to the output log (same format as market exposure)
-    # These duals are the THEORETICAL BENCHMARK: true equilibrium prices from
-    # centralized welfare maximization. Run market_exposure.jl to compare ADMM
-    # and FOC-extracted prices against this benchmark.
-    println()
-    println("Social planner optimization completed.")
-    println("Equilibrium prices (from dual variables, saved to Market_Prices.csv):")
-    println("  Electricity     mean = ", round(mean(prices_df.Elec_Price), digits=6))
-    println("  Hydrogen        mean = ", round(mean(prices_df.H2_Price), digits=6))
-    println("  Electricity_GC  mean = ", round(mean(prices_df.Elec_GC_Price), digits=6))
-    println("  H2_GC           mean = ", round(mean(prices_df.H2_GC_Price), digits=6))
-    println("  End_Product     mean = ", round(mean(prices_df.EP_Price), digits=6))
+    # Print run summary to the output log
+    print_social_planner_run_summary!(prices_df, var_dict, agents, JY,
+                                      power_vres, H2_producers, offtaker_green;
+                                      results_dir=results_folder)
 
     # ── Build 3D price arrays [jh, jd, jy] for ADMM-style objective computation ─
     # The duals are indexed [jy, jh, jd]. We build λ[jh, jd, jy] to match the

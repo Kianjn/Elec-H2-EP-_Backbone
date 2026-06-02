@@ -22,7 +22,7 @@ ADMM:
   epsilon: 0.1          # Base absolute tolerance used in Boyd-style stopping tests for market_exposure
   epsilon_contracts: 1.0 # [market_exposure_contracts only] Dedicated tolerance for contracts mode (falls back to epsilon if omitted)
   cap_tol_relax: 100   # [market_exposure_contracts only] Multiplier for capacity consensus tolerance. Effective cap tolerance = standard × cap_tol_relax. Larger values allow convergence when flow markets are close but capacity lags (stronger coupling in contracts case).
-  gamma: 1              # Risk weight for CVaR (γ=1 ⇒ risk-neutral). Used by both social planner and ADMM agents. Change here to update both simultaneously.
+  gamma: 0.5              # Risk weight for CVaR (γ=1 ⇒ risk-neutral). Used by both social planner and ADMM agents. Change here to update both simultaneously.
   beta: 0.95            # CVaR confidence level τ (e.g. 0.95 = worst 5% of scenarios). Used by both social planner and ADMM agents.
 
 # ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ SocialPlanner:
 #                   gentler convergence (e.g. GC markets with smaller volumes).
 # ---------------------------------------------------------------------------
 elec_market:
-  initial_price: 80.0   # €/MWh — Warm-start from social planner equilibrium
+  initial_price: 75.0   # €/MWh — NL 2021 day-ahead order-of-magnitude (pre-Q4 spike average)
   rho_initial: 1.0      # Penalty weight for electricity; 1.0 matches the global default (largest, most liquid market)
 elec_GC_market:
   initial_price: 10.0   # €/MWh_GC — Warm-start from social planner equilibrium
@@ -61,61 +61,56 @@ H2_GC_market:
 # EP (End-Product) market — Coordination market for ammonia / downstream product
 # ---------------------------------------------------------------------------
 EP_market:
-  initial_price: 150.0      # €/MWh_EP — Warm-start from social planner equilibrium
+  # NL calibration (ammonia as EP, LHV 18.6 MJ/kg ≈ 5.17 MWh/t):
+  #   ~3 Mt NH₃/year → ~15.5 TWh_EP/year via D_EP = Total_Demand × LOAD_EP and repr-day weights.
+  #   ~1000 €/t NH₃ → ~194 €/MWh_EP (1000 / 5.17).
+  initial_price: 194.0      # €/MWh_EP — Warm-start near NL wholesale ammonia (~1000 €/t)
   rho_initial: 3.0          # Larger penalty: EP market is stiff (few participants, large price swings) and needs stronger coupling
   Demand_Column: "LOAD_EP"  # Column in the timeseries CSV that holds the normalized EP demand profile (inelastic)
-  Total_Demand: 50.0        # EP demand scaling factor (MWh_EP); D_EP[jh,jd,jy] = Total_Demand × LOAD_EP
+  Total_Demand: 1970.0      # Scales D_EP; annual EP ≈ Total_Demand × Σ W[jd]×LOAD_EP ≈ 15.5 TWh/y (3 Mt NH₃/y)
 # ---------------------------------------------------------------------------
 # Power-sector agents
 # ---------------------------------------------------------------------------
 Power:
-  # Variable Renewable Energy Source (solar farm)
+  # NL 2021 aggregate VRES (CBS installed capacity, MWp/MW; base_year timeseries 2021).
+  # Variable Renewable Energy Source (solar — national aggregate)
   Gen_VRES_Solar:
     Type: "VRES"
-    Capacity: 25.0            # Installed capacity (MW)
+    Capacity: 14823.0         # MW — CBS end-2021 solar PV (~14.8 GW)
     Profile_Column: "SOLAR"    # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
     MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
-    FixedCost_per_MW: 70000.0  # €/MW-year — Annualised CAPEX + fixed O&M for utility-scale solar. Assumes ≈700 k€/MW CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈70 k€/MW-year, consistent with recent LCOE studies.
-    gamma: 1                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
+    FixedCost_per_MW: 70000.0  # €/MW-year — Annualised CAPEX + fixed O&M for utility-scale solar
+    gamma: 0.5                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
     beta: 0.95                 # CVaR confidence level τ (placeholder; only active when gamma<1).
 
-  # Variable Renewable Energy Source (wind farm)
+  # Variable Renewable Energy Source (wind — national aggregate, on+offshore)
   Gen_VRES_Wind:
      Type: "VRES"
-     Capacity: 25.0            # Installed capacity (MW)
+     Capacity: 7700.0          # MW — CBS end-2021 wind (~7.7 GW)
      Profile_Column: "WIND"     # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
      MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
-     FixedCost_per_MW: 70000.0  # €/MW-year — Annualised CAPEX + fixed O&M for utility-scale wind (same as solar for baseline)
-     gamma: 1                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
+     FixedCost_per_MW: 90000.0  # €/MW-year — Slightly higher than solar (on/offshore mix, grid connection)
+     gamma: 0.5                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
      beta: 0.95                 # CVaR confidence level τ (placeholder; only active when gamma<1).
 
-  # Dispatchable conventional fleet proxy (coal + biomass + NG stack)
+  # Dispatchable conventional fleet proxy — NL gas-dominated residual (2021)
   Gen_Conv_01:
     Type: "Conventional"
-    Capacity: 50.0           # Installed capacity (MW); always available (AF = 1)
-    MarginalCost: 60.0       # Legacy fallback used only if StageBaseCosts/FinalMarginalCost are omitted
-    # 3-stage convex variable-cost curve (single aggregated conventional fleet):
-    # - Stage 1: coal-like block
-    # - Stage 2: biomass-like block
-    # - Stage 3: NG-like block
-    # Stage marginal cost is linear in stage output:
-    #   MC_s(x) = base_s + slope_s * x,  x in [0, stage_capacity_s]
-    # Slopes are derived internally so stage transitions are continuous:
-    #   end(MC_1)=base_2, end(MC_2)=base_3, end(MC_3)=FinalMarginalCost.
-    # IMPORTANT: there is no global rescaling; changing StageCapacityShares
-    # changes the aggregate average variable cost of the conventional fleet.
-    StageCapacityShares: [0.333333, 0.333333, 0.333333]  # Capacity split across coal/biomass/NG stages (normalized internally)
-    StageBaseCosts: [35.0, 55.0, 85.0]                   # €/MWh start MC for coal, biomass, NG stages
-    FinalMarginalCost: 140.0                             # €/MWh MC at end of stage 3 (high-load NG tail)
+    Capacity: 16000.0        # MW — Dispatchable thermal/gas fleet (~16 GW); covers peak when VRES is low
+    MarginalCost: 65.0       # Legacy fallback used only if StageBaseCosts/FinalMarginalCost are omitted
+    # 3-stage curve: small coal/biomass residual + dominant CCGT/OCGT gas (NL merit order).
+    StageCapacityShares: [0.08, 0.12, 0.80]  # Coal-like / biomass-like / gas (NL ≈ 80% gas in fossil stack)
+    StageBaseCosts: [45.0, 65.0, 80.0]       # €/MWh — 2021-era variable cost floors by fuel block
+    FinalMarginalCost: 130.0                 # €/MWh — Peaking gas / high-load tail
 
-  # Electricity consumer with elastic (quadratic) demand
+  # Electricity consumer with elastic (quadratic) demand — NL national load
   # Quadratic utility: U(d) = A_E·d − ½·B_E·d²  →  inverse demand p(d) = A_E − B_E·d
   Cons_Elec_01:
     Type: "Consumer"
-    PeakLoad: 55.0           # Peak demand (MW); scales the normalized load profile to absolute MW values (increased to avoid zero prices with VRES surplus)
+    PeakLoad: 20000.0        # MW — NL system peak ~20 GW; annual load ≈ PeakLoad×Σ W×LOAD_E ≈ 117 TWh/y
     Load_Column: "LOAD_E"    # Column in timeseries CSV with the normalized electricity load profile
     A_E: 500.0               # €/MWh — Intercept of inverse demand curve; willingness to pay for the first MW (high to ensure demand is met)
-    B_E: 0.5                 # €/MWh² — Slope of inverse demand; controls price sensitivity (low = relatively inelastic demand)
+    B_E: 0.0025              # €/MWh² — Scaled for ~20 GW scale (was 0.5 at 55 MW peak); keeps elasticity at system level
 
 # ---------------------------------------------------------------------------
 # Hydrogen producers (electrolysis)
@@ -123,12 +118,12 @@ Power:
 Hydrogen:
   Prod_H2_Green:
     Type: "GreenProducer"
-    Capacity_Electrolyzer: 35.0               # Maximum electricity input to the electrolyzer (MW_elec)
-    Capacity_H2_Output: 23.0                 # Maximum hydrogen output (MW_H2); 35/1.5 ≈ 23.3
+    Capacity_Electrolyzer: 800.0              # MW_elec — Sized for green NH₃ route (~533 MW_H2 out at SC=1.5)
+    Capacity_H2_Output: 533.0                  # MW_H2 — Matches Offtaker_Green H₂ intake (NL green-ammonia share)
     SpecificConsumption: 1.5                  # MWh_elec per MWh_H2 produced (i.e. efficiency = 1/1.5 ≈ 67%); typical PEM electrolyzer value
     OperationalCost: 3.0                       # €/MWh_H2 — Variable O&M for water treatment, stack degradation, etc.
     FixedCost_per_MW_Electrolyzer: 400000.0   # €/MW_elec-year — Annualised CAPEX; high value limits electrolyzer expansion
-    gamma: 1                                  # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
+    gamma: 0.5                                  # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
     beta: 0.95                                # CVaR confidence level τ.
 
 # ---------------------------------------------------------------------------
@@ -138,26 +133,26 @@ Hydrogen_Offtaker:
   # Green offtaker — converts H2 into end product using only green hydrogen
   Offtaker_Green:
     Type: "GreenOfftaker"
-    Capacity_H2_In: 40.0               # Max H2 intake (MW_H2); reduced in line with the producer, matched to the new 40 MW_H2 output capacity.
-    Capacity_EP_Out: 30.0              # Max end-product output (MW_EP equivalent); updated consistently: Alpha * Capacity_H2_In = 0.75 * 40 = 30 MW_EP. (???)
+    Capacity_H2_In: 533.0              # MW_H2 — ~20% of NL ammonia nameplate (green/electrolysis route)
+    Capacity_EP_Out: 400.0             # MW_EP — 0.75 × 533 ≈ 400; initial cap for endogenous expansion
     Alpha: 0.75                        # H2-to-EP conversion ratio (MWh_EP per MWh_H2). 0.75 means 1 MWh_H2 yields 0.75 MWh_EP of NH3, consistent with typical industrial Haber–Bosch efficiencies (≈70–80% on an LHV basis).
     ProcessingCost: 7.0                # €/MWh_EP — Cost of converting H2 to end product (energy, catalysts, labour)
     FixedCost_per_MW_EP_Out: 120000.0  # €/MW_EP-year — Annualised CAPEX for downstream synthesis/processing (e.g. ammonia plant). Assumes ≈1.2 M€/MW_EP CAPEX, 20-year lifetime, 8% WACC; annuity factor ≈0.10 ⇒ ≈120 k€/MW-year.
-    gamma: 1                           # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
+    gamma: 0.5                           # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
     beta: 0.95                         # CVaR confidence level τ.
 
   # Grey offtaker — uses conventional (grey) hydrogen but must buy H2 GCs for a fraction of its implied H2 use
   Offtaker_Grey:
     Type: "GreyOfftaker"
-    Capacity: 40.0            # Max end-product output (MW_EP equivalent)
-    MarginalCost: 88.0        # €/MWh_EP — Competitive with green route to increase grey share and H2_GC demand
+    Capacity: 1570.0          # MW_EP — domestic conventional route (~80% of NL ammonia nameplate; includes former import share)
+    MarginalCost: 120.0       # €/MWh_EP — Below NL-equilibrium (~194) so grey can clear; still above variable-only floor
     gamma_NH3: 0.75           # EP-to-H2 conversion ratio for grey offtaker (MWh_EP per MWh_H2). 0.75 means 1 MWh_H2 yields 0.75 MWh_EP of NH3; we infer implied H2 use from observed EP output via H2_intake ≈ EP / gamma_NH3 when applying the 42% green H2 GC mandate.
 
-  # EP importer — brings end product from outside the modelled system
+  # EP importer — disabled for now (domestic supply only)
   Offtaker_Import:
     Type: "EPImporter"
-    Capacity: 5.0             # Max import volume (MW_EP equivalent); limited by logistics / contracts
-    ImportCost: 1800.0        # €/MWh_EP — High import cost representing transport + foreign production; acts as price cap
+    Capacity: 0.0             # MW_EP — No imports; all ammonia met by green + grey offtakers
+    ImportCost: 250.0         # €/MWh_EP — Unused at zero capacity; kept for re-enabling imports later
 
 # ---------------------------------------------------------------------------
 # Electricity Guarantees-of-Origin (GC) demand agent
@@ -167,7 +162,7 @@ Hydrogen_Offtaker:
 Electricity_GC_Demand:
   Demand_GC_Elec_01:
     Type: "GC_Demand"
-    PeakLoad: 48.0
+    PeakLoad: 18000.0         # MWh_GC/h scale — NL-order GO demand proxy (elastic mandate buyer)
     Load_Column: "LOAD_EP"
     A_GC: 55.0                # €/MWh_GC
     B_GC: 0.35                # €/MWh_GC²
@@ -193,8 +188,48 @@ EP_Demand: {}
 PPAs:
   initial_price: 60.0    # €/MWh — Default seed for PPA bundled price (pay-as-produced)
   rho_initial: 0.5       # ADMM penalty for PPA market (moderate: thin market)
+  pricing_mode: "endogenous_clearing"  # "endogenous_clearing" | "fixed" | "indexed"
+  fixed_strike: 60.0     # €/MWh, used when pricing_mode = "fixed"
+  # Indexed strike uses affine rule:
+  # K = constant + elec*λ_elec + elec_GC*λ_elec_GC + H2*λ_H2 + H2_GC*λ_H2_GC + EP*λ_EP
+  index_terms:
+    constant: 0.0
+    elec: 1.0
+    elec_GC: 0.0
+    H2: 0.0
+    H2_GC: 0.0
+    EP: 0.0
+  price_floor: 0.0
+  price_cap: 10000.0
   # Per-VRES initial prices (optional overrides; falls back to initial_price if absent)
   Gen_VRES_Solar:
     initial_price: 55.0  # €/MWh — Solar-specific PPA price seed
   Gen_VRES_Wind:
     initial_price: 65.0  # €/MWh — Wind-specific PPA price seed
+
+# ---------------------------------------------------------------------------
+# HPAs — Hydrogen Purchase Agreements (GreenProducer ↔ GreenOfftaker)
+# Used ONLY by market_exposure_contracts.jl.
+#
+# Same pay-as-produced structure as PPAs, but for bundled H2 + H2_GC.
+# The settlement strike K_hpa can be:
+#   - endogenous_clearing: recovered from HPA supply-demand clearing (default)
+#   - fixed: exogenous fixed strike
+#   - indexed: affine indexation to model prices (coefficients below)
+# ---------------------------------------------------------------------------
+HPAs:
+  initial_price: 80.0
+  rho_initial: 0.5
+  pricing_mode: "endogenous_clearing"
+  fixed_strike: 80.0
+  index_terms:
+    constant: 0.0
+    elec: 0.0
+    elec_GC: 0.0
+    H2: 1.0
+    H2_GC: 0.0
+    EP: 0.0
+  price_floor: 0.0
+  price_cap: 10000.0
+  Prod_H2_Green:
+    initial_price: 80.0

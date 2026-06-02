@@ -35,6 +35,7 @@ function solve_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
     g_bar_elec_GC = mod.ext[:parameters][:g_bar_elec_GC]
     ρ_elec_GC  = mod.ext[:parameters][:ρ_elec_GC]
     λ_ppa     = mod.ext[:parameters][:λ_ppa]
+    K_ppa     = get(mod.ext[:parameters], :K_ppa, λ_ppa)
     g_bar_ppa = mod.ext[:parameters][:g_bar_ppa]
     ρ_ppa     = mod.ext[:parameters][:ρ_ppa]
     g_bar_ppa_cap = mod.ext[:parameters][:g_bar_ppa_cap]
@@ -63,7 +64,7 @@ function solve_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
                 MC * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
                 - λ_elec[jh, jd, jy] * g_EOM[jh, jd, jy]
                 - λ_elec_GC[jh, jd, jy] * g_EOM[jh, jd, jy]
-                - λ_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
+                - K_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
         loss_total[jy] = @expression(mod, loss_VRES[jy] + F_cap * cap_VRES[jy])

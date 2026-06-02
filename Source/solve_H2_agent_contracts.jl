@@ -30,12 +30,14 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
     g_bar_H2_GC = mod.ext[:parameters][:g_bar_H2_GC]
     ρ_H2_GC     = mod.ext[:parameters][:ρ_H2_GC]
     λ_ppa     = mod.ext[:parameters][:λ_ppa]
+    K_ppa     = get(mod.ext[:parameters], :K_ppa, λ_ppa)
     g_bar_ppa = mod.ext[:parameters][:g_bar_ppa]
     ρ_ppa     = mod.ext[:parameters][:ρ_ppa]
     g_bar_ppa_cap = mod.ext[:parameters][:g_bar_ppa_cap]
     ρ_ppa_cap     = mod.ext[:parameters][:ρ_ppa_cap]
     ppa_vres = collect(keys(λ_ppa))
     λ_hpa     = mod.ext[:parameters][:λ_hpa]
+    K_hpa     = get(mod.ext[:parameters], :K_hpa, λ_hpa)
     g_bar_hpa = mod.ext[:parameters][:g_bar_hpa]
     ρ_hpa     = mod.ext[:parameters][:ρ_hpa]
     g_bar_hpa_cap = mod.ext[:parameters][:g_bar_hpa_cap]
@@ -67,11 +69,11 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
             sum(W[jd, jy] * (
                 λ_elec[jh, jd, jy]       * e_in_pool[jh, jd, jy]
                 + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
-                + sum(λ_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
+                + sum(K_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
                 + op_cost * h2_out[jh, jd, jy]
                 - λ_H2[jh, jd, jy]       * (h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
-                - λ_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
+                - K_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
         loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y[jy])

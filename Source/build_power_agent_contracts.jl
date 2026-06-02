@@ -12,7 +12,7 @@
 #     g_ppa (delivered under PPA to electrolyzer). PPA flow is REMOVED from
 #     both EOM and elec_GC — real-world: buyer receives elec+GC as a package.
 #   - PPA capacity ppa_cap (MW) is the maximum that can flow.
-#   - Pay-as-produced: VRES earns λ_ppa per MWh actually delivered (bundled price).
+#   - Pay-as-produced: VRES earns strike K_ppa per MWh actually delivered.
 #   - Total generation: g_EOM + g_ppa <= AF × cap_VRES.
 #   - PPA delivery: g_ppa <= ppa_cap at each hour.
 #
@@ -51,8 +51,9 @@ function build_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
     g_bar_elec_GC = mod.ext[:parameters][:g_bar_elec_GC]
     ρ_elec_GC  = mod.ext[:parameters][:ρ_elec_GC]
 
-    # ADMM parameters — PPA pool (g_ppa at λ_ppa; ppa_cap consensus)
+    # ADMM parameters — PPA pool (g_ppa settled at K_ppa; ppa_cap consensus)
     λ_ppa     = mod.ext[:parameters][:λ_ppa]
+    K_ppa     = get(mod.ext[:parameters], :K_ppa, λ_ppa)
     g_bar_ppa = mod.ext[:parameters][:g_bar_ppa]
     ρ_ppa     = mod.ext[:parameters][:ρ_ppa]
     g_bar_ppa_cap = mod.ext[:parameters][:g_bar_ppa_cap]
@@ -128,7 +129,7 @@ function build_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
                 MC * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
                 - λ_elec[jh, jd, jy] * g_EOM[jh, jd, jy]
                 - λ_elec_GC[jh, jd, jy] * g_EOM[jh, jd, jy]
-                - λ_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
+                - K_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
     end
@@ -147,7 +148,7 @@ function build_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
             MC * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
             - λ_elec[jh, jd, jy] * g_EOM[jh, jd, jy]
             - λ_elec_GC[jh, jd, jy] * g_EOM[jh, jd, jy]
-            - λ_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
+            - K_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
         ) for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec/2 * W[jd, jy] * (g_EOM[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * (g_EOM[jh, jd, jy] - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)

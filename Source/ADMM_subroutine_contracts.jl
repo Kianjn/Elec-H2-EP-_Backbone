@@ -20,6 +20,40 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
     zeros_shp = zeros(n_ts, n_rd, n_yr)
     mod = mdict[m]
 
+    function _to_float(x, default=0.0)
+        if x === nothing
+            return default
+        elseif x isa Number
+            return Float64(x)
+        end
+        try
+            return parse(Float64, string(x))
+        catch
+            return default
+        end
+    end
+
+    function _contract_strike(cfg::Dict, λ_contract::Array{Float64,3})
+        mode = String(get(cfg, "pricing_mode", "endogenous_clearing"))
+        K = copy(λ_contract)
+        if mode == "fixed"
+            fixed = _to_float(get(cfg, "fixed_strike", mean(λ_contract)), mean(λ_contract))
+            K .= fixed
+        elseif mode == "indexed"
+            terms = get(cfg, "index_terms", Dict())
+            K .= _to_float(get(terms, "constant", 0.0), 0.0)
+            K .+= _to_float(get(terms, "elec", 0.0), 0.0) .* results["λ"]["elec"][end]
+            K .+= _to_float(get(terms, "elec_GC", 0.0), 0.0) .* results["λ"]["elec_GC"][end]
+            K .+= _to_float(get(terms, "H2", 0.0), 0.0) .* results["λ"]["H2"][end]
+            K .+= _to_float(get(terms, "H2_GC", 0.0), 0.0) .* results["λ"]["H2_GC"][end]
+            K .+= _to_float(get(terms, "EP", 0.0), 0.0) .* results["λ"]["EP"][end]
+        end
+        floor_v = _to_float(get(cfg, "price_floor", 0.0), 0.0)
+        cap_v = _to_float(get(cfg, "price_cap", 1.0e9), 1.0e9)
+        K .= clamp.(K, floor_v, cap_v)
+        return K
+    end
+
     # ------------------------------------------------------------------
     # Update ADMM parameters for standard markets (same as base)
     # ------------------------------------------------------------------
@@ -78,6 +112,8 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
                 imb_contract = isempty(C["Imbalances"][m]) ? zeros_shp : C["Imbalances"][m][end]
                 mod.ext[:parameters][:g_bar_ppa] = prev_contract .- (1.0 / (n_contract + 1)) .* imb_contract
                 mod.ext[:parameters][:λ_ppa]     = results["λ_ppa"][m][end]
+                vres_cfg = get(get(ppa_market, "per_vres", Dict()), m, Dict())
+                mod.ext[:parameters][:K_ppa]     = _contract_strike(vres_cfg, results["λ_ppa"][m][end])
                 mod.ext[:parameters][:ρ_ppa]     = C["ρ"][m][end]
 
                 prev_net_cap = isempty(results["ppa_cap"][m]) ? 0.0 : results["ppa_cap"][m][end]
@@ -93,6 +129,8 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
                     imb_contract = isempty(C["Imbalances"][vres_id]) ? zeros_shp : C["Imbalances"][vres_id][end]
                     mod.ext[:parameters][:g_bar_ppa][vres_id] = prev_contract .- (1.0 / (n_contract + 1)) .* imb_contract
                     mod.ext[:parameters][:λ_ppa][vres_id]     = results["λ_ppa"][vres_id][end]
+                    vres_cfg = get(get(ppa_market, "per_vres", Dict()), vres_id, Dict())
+                    mod.ext[:parameters][:K_ppa][vres_id]     = _contract_strike(vres_cfg, results["λ_ppa"][vres_id][end])
                     mod.ext[:parameters][:ρ_ppa][vres_id]     = C["ρ"][vres_id][end]
 
                     prev_net_cap = isempty(results["ppa_cap_from"][m][vres_id]) ? 0.0 : results["ppa_cap_from"][m][vres_id][end]
@@ -115,6 +153,8 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
                 imb_contract = isempty(C_hpa["Imbalances"][m]) ? zeros_shp : C_hpa["Imbalances"][m][end]
                 mod.ext[:parameters][:g_bar_hpa] = prev_contract .- (1.0 / (n_contract + 1)) .* imb_contract
                 mod.ext[:parameters][:λ_hpa] = results["λ_hpa"][m][end]
+                h2_cfg = get(get(hpa_market, "per_h2", Dict()), m, Dict())
+                mod.ext[:parameters][:K_hpa] = _contract_strike(h2_cfg, results["λ_hpa"][m][end])
                 mod.ext[:parameters][:ρ_hpa] = C_hpa["ρ"][m][end]
 
                 prev_net_cap = isempty(results["hpa_cap"][m]) ? 0.0 : results["hpa_cap"][m][end]
@@ -129,6 +169,8 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
                     imb_contract = isempty(C_hpa["Imbalances"][h2_id]) ? zeros_shp : C_hpa["Imbalances"][h2_id][end]
                     mod.ext[:parameters][:g_bar_hpa][h2_id] = prev_contract .- (1.0 / (n_contract + 1)) .* imb_contract
                     mod.ext[:parameters][:λ_hpa][h2_id] = results["λ_hpa"][h2_id][end]
+                    h2_cfg = get(get(hpa_market, "per_h2", Dict()), h2_id, Dict())
+                    mod.ext[:parameters][:K_hpa][h2_id] = _contract_strike(h2_cfg, results["λ_hpa"][h2_id][end])
                     mod.ext[:parameters][:ρ_hpa][h2_id] = C_hpa["ρ"][h2_id][end]
 
                     prev_net_cap = isempty(results["hpa_cap_from"][m][h2_id]) ? 0.0 : results["hpa_cap_from"][m][h2_id][end]

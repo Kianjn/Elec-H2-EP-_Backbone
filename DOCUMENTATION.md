@@ -6,7 +6,7 @@
 1. [Overview](#1-overview)
 2. [Markets](#2-markets) — incl. [Contract pools (PPA + HPA)](#contract-pools-market_exposure_contractsjl-only) and [How contract capacity is determined](#how-contract-capacity-is-determined)
 3. [Agents](#3-agents)
-4. [Mathematical Formulation](#4-mathematical-formulation)
+4. [Mathematical Formulation](#4-mathematical-formulation) — incl. [Economic case names](#443-economic-case-names-literature-mapping-and-price-interpretation)
 5. [ADMM Algorithm](#5-admm-algorithm)
 6. [Social Planner Benchmark](#6-social-planner-benchmark)
 7. [Data and Indexing](#7-data-and-indexing)
@@ -15,6 +15,8 @@
 10. [File Reference](#10-file-reference)
 11. [Output Files](#11-output-files)
 12. [Code Conventions](#12-code-conventions)
+
+> **Math on GitHub:** This file uses [GitHub math rendering](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/writing-mathematical-expressions). Inline formulas use `$\cdots$`; displayed equations use `$$\cdots$$`. **Code identifiers** (JuMP names, `data.yaml` keys) are in backticks — e.g. `elec_GC`, `sw_aux` — not inside math delimiters, so underscores do not trigger LaTeX errors.
 
 ---
 
@@ -25,11 +27,10 @@ This section introduces the symbols used throughout the documentation. All sums 
 ### 0.1 Indices and Sets
 
 - $i \in \mathcal{I}$: agents (VRES, conventional generator, consumer, electrolyzer, green offtaker, grey offtaker, importer, GC demand).
-- $k \in \mathcal{K}$: markets
-  - $k = \text{elec}, \text{elec\_GC}, \text{H2}, \text{H2\_GC}, \text{EP}$.
-- $h \in \mathcal{H} = \{1,\dots,n_{\text{Timesteps}}\}$: hours within a representative day.
-- $d \in \mathcal{D} = \{1,\dots,n_{\text{ReprDays}}\}$: representative days.
-- $y \in \mathcal{Y} = \{1,\dots,n_{\text{Years}}\}$: scenario years.
+- $k \in \mathcal{K}$: market index. In code, $k$ is one of **`elec`**, **`elec_GC`**, **`H2`**, **`H2_GC`**, **`EP`**.
+- $h \in \mathcal{H} = \{1,\dots,n_{\mathrm{timesteps}}\}$: hours within a representative day.
+- $d \in \mathcal{D} = \{1,\dots,n_{\mathrm{reprDays}}\}$: representative days.
+- $y \in \mathcal{Y} = \{1,\dots,n_{\mathrm{years}}\}$: scenario years.
 
 In the code, these appear as `JH`, `JD`, `JY`.
 
@@ -47,25 +48,25 @@ In the code, these appear as `JH`, `JD`, `JY`.
   - $g_i^k < 0$: agent $i$ is a **buyer** in market $k$.
 - Market **imbalance** in market $k$ at time $(h,d,y)$:
 
-  ```math
-  r_k(h,d,y) = \sum_{i \in \mathcal{I}_k} g_i^k(h,d,y) - D_k(h,d,y),
-  ```
+$$
+r_k(h,d,y) = \sum_{i \in \mathcal{I}_k} g_i^k(h,d,y) - D_k(h,d,y),
+$$
 
-  where $D_k$ is exogenous demand (for EP only; 0 otherwise).
+where $D_k$ is exogenous demand (for EP only; 0 otherwise).
 
 The **aggregate imbalance norm** used by ADMM is:
 
-```math
+$$
 \|r_k\|_2 = \left( \sum_{h,d,y} r_k(h,d,y)^2 \right)^{1/2}.
-```
+$$
 
 ### 0.4 Units
 
 - Electricity: MWh.
-- Electricity GC: MWh$_\text{GC}$ (1 certificate per renewable MWh).
-- Hydrogen: MWh$_\text{H2}$ (or equivalent energy-based unit).
-- Hydrogen GC: MWh$_\text{GC,H2}$.
-- End product (EP): MWh$_\text{EP}$ or t$_\text{EP}$ (consistent within the model, governed by `Alpha`).
+- Electricity GC: $\mathrm{MWh}_{\mathrm{GC}}$ (1 certificate per renewable MWh).
+- Hydrogen: $\mathrm{MWh}_{\mathrm{H2}}$ (or equivalent energy-based unit).
+- Hydrogen GC: $\mathrm{MWh}_{\mathrm{GC,H2}}$.
+- End product (EP): $\mathrm{MWh}_{\mathrm{EP}}$ or $\mathrm{t}_{\mathrm{EP}}$ (consistent within the model, governed by `Alpha`).
 
 All monetary values are in **EUR** (e.g. €/MWh, €/t, €/MW-year).
 
@@ -81,9 +82,11 @@ All monetary values are in **EUR** (e.g. €/MWh, €/t, €/MW-year).
 
 The **agent-level CVaR** of loss is, in continuous notation:
 
-```math
+
+$$
 \mathrm{CVaR}_i = \min_{\alpha_i} \left[ \alpha_i + \frac{1}{1-\beta} \mathbb{E}[(\ell_i - \alpha_i)_+] \right],
-```
+$$
+
 
 where $\ell_i$ is the random loss and $(x)_+ = \max\{x,0\}$. The code implements the usual linearised form with $\alpha_i, u_i(y)$ and empirical probabilities $P_y$.
 
@@ -95,14 +98,26 @@ The **social planner** uses a single $\gamma$ and a single social CVaR on aggreg
 
 This project implements a **multi-agent equilibrium model** for coupled electricity, hydrogen, green-certificate, and end-product markets, coordinated via **ADMM** (Alternating Direction Method of Multipliers). Each agent has its own JuMP optimization model; market-clearing is achieved by iteratively updating prices and penalty terms so that supply and demand balance in each market.
 
-The project includes three entry points:
+The project includes three entry points. Each has a **code name** (script / folder) and an **economic label** aligned with d’Aertrycke et al. (2018), *Risk trading in capacity equilibrium models* (see §4.4.3 and §13):
 
-- **`market_exposure.jl`** — Distributed ADMM simulation where agents optimise independently and are coordinated through iterative price signals. Five markets: electricity, elec GC, H₂, H₂ GC, end product.
-- **`market_exposure_contracts.jl`** — Same as market_exposure but with two bilateral contract pools:
-  - **PPA** between VRES and GreenProducer (electricity + elec_GC bundled),
-  - **HPA** between GreenProducer and GreenOfftaker (hydrogen + H2_GC equivalent bundled).
+| Script | Code name | Economic case (competitive spot, capacity investment) |
+|---|---|---|
+| **`social_planner.jl`** | Social planner (SP) | **Complete risk trading** — centralised risk-averse welfare maximisation with a single social CVaR on aggregate welfare (their Table 1, “Averse, Competitive, Complete” → optimisation [b]). |
+| **`market_exposure.jl`** | Market exposure (ME) | **Incomplete risk trading** — decentralised equilibrium via ADMM; risk-averse agents hedge **private** tail losses with per-agent CVaR, without an explicit risk market (their “Averse, Competitive, No risk trading”). |
+| **`market_exposure_contracts.jl`** | Market exposure with contracts (ME+C) | Same **incomplete risk trading** institution as ME, plus **bilateral contract pools** (PPA, HPA) as additional physical coordination channels; not a separate complete-risk-trading benchmark. |
+
+**When $\gamma = 1$ (risk-neutral):** SP is the stochastic welfare-maximisation benchmark; ME (and ME+C) should converge to the same quantities and spot prices as SP in the limit of exact ADMM convergence (first welfare theorem).
+
+**When $0 < \gamma < 1$ (risk-averse):** SP is the **centralised risk-pooling / complete-risk-trading** benchmark; ME and ME+C are **private-hedging / incomplete-risk-trading** equilibria. Quantities and prices need not (and generally should not) match SP — that divergence is expected theory, not a formulation error. SP balance duals remain valid **risk-adjusted social shadow prices** for each commodity (§4.4.3, §6.2); ADMM $\lambda$ are valid equilibrium prices for the decentralised case.
+
+Entry-point details:
+
+- **`market_exposure.jl`** — Distributed ADMM; five markets: electricity, elec GC, H₂, H₂ GC, end product.
+- **`market_exposure_contracts.jl`** — Same risk architecture as ME, with two bilateral contract pools:
+  - **PPA** between VRES and GreenProducer (electricity + `elec_GC` bundled),
+  - **HPA** between GreenProducer and GreenOfftaker (hydrogen + `H2_GC` equivalent bundled).
   Both are pay-as-produced and clear via ADMM alongside the five standard markets.
-- **`social_planner.jl`** — Centralised welfare-maximisation benchmark where all agents are optimised jointly in a single model. Equilibrium prices emerge as dual variables of market-clearing constraints.
+- **`social_planner.jl`** — Single centralised model; commodity prices are dual variables of market-clearing constraints (after $W$-scaling).
 
 The base ADMM and social planner share the **same** problem definition from `Source/`. The contracts case uses contract-specific build/solve/ADMM/save modules that extend the base logic. The social planner is unchanged and does not include the contract pool.
 
@@ -126,11 +141,12 @@ In `market_exposure_contracts.jl`, two additional bilateral pools are cleared:
 
 | Market | Key | Description | Unit | Supply Side | Demand Side |
 |---|---|---|---|---|---|
-| **PPA** | `ppa` | Bilateral VRES–GreenProducer electricity flow (bundled with elec_GC) | MWh | VRES (`g_ppa`) | GreenProducer (`g_ppa_from`) |
-| **HPA** | `hpa` | Bilateral GreenProducer–GreenOfftaker hydrogen flow (bundled with H2_GC equivalent) | MWh_H2 | GreenProducer (`h2_hpa`) | GreenOfftaker (`h2_hpa_from`) |
+| **PPA** | `ppa` | Bilateral VRES–GreenProducer electricity flow (bundled with `elec_GC`) | MWh | VRES (`g_ppa`) | GreenProducer (`g_ppa_from`) |
+| **HPA** | `hpa` | Bilateral GreenProducer–GreenOfftaker hydrogen flow (bundled with `H2_GC` equivalent) | MWh_H2 | GreenProducer (`h2_hpa`) | GreenOfftaker (`h2_hpa_from`) |
 
 - **Contract capacity** (`ppa_cap`, `hpa_cap`): upper bound on contract flow at each hour; scalar consensus per bilateral sub-market; **no separate capacity price**.
-- **Contract energy** (`g_ppa`, `h2_hpa`): delivered energy at each timestep, cleared at `λ_ppa` / `λ_hpa`.
+- **Contract energy** (`g_ppa`, `h2_hpa`): delivered energy at each timestep, settled at strike `K_ppa` / `K_hpa`.
+- **Strike design**: by default `K = λ` (endogenous clearing), but `fixed` and `indexed` strike modes are configurable under `PPAs` / `HPAs`.
 - **Pay-as-produced**: if output is zero at a timestep, contract delivery is zero and payment is zero.
 
 Each pool uses the same ADMM structure as other markets:
@@ -146,13 +162,13 @@ There is **no separate capacity price** (no λ for capacity consensus). Contract
 Each party has a contract capacity variable (`ppa_cap` or `hpa_cap`) as a **decision variable**. The choice is driven by economic incentives:
 
 - **PPA**:
-  - VRES revenue: `λ_ppa × g_ppa`, with `g_ppa ≤ ppa_cap`.
-  - GreenProducer cost: `λ_ppa × g_ppa_from`, with `g_ppa_from ≤ ppa_cap`.
+  - VRES revenue: `K_ppa × g_ppa`, with `g_ppa ≤ ppa_cap`.
+  - GreenProducer cost: `K_ppa × g_ppa_from`, with `g_ppa_from ≤ ppa_cap`.
   - VRES total generation is split: `g_EOM + g_ppa ≤ AF × cap_VRES`.
 
 - **HPA**:
-  - GreenProducer revenue: `λ_hpa × h2_hpa`, with `h2_hpa ≤ hpa_cap` and `h2_hpa ≤ h2_out`.
-  - GreenOfftaker cost: `λ_hpa × h2_hpa_from`, with `h2_hpa_from ≤ hpa_cap`.
+  - GreenProducer revenue: `K_hpa × h2_hpa`, with `h2_hpa ≤ hpa_cap` and `h2_hpa ≤ h2_out`.
+  - GreenOfftaker cost: `K_hpa × h2_hpa_from`, with `h2_hpa_from ≤ hpa_cap`.
   - Contracted H2 is removed from producer pool positions (`H2` and associated `H2_GC` pool stream).
 
 **2. ADMM consensus (both must agree)**
@@ -172,18 +188,18 @@ At equilibrium:
 2. Contract energy matches between supplier and buyer (cleared by λ).
 3. Equilibrium contract capacity is where both parties’ preferred values coincide at equilibrium λ.
 
-The capacity commitment is implicitly priced through energy prices (`λ_ppa`, `λ_hpa`): higher capacity allows more delivered contract energy when production is available, so the pay-as-produced structure bundles capacity and energy.
+The capacity commitment is implicitly priced through contract energy settlement (`K_ppa`, `K_hpa`): higher capacity allows more delivered contract energy when production is available, so the pay-as-produced structure bundles capacity and energy.
 
 ### Market coupling
 
 The markets are coupled through the **electrolyzer**, which sits at the nexus:
 
-- It **buys** electricity (elec market) and electricity GCs (elec_GC market).
-- It **sells** hydrogen (H2 market) and hydrogen GCs (H2_GC market).
+- It **buys** electricity (elec market) and electricity GCs (`elec_GC` market).
+- It **sells** hydrogen (H2 market) and hydrogen GCs (`H2_GC` market).
 - The conversion constraint `h2_out = η × e_in` links the electricity and hydrogen markets.
-- The annual green-backing constraint links the elec_GC and H2_GC markets.
+- The annual green-backing constraint links the elec_GC and `H2_GC` markets.
 
-The **end-product market** is coupled to H2 and H2_GC through the offtakers, who convert hydrogen into the end product and must comply with the GC mandate.
+The **end-product market** is coupled to H2 and `H2_GC` through the offtakers, who convert hydrogen into the end product and must comply with the GC mandate.
 
 In the **contracts case**:
 - PPA couples VRES and GreenProducer: VRES splits generation `g_EOM + g_ppa`, and GreenProducer uses `e_in_pool + g_ppa_from`.
@@ -233,13 +249,14 @@ Currently empty (`EP_Demand: {}`). EP demand is inelastic and fully defined by `
 
 Each agent minimises its **augmented Lagrangian** (possibly risk-averse for some agents):
 
-```
-min  γ_i × [ Σ_{h,d,y} W[d,y] × ( cost_i − revenue_i ) + FixedCAPEX_i ]
-   + (1 − γ_i) × CVaR_i(loss_i)
-   + Σ_k  (ρ_k / 2) × Σ_{h,d,y} W[d,y] × ( g_i^k − ḡ_i^k )²
-```
+$$
+\min \;\gamma_i \sum_{h,d,y} W_{d,y}\bigl(\mathrm{cost}_i(h,d,y) - \mathrm{rev}_i(h,d,y)\bigr)
++ F_i^{\mathrm{cap}}
++ (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i)
++ \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\bigl(g_i^k(h,d,y)-\bar g_i^k(h,d,y)\bigr)^2
+$$
 
-where:
+where (symbols map to code names in backticks):
 - `cost_i − revenue_i` is the agent's private cost minus revenue across all markets.
 - `g_i^k` is the agent's net position in market `k` (positive = supply, negative = demand).
 - `ḡ_i^k` is the consensus target for agent `i` in market `k`.
@@ -252,21 +269,21 @@ More explicitly:
 
 - The **deterministic, expected-loss term**
 
-  ```math
-  \sum_{h,d,y} W_{d,y}\,\bigl(\mathrm{cost}_i(h,d,y) - \mathrm{rev}_i(h,d,y)\bigr)
-  ```
+$$
+\sum_{h,d,y} W_{d,y}\,\bigl(\mathrm{cost}_i(h,d,y) - \mathrm{rev}_i(h,d,y)\bigr)
+$$
 
-  contains fuel/operational costs, certificate purchases, and investment annuities on the **cost** side, and all market revenues (price × net position) on the **revenue** side.
+contains fuel/operational costs, certificate purchases, and investment annuities on the **cost** side, and all market revenues (price × net position) on the **revenue** side.
 
-- The **risk term** $\mathrm{CVaR}_i(\mathrm{loss}_i)$ captures the tail of the loss distribution over years $y$. It is only active when $\gamma_i < 1$; for $\gamma_i=1$ the CVaR part drops out and the agent becomes risk-neutral.
+- The **risk term** $\mathrm{CVaR}_i(\ell_i)$ captures the tail of the loss distribution over years $y$. It is only active when $\gamma_i < 1$; for $\gamma_i=1$ the CVaR part drops out and the agent becomes risk-neutral.
 
 - The **quadratic ADMM penalties**
 
-  ```math
-  \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\,\bigl(g_i^k(h,d,y)-\bar g_i^k(h,d,y)\bigr)^2
-  ```
+$$
+\sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\,\bigl(g_i^k(h,d,y)-\bar g_i^k(h,d,y)\bigr)^2
+$$
 
-  ensure that, in equilibrium, each agent’s net position $g_i^k$ coincides with a consensus allocation $\bar g_i^k$ that satisfies market-clearing. Economically, this can be read as a **soft enforcement of market balance**: deviating from the consensus quantity becomes increasingly expensive as $\rho_k$ grows.
+ensure that, in equilibrium, each agent’s net position $g_i^k$ coincides with a consensus allocation $\bar g_i^k$ that satisfies market-clearing. Economically, this can be read as a **soft enforcement of market balance**: deviating from the consensus quantity becomes increasingly expensive as $\rho_k$ grows.
 
 The ADMM part is purely **algorithmic**: it does not change the underlying economic problem. At convergence, all net positions are equal to their consensus copies and all quadratic penalties are zero, so the solution coincides with that of the risk-adjusted competitive equilibrium defined by the first two terms.
 
@@ -274,23 +291,30 @@ The ADMM part is purely **algorithmic**: it does not change the underlying econo
 
 For each risk-averse agent (VRES, electrolyzer, green offtaker), CVaR is linearised via:
 
-**Important**: The loss that enters CVaR must be the **full** per-year loss, including the fixed capacity cost (F_cap × cap). If only the operational loss is used, then when γ < 1 the fixed cost appears only in the γ-weighted term, so the effective weight on F_cap becomes γ instead of 1. With nYears = 1 (no scenarios), changing γ would then change the objective, breaking the equivalence between social planner and market exposure. The correct formulation uses `loss_total[y] = loss_operational[y] + F_cap × cap[y]` in the CVaR shortfall constraints. With one scenario, CVaR = loss_total, so the objective reduces to loss_total regardless of γ.
+**Important**: The loss that enters CVaR must be the **full** per-year loss, including the fixed capacity cost (`F_cap × cap`). If only the operational loss is used, then when $\gamma < 1$ the fixed cost appears only in the $\gamma$-weighted term, so the effective weight on `F_cap` becomes $\gamma$ instead of $1$. With `nYears = 1` (no scenarios), changing $\gamma$ would then change the objective, breaking the equivalence between social planner and market exposure. The correct formulation uses `loss_total[y] = loss_operational[y] + F_cap × cap[y]` in the CVaR shortfall constraints. With one scenario, $\mathrm{CVaR}_i = \ell_i$, so the objective reduces to total loss regardless of $\gamma$.
 - `α_i` — VaR proxy (free variable, `≥ 0`)
 - `u_i[jy]` — shortfall per scenario year (`≥ 0`)
 - `cvar_i` — CVaR value (`≥ 0`)
 
-Constraints:
-```
-u_i[jy] ≥ loss_i[jy] − α_i                          ∀ jy ∈ JY
-cvar_i  ≥ α_i + (1/(1−β)) × Σ_y P[jy] × u_i[jy]
-```
+Constraints (code names in backticks; mathematical form):
+
+$$
+u_{i,y} \ge \ell_{i,y} - \alpha_i \quad \forall y \in \mathcal{Y}
+$$
+
+$$
+\mathrm{CVaR}_i \ge \alpha_i + \frac{1}{1-\beta}\sum_{y \in \mathcal{Y}} P_y\, u_{i,y}
+$$
 
 **Dynamic constraint updates**: In ADMM, the loss expressions `loss_i[jy]` depend on iteration-specific market prices `λ` (which change every iteration). Because JuMP expressions bake in coefficient values at creation time, the CVaR shortfall and linking constraints must be **deleted and re-added** in every ADMM iteration with the freshly recomputed loss expressions. This happens in the `solve_*_agent!` functions.
 
 #### Specific objective terms by agent type
 
+The blocks below are **pseudocode** using JuMP / `data.yaml` names (backticks). They are not math-delimited; underscores are safe inside code fences.
+
 **VRES generator (with endogenous capacity and CVaR):**
-```
+
+```text
 min  γ × [ Σ_y loss_VRES[y] + F_cap × Σ_y cap_VRES[y] ]
    + (1−γ) × CVaR_VRES
    + (ρ_elec/2)×Σ W×(g − ḡ_elec)²
@@ -299,14 +323,16 @@ min  γ × [ Σ_y loss_VRES[y] + F_cap × Σ_y cap_VRES[y] ]
 where loss_VRES[y] = Σ_{h,d} W × ( MC×g − λ_elec×g − λ_GC×g )
 ```
 
-**VRES in contracts case** (`build_power_agent_contracts.jl`): Splits generation into `g_EOM` (pool) and `g_ppa` (PPA). Loss includes `−λ_ppa×g_ppa`; penalties add `(ρ_ppa/2)×Σ W×(g_ppa − ḡ_ppa)²` and `(ρ_ppa_cap/2)×(ppa_cap − ḡ_ppa_cap)²`. Constraint: `g_ppa ≤ ppa_cap` at every hour.
+**VRES in contracts case** (`build_power_agent_contracts.jl`): Splits generation into `g_EOM` (pool) and `g_ppa` (PPA). Loss includes `−K_ppa×g_ppa`; penalties add `(ρ_ppa/2)×Σ W×(g_ppa − ḡ_ppa)²` and `(ρ_ppa_cap/2)×(ppa_cap − ḡ_ppa_cap)²`. Constraint: `g_ppa ≤ ppa_cap` at every hour.
 
 **Conventional generator (3-stage increasing cost):**
-```
+
+```text
 min Σ W × ( Σ_s (base_s×g_s + 0.5×slope_s×g_s²) − λ_elec×g )  +  (ρ_elec/2)×Σ W×(g − ḡ_elec)²
 
 subject to: g = Σ_s g_s,   0 ≤ g_s ≤ cap_s
 ```
+
 where stage capacities/costs are built from `Capacity`, `StageCapacityShares`, `StageBaseCosts`, and `FinalMarginalCost` in `data.yaml`. Shares are normalized internally, and slopes are derived to ensure continuity across stage boundaries (`end MC_1 = base_2`, `end MC_2 = base_3`, `end MC_3 = FinalMarginalCost`). Changing shares changes the conventional fleet's aggregate average variable cost.
 
 **Why these parameter values are used (default case):**
@@ -320,13 +346,15 @@ where stage capacities/costs are built from `Capacity`, `StageCapacityShares`, `
 - Enforcing continuity across stage boundaries avoids artificial price jumps while preserving increasing scarcity cost as dispatch moves to higher-cost blocks.
 
 **Consumer:**
-```
+
+```text
 min Σ W × ( λ_elec×d − U(d) )  +  (ρ_elec/2)×Σ W×(−d − ḡ_elec)²
 where U(d) = A_E×d − (B_E/2)×d²
 ```
 
 **Electrolyzer (with endogenous H₂ capacity and CVaR):**
-```
+
+```text
 min  γ × [ Σ_y loss_H2[y] + F_cap × Σ_y cap_H2[y] ]
    + (1−γ) × CVaR_H2
    + (ρ_elec/2)×Σ W×(−e_in − ḡ_elec)²
@@ -337,10 +365,11 @@ min  γ × [ Σ_y loss_H2[y] + F_cap × Σ_y cap_H2[y] ]
 where loss_H2[y] = Σ_{h,d} W × ( λ_elec×e_in + λ_GC×gc_e + op×h2 − λ_H2×h2 − λ_H2GC×gc_h2 )
 ```
 
-**GreenProducer in contracts case** (`build_H2_agent_contracts.jl`): Uses `e_in_pool` (pool) and `g_ppa_from` (PPA). Loss includes `+λ_ppa×g_ppa_from`; conversion `h2_out = η×(e_in_pool + g_ppa_from)`; penalties add PPA terms `(ρ_ppa/2)×Σ W×(−g_ppa_from − ḡ_ppa)²` and `(ρ_ppa_cap/2)×(−ppa_cap − ḡ_ppa_cap)²`. It also sells `h2_hpa` under HPA with terms `−λ_hpa×h2_hpa`, `(ρ_hpa/2)×Σ W×(h2_hpa − ḡ_hpa)²`, and `(ρ_hpa_cap/2)×(hpa_cap − ḡ_hpa_cap)²`.
+**GreenProducer in contracts case** (`build_H2_agent_contracts.jl`): Uses `e_in_pool` (pool) and `g_ppa_from` (PPA). Loss includes `+K_ppa×g_ppa_from`; conversion `h2_out = η×(e_in_pool + g_ppa_from)`; penalties add PPA terms `(ρ_ppa/2)×Σ W×(−g_ppa_from − ḡ_ppa)²` and `(ρ_ppa_cap/2)×(−ppa_cap − ḡ_ppa_cap)²`. It also sells `h2_hpa` under HPA with terms `−K_hpa×h2_hpa`, `(ρ_hpa/2)×Σ W×(h2_hpa − ḡ_hpa)²`, and `(ρ_hpa_cap/2)×(hpa_cap − ḡ_hpa_cap)²`.
 
 **Green offtaker (with endogenous EP capacity and CVaR):**
-```
+
+```text
 min  γ × [ Σ_y loss_G[y] + F_cap × Σ_y cap_EP[y] ]
    + (1−γ) × CVaR_G
    + (ρ_H2/2)×Σ W×(−h2_in − ḡ_H2)²
@@ -352,7 +381,7 @@ where loss_G[y] = Σ_{h,d} W × ( λ_H2×h2_in + λ_H2GC×gc_h2 + proc×ep − �
 
 These templates are implemented in the `build_*_agent.jl` files as follows:
 
-- All **price-dependent terms** (e.g. $\lambda_\text{elec}\,g$, $\lambda_\text{H2}\,h2\_in$) are expressed via JuMP `@expression` blocks whose coefficients are updated each ADMM iteration.
+- All **price-dependent terms** (e.g. $\lambda_{\mathrm{elec}}\,g$ with code variable `g`, $\lambda_{\mathrm{H2}}\,q_{\mathrm{in}}$ with `h2_in`) are expressed via JuMP `@expression` blocks whose coefficients are updated each ADMM iteration.
 - The **capacity-investment linkage** is enforced via yearly variables (e.g. `cap_VRES[y]`, `inv_VRES[y]`) and simple linear relationships: investment in year $y$ expands the capacity available in all hours of that year.
 - For risk-averse agents, the **loss-per-year** expressions `loss_VRES[y]`, `loss_H2[y]`, `loss_G[y]` are recomputed in every ADMM iteration with the iteration-specific prices, so that CVaR always measures risk against the latest price trajectory.
 
@@ -374,9 +403,11 @@ These templates are implemented in the `build_*_agent.jl` files as follows:
 
 The social planner maximises **risk-adjusted social welfare** with a **single** social CVaR:
 
-```math
-\max \; \gamma \sum_y \text{sw\_aux}[y] \;-\; (1-\gamma)\,\text{CVaR}_\text{social}
-```
+
+$$
+\max \; \gamma \sum_y \mathrm{sw^{aux}}_y \;-\; (1-\gamma)\,\mathrm{CVaR}^{\mathrm{social}}
+$$
+
 
 where `sw_aux[y]` is an epigraph proxy for aggregate social welfare per year (see §6.4 for why), and `CVaR_social` penalises tail risk across scenario years. When `γ=1` (risk-neutral), the CVaR term vanishes and the planner reduces to standard welfare maximisation.
 
@@ -392,9 +423,11 @@ Each `add_*_to_planner!` function returns a `Dict{Int, Any}` of per-year welfare
 
 #### Social welfare aggregation
 
-```math
-\text{social\_welfare}[y] = \sum_i \text{welfare\_per\_year\_i}[y]
-```
+
+$$
+\mathrm{socialWelfare}_y = \sum_i \mathrm{welfare}_{i,y}
+$$
+
 
 Market-clearing constraints enforce supply = demand. The single social CVaR applies to the full aggregate welfare (including consumer utility), ensuring the risk-averse planner accounts for all welfare components when assessing tail risk.
 
@@ -408,22 +441,22 @@ This section summarises the **risk-aversion architecture** and explains precisel
   - A subset of agents (VRES, electrolyzer, green offtaker) can be risk-averse with their own parameters $(\gamma_i,\beta_i)$.
   - Each such agent minimises a **private risk-adjusted loss**:
 
-    ```math
-    \gamma_i\,\mathbb{E}[\ell_i] + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i),
-    ```
+$$
+\gamma_i\,\mathbb{E}[\ell_i] + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i),
+$$
 
-    subject to its own technological constraints and the ADMM penalties.
+subject to its own technological constraints and the ADMM penalties.
   - Risk is therefore **heterogeneous and decentralised**: different agents may have different attitudes to risk; financial transfers between agents do not directly enter the risk measure.
 
 - In the **social planner case**:
   - There is a **single** system-wide risk parameter $\gamma$ and confidence level $\beta$.
   - The planner maximises a **single risk-adjusted social welfare**:
 
-    ```math
-    \gamma\,\mathbb{E}\bigl[SW\bigr] - (1-\gamma)\,\mathrm{CVaR}_\text{social}(-SW),
-    ```
+$$
+\gamma\,\mathbb{E}\bigl[SW\bigr] - (1-\gamma)\,\mathrm{CVaR}^{\mathrm{social}}(-SW),
+$$
 
-    where $SW$ is aggregate welfare (including consumer utility and production/investment costs).
+where $SW$ is aggregate welfare (including consumer utility and production/investment costs).
   - Risk is therefore **centralised**: society as a whole is risk-averse with respect to aggregate welfare, rather than each agent separately.
 
 These two formulations represent different normative assumptions about **who bears risk** and **how it is shared**. The ADMM run with per-agent CVaR corresponds to a market in which agents individually care about their own tail losses; the social planner corresponds to a benevolent regulator who cares about systemic tail outcomes.
@@ -438,7 +471,7 @@ When both formulations are made **risk-neutral**, they collapse to the same unde
 
 - In the social planner:
   - Set the planner-wide risk weight $\gamma = 1$.
-  - This eliminates $\mathrm{CVaR}_\text{social}$ from the planner’s objective, so the model becomes a quadratic (but not quadratically constrained) welfare maximisation with standard consumer surplus and producer surplus terms.
+  - This eliminates $\mathrm{CVaR}^{\mathrm{social}}$ from the planner’s objective, so the model becomes a quadratic (but not quadratically constrained) welfare maximisation with standard consumer surplus and producer surplus terms.
 
 Under these settings:
 
@@ -459,6 +492,37 @@ In practice, small discrepancies can arise from:
 - Numerical tolerances in the SP solver and ADMM solver (IPOPT for SP, Gurobi for ADMM).
 
 These differences are typically negligible for economic interpretation and are visible in the diagnostic plots and CSVs.
+
+#### 4.4.3 Economic case names (literature mapping) and price interpretation
+
+This subsection fixes the **terminology** used in this repository and states what **prices** mean in each case when risk aversion is active ($\gamma < 1$). The mapping follows d’Aertrycke, Ehrenmann, Ralph & Smeers (2018), *Risk trading in capacity equilibrium models* (EPRG Working Paper 1720 / Cambridge Working Paper in Economics 1757).
+
+##### Case names by entry point and risk attitude
+
+| Entry point | $\gamma = 1$ | $0 < \gamma < 1$ |
+|---|---|---|
+| **`social_planner.jl`** | Risk-neutral **competitive capacity equilibrium** (stochastic welfare maximisation; duals = expected marginal social value per commodity) | **Risky competitive capacity equilibrium with complete risk trading** (centralised **social CVaR** on aggregate welfare; duals = **risk-adjusted social shadow prices**) |
+| **`market_exposure.jl`** | Risk-neutral decentralised equilibrium (ADMM); should match SP | **Risky competitive capacity equilibrium with incomplete risk trading** (decentralised **private CVaR** per agent; ADMM $\lambda$ = equilibrium commodity prices for that institution) |
+| **`market_exposure_contracts.jl`** | Same as ME, plus PPA/HPA bilateral pools | Same incomplete-risk-trading label as ME, with **explicit bilateral contracts** (PPA/HPA) in addition to pool markets |
+
+**Complete risk trading (SP, $\gamma < 1$):** Society pools tail risk through one system-wide CVaR on aggregate welfare. There is no separate per-agent tail penalty in the planner objective. This is the convex optimisation analogue of a competitive long-run equilibrium where all risks can be traded efficiently at the system level (d’Aertrycke Table 1, optimisation [b]).
+
+**Incomplete risk trading (ME / ME+C, $\gamma < 1$):** Each risk-averse agent (VRES, electrolyzer, green offtaker) minimises its own $\gamma_i \mathbb{E}[\ell_i] + (1-\gamma_i)\mathrm{CVaR}_i(\ell_i)$. Agents do not share a single social risk measure; financial risk trades are not modelled explicitly. ME+C adds **physical** contract pools but does not turn the run into complete risk trading.
+
+##### Social planner prices when $\gamma < 1$
+
+The dual variables of the five market-clearing constraints in `social_planner.jl` **remain valid commodity shadow prices** when the social CVaR term is active:
+
+- They are the KKT multipliers of the **physical balance** constraints in the planner QCP.
+- Economically, each $\lambda_k(h,d,y)$ (after division by $W_{d,y}$ when writing `Market_Prices.csv`) is the **marginal change in optimal risk-adjusted social welfare** from relaxing market $k$’s balance by one unit at that timestep — i.e. the **risk-adjusted social cost or value** of one more MWh (or certificate / H₂ / EP unit) in the complete-risk-trading benchmark.
+
+The CVaR term changes **which** optimum is selected and therefore **the level** of those prices; it does **not** invalidate dual-based price recovery. At $\gamma = 1$, these shadow prices coincide (up to numerical tolerance) with the ADMM pool prices. At $\gamma < 1$, comparing SP `Market_Prices.csv` to ME `Market_Prices.csv` is a **cross-institution** comparison (centralised tail-risk management vs private hedging), not a consistency check.
+
+##### ADMM prices when $\gamma < 1$
+
+ADMM prices $\lambda_k$ at convergence are the coordinating multipliers of the sharing-ADMM scheme. For the decentralised problem they represent **equilibrium commodity prices** in the incomplete-risk-trading case: each agent’s first-order conditions include its **private** CVaR, so $\lambda$ reflects private marginal willingness to trade at the fixed point, not the planner’s aggregate tail-risk valuation.
+
+**Do not** interpret SP–ADMM price gaps at $\gamma < 1$ as evidence that SP duals are “wrong”; they measure different risk-sharing institutions. Use SP prices as the **first-best risk-adjusted benchmark** under complete risk pooling; use ME (or ME+C) prices for the **decentralised private-hedging** outcome.
 
 ---
 
@@ -489,10 +553,10 @@ Each ADMM iteration `k` proceeds as follows:
 
    Then:
 
-   ```math
-   \|r_k^t\|_2 = \Bigl(\sum_{h,d,y} r_k^t(h,d,y)^2\Bigr)^{1/2},\qquad
-   \|s_k^t\|_2 = \rho_k^t\,\Bigl(\sum_{h,d,y} (\Delta z_k^t(h,d,y))^2\Bigr)^{1/2}.
-   ```
+$$
+\|r_k^t\|_2 = \Bigl(\sum_{h,d,y} r_k^t(h,d,y)^2\Bigr)^{1/2},\qquad
+\|s_k^t\|_2 = \rho_k^t\,\Bigl(\sum_{h,d,y} (\Delta z_k^t(h,d,y))^2\Bigr)^{1/2}.
+$$
 
    The primal residual $\|r_k^t\|_2$ measures **how far the market is from clearing**, while the dual residual $\|s_k^t\|_2$ measures **how stable the agents’ net positions are** from one iteration to the next.
 
@@ -511,13 +575,13 @@ Each ADMM iteration `k` proceeds as follows:
 
 ### 5.2 Consensus Formula (Sharing ADMM)
 
-The consensus target for agent `i` in a market with `n` participants:
+The consensus target for agent $i$ in a market with $n$ participants:
 
-```
-ḡ_i^k = q_i^{k-1} − (1/(n+1)) × Σ_j q_j^{k-1}
-```
+$$
+\bar g_i^k = q_i^{k-1} - \frac{1}{n+1}\sum_j q_j^{k-1}
+$$
 
-The `(n+1)` denominator comes from the sharing ADMM formulation, which introduces one "market copy" alongside the `n` agent copies. This distributes the imbalance correction equally.
+(In code: `ḡ_i^k`, `q_i`, etc.) The `(n+1)` denominator comes from the sharing ADMM formulation, which introduces one "market copy" alongside the `n` agent copies. This distributes the imbalance correction equally.
 
 ### 5.3 Adaptive Penalty (ρ)
 
@@ -810,7 +874,9 @@ This design avoids the common "improve-then-wander" ADMM behavior in hard regime
 
 ## 6. Social Planner Benchmark
 
-The social planner (`social_planner.jl`) solves a single centralised convex QCP (quadratically constrained program) that maximises risk-adjusted social welfare subject to all individual agent constraints plus market-clearing balance constraints. It serves as the theoretical first-best benchmark. When `γ=1` (risk-neutral), the CVaR term drops from the objective economically; the same unified epigraph/QCP structure is kept across runs.
+The social planner (`social_planner.jl`) implements the **complete risk trading** case (§4.4.3): a single centralised convex QCP that maximises risk-adjusted social welfare with one **social CVaR** on aggregate welfare, subject to all individual agent constraints plus market-clearing balance constraints. It is the first-best benchmark under **centralised risk pooling**, not the decentralised incomplete-risk-trading equilibrium solved by ADMM.
+
+When `γ=1` (risk-neutral), the CVaR term drops from the objective economically and the planner reduces to standard stochastic welfare maximisation; the same unified epigraph/QCP structure is kept across runs. When `γ<1`, the case is still an optimisation problem (d’Aertrycke [b]), but ME/ME+C need not match its primal or dual solution.
 
 ### 6.1 Market-Clearing Constraints
 
@@ -824,7 +890,13 @@ The social planner (`social_planner.jl`) solves a single centralised convex QCP 
 
 ### 6.2 Price Recovery (Direct QCP Duals)
 
-Equilibrium prices are the **dual variables** (shadow prices) of the market-clearing constraints.
+Equilibrium prices are the **dual variables** (shadow prices) of the market-clearing constraints. This interpretation holds for **both** $\gamma = 1$ and $\gamma < 1$:
+
+- **Risk-neutral ($\gamma = 1$):** each dual is the expected **marginal social value** of relaxing that market’s balance by one unit (classical welfare economics).
+- **Risk-averse ($\gamma < 1$):** each dual is the **risk-adjusted marginal social value** — the marginal impact on the planner objective $\gamma \sum_y \mathrm{sw}^{aux}_y - (1-\gamma)\,\mathrm{CVaR}^{\mathrm{social}}$ from relaxing that balance by one unit. These are the correct **commodity shadow prices** for the complete-risk-trading benchmark; they are **not** required to equal ADMM prices when agents use private CVaR (§4.4.3).
+
+The social CVaR enters through `sw_aux` and linear shortfall constraints (§6.4); the balance constraints themselves are unchanged. The epigraph binds at optimality (`sw_aux[y] = social_welfare[y]` in code; $\mathrm{sw^{aux}}_y = \mathrm{socialWelfare}_y$ mathematically), so risk adjustment affects **levels** of prices and quantities, not the fact that balance duals are well-defined shadow prices.
+
 The planner is solved directly as a convex QCP with IPOPT (SP-only solver).
 
 Workflow:
@@ -860,28 +932,32 @@ The social planner applies **one single CVaR** to the aggregate social welfare (
 
 **Problem**: `social_welfare[y]` includes quadratic terms from both elastic demand utility (`A·d − B/2·d²`) and conventional stage costs (`base_s·q_s + 0.5·slope_s·q_s²`). Putting `−social_welfare[y]` inside the CVaR shortfall constraint creates a nonlinear coupling in the shortfall constraints and complicates robust dual extraction/interpretation for market prices.
 
-**Solution — epigraph reformulation**: Introduce auxiliary variables `sw_aux[y]` with epigraph constraints:
+**Solution — epigraph reformulation**: Introduce auxiliary variables `sw_aux[y]` (math: $\mathrm{sw}^{aux}_y$) with epigraph constraints:
 
-```
-sw_aux[y] ≤ social_welfare[y]     (quadratic constraint, standard convex form)
-```
+$$
+\mathrm{sw}^{aux}_y \le \mathrm{socialWelfare}_y \quad \forall y \in \mathcal{Y}
+\quad\text{(quadratic in $\mathrm{socialWelfare}_y$; convex QC)}
+$$
 
 The CVaR constraints then reference `sw_aux` instead of the quadratic `social_welfare`, making them purely linear:
 
-```
-u_social[y]  ≥ −sw_aux[y] − α_social                          ∀ y ∈ JY
-cvar_social  ≥ α_social + (1/(1−β)) × Σ_y P[y] × u_social[y]
-```
+$$
+u_y \ge -\mathrm{sw}^{aux}_y - \alpha_{\mathrm{social}} \quad \forall y \in \mathcal{Y}
+$$
 
-**Important**: `α_social` and `cvar_social` must be **free** (no lower bound). When social welfare is positive, the social loss = −sw_aux is negative. The optimal VaR α for CVaR of a negative loss is negative. With α ≥ 0, cvar_social would be forced ≥ 0, so the objective would become γ·sw_aux instead of sw_aux when γ < 1 — breaking SP/ME equivalence for nYears=1. With α free, CVaR = loss when nYears=1, so the objective reduces to sw_aux regardless of γ.
+$$
+\mathrm{CVaR}^{\mathrm{social}} \ge \alpha_{\mathrm{social}} + \frac{1}{1-\beta}\sum_{y \in \mathcal{Y}} P_y\, u_y
+$$
+
+**Important**: `α_social` and `cvar_social` must be **free** (no lower bound). When social welfare is positive, the social loss $-\mathrm{sw}^{aux}_y$ is negative. The optimal VaR $\alpha$ for CVaR of a negative loss is negative. With $\alpha \ge 0$, $\mathrm{CVaR}^{\mathrm{social}}$ would be forced $\ge 0$, so the objective would become $\gamma \sum_y \mathrm{sw}^{aux}_y$ instead of $\sum_y \mathrm{sw}^{aux}_y$ when $\gamma < 1$ — breaking SP/ME equivalence for `nYears = 1`. With $\alpha$ free, $\mathrm{CVaR}^{\mathrm{social}}$ equals social loss when there is only one scenario, so the objective reduces to $\sum_y \mathrm{sw}^{aux}_y$ regardless of $\gamma$.
 
 The objective is also linear:
 
-```
-max  γ × Σ_y sw_aux[y]  −  (1−γ) × cvar_social
-```
+$$
+\max \;\gamma \sum_{y \in \mathcal{Y}} \mathrm{sw}^{aux}_y - (1-\gamma)\,\mathrm{CVaR}^{\mathrm{social}}
+$$
 
-Since the objective maximises `sw_aux`, the epigraph constraint binds at optimality (`sw_aux[y] = social_welfare[y]`), making the formulation mathematically equivalent to applying CVaR directly to `social_welfare`.
+Since the objective maximises `sw_aux`, the epigraph constraint binds at optimality (`sw_aux[y] = social_welfare[y]` in code; $\mathrm{sw}^{aux}_y = \mathrm{socialWelfare}_y$ in math), making the formulation mathematically equivalent to applying CVaR directly to `social_welfare`.
 
 The epigraph constraints are the **only** quadratic constraints in the model (convex QC form). All other constraints (CVaR, market-clearing, capacity bounds) are purely linear. Prices are extracted directly from QCP duals as described in §6.2.
 
@@ -955,18 +1031,22 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 | `elec_GC_market` | 10.0 €/MWh_GC | 0.3 | Electricity certificate market seed |
 | `H2_market` | 50.0 €/MWh_H2 | 0.5 | Hydrogen market seed |
 | `H2_GC_market` | 30.0 €/MWh_GC | 1.0 | Hydrogen certificate market seed |
-| `EP_market` | 150.0 €/MWh_EP | 3.0 | End-product market seed; also has `Demand_Column`, `Total_Demand` |
+| `EP_market` | 194.0 €/MWh_EP | 3.0 | NL-calibrated (~1000 €/t NH₃); `Total_Demand` ≈ 1970 → ~3 Mt/y via `LOAD_EP` |
 
 ### 8.4 Contracts (market_exposure_contracts.jl only)
 
 | Block | Parameter | Value | Description |
 |---|---|---|---|
-| `PPAs` | `initial_price` | 60.0 €/MWh | Seed for `λ_ppa` (pay-as-produced electricity+elec_GC) |
+| `PPAs` | `initial_price` | 60.0 €/MWh | Seed for `λ_ppa` (contract clearing state) |
 | `PPAs` | `rho_initial` | 0.5 | ADMM penalty seed for PPA pool |
-| `HPAs` | `initial_price` | 60.0 €/MWh_H2 | Seed for `λ_hpa` (pay-as-produced hydrogen+H2_GC equivalent) |
+| `PPAs` | `pricing_mode` | `endogenous_clearing` | Strike mode (`endogenous_clearing`, `fixed`, `indexed`) |
+| `PPAs` | `fixed_strike`, `index_terms`, `price_floor/cap` | — | Strike configuration for non-endogenous modes |
+| `HPAs` | `initial_price` | 60.0 €/MWh_H2 | Seed for `λ_hpa` (contract clearing state) |
 | `HPAs` | `rho_initial` | 0.5 | ADMM penalty seed for HPA pool |
+| `HPAs` | `pricing_mode` | `endogenous_clearing` | Strike mode (`endogenous_clearing`, `fixed`, `indexed`) |
+| `HPAs` | `fixed_strike`, `index_terms`, `price_floor/cap` | — | Strike configuration for non-endogenous modes |
 
-PPA and HPA both clear energy at their λ prices and enforce scalar capacity consensus (`ppa_cap`, `hpa_cap`) with no separate capacity price.
+PPA and HPA both enforce scalar capacity consensus (`ppa_cap`, `hpa_cap`) with no separate capacity price. Settlement is always via strike prices `K_ppa`/`K_hpa`; in the default endogenous mode these coincide with ADMM clearing prices (`K = λ`).
 
 ### 8.5 Agent Parameters
 
@@ -1186,9 +1266,11 @@ Now/
 
 ### 11.3 Social Planner Results
 
+Outputs from the **complete risk trading** benchmark (`social_planner.jl`; §4.4.3, §6).
+
 | File | Contents |
 |---|---|
-| `Market_Prices.csv` | Columns: `Time`, `Elec_Price`, `H2_Price`, `Elec_GC_Price`, `H2_GC_Price`, `EP_Price`. One row per (jy, jd, jh) timestep. Prices = direct QCP duals of balance constraints (§6.2). Raw duals are divided by representative-day weights `W[jd,jy]` to recover the true per-MWh price. |
+| `Market_Prices.csv` | Columns: `Time`, `Elec_Price`, `H2_Price`, `Elec_GC_Price`, `H2_GC_Price`, `EP_Price`. One row per (jy, jd, jh) timestep. Prices = direct QCP duals of balance constraints (§6.2): expected marginal social values at $\gamma=1$, **risk-adjusted** social shadow prices at $\gamma<1$. Raw duals are divided by representative-day weights `W[jd,jy]` to recover the true per-MWh price. |
 | `Agent_Summary.csv` | Columns: `Agent`, `Type`, `Total_Quantity`, `Welfare_Contribution`. |
 | `Capacity_Investments_Planner.csv` | Per-agent yearly capacity and investment for VRES, electrolyzer, and green offtaker. |
 
@@ -1266,3 +1348,7 @@ data.yaml  ──→  define_common_parameters!  ──→  mod.ext[:parameters]
 4. A. Eichfelder, A. Schöbel, L. Schmitz, “A tutorial on properties of the epigraph reformulation,” *Optimization Online*, 2024.  
    Additional modern reference for epigraph reformulation properties and KKT interpretation.  
    PDF: [Optimization Online](https://optimization-online.org/wp-content/uploads/2024/10/Epigraph_reformulation-1.pdf)
+
+5. G. de Maere d’Aertrycke, A. Ehrenmann, D. Ralph & Y. Smeers, “Risk trading in capacity equilibrium models,” EPRG Working Paper 1720 / Cambridge Working Paper in Economics 1757, 2018.  
+   Source for the **complete vs incomplete risk trading** labels used in §1 and §4.4.3 (Table 1: risk-neutral optimisation [a]; risk-averse competitive with complete markets [b]; risk-averse competitive with no risk trading).  
+   Stable URL: [JSTOR resrep30413](https://www.jstor.org/stable/resrep30413)

@@ -806,69 +806,11 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         ADMM_state["n_iter"] = iter
     end
 
-    # --------------------------------------------------------------------------
-    # Summary message: convergence status, iteration count, residuals, prices
-    # --------------------------------------------------------------------------
-    println()  # ensure a clean line after the progress bar
-    if convergence == 1
-        println("ADMM convergence achieved.")
-    else
-        println("ADMM reached max_iter without convergence.")
-        @printf("Best normalized residual score reached at iter %d: %.4f\n", best_iter, best_score)
-    end
-    n_it = ADMM_state["n_iter"]
-    println("Number of iterations: ", n_it)
-
-    market_labels = Dict(
-        "elec"    => "Electricity",
-        "H2"      => "Hydrogen",
-        "elec_GC" => "Electricity_GC",
-        "H2_GC"   => "H2_GC",
-        "EP"      => "End_Product",
-    )
-    println("Final residuals and mean prices per market:")
-    for key in ("elec", "H2", "elec_GC", "H2_GC", "EP")
-        primal = ADMM_state["Residuals"]["Primal"][key][end]
-        dual   = ADMM_state["Residuals"]["Dual"][key][end]
-        price  = ADMM_state["PriceHistory"][key][end]
-        @printf("  %-14s  primal = %.3e,  dual = %.3e,  price_mean = %.6f\n",
-                market_labels[key], primal, dual, price)
-    end
-    primal_cap = ADMM_state["Residuals"]["Primal"]["cap"][end]
-    dual_cap   = ADMM_state["Residuals"]["Dual"]["cap"][end]
-    @printf("  %-14s  primal = %.3e,  dual = %.3e  (aggregate over cap agents)\n",
-            "Capacity", primal_cap, dual_cap)
-
-    # ----------------------------------------------------------------------
-    # Per-agent capacity consensus breakdown
-    # The per-agent ADMM equality split (see DOCUMENTATION.md §5.4) requires
-    # EVERY capacity-owning agent to satisfy its own x = z; the worst-case
-    # agent is what gates stopping. Printing each agent here lets the user
-    # see which agent (if any) drove non-convergence.
-    # ----------------------------------------------------------------------
-    if !isempty(cap_agents)
-        println("Per-agent capacity consensus (x_cap = z_cap split):")
-        cap_state = ADMM_state["Capacity"]
-        worst_m   = ""
-        worst_val = -Inf
-        for m in cap_agents
-            rp_m = cap_state["Primal"][m][end]
-            rd_m = cap_state["Dual"][m][end]
-            ρ_m  = cap_state["ρ"][m][end]
-            λ_m  = cap_state["λ"][m][end]
-            λ_mean = isempty(λ_m) ? 0.0 : sum(λ_m) / length(λ_m)
-            @printf("  %-20s  primal = %.3e,  dual = %.3e,  ρ = %.3f,  mean(λ) = %.3e\n",
-                    m, rp_m, rd_m, ρ_m, λ_mean)
-            v = max(rp_m, isfinite(rd_m) ? rd_m : 0.0)
-            if v > worst_val
-                worst_val = v
-                worst_m   = m
-            end
-        end
-        if worst_m != ""
-            @printf("  Worst capacity agent: %s (max(primal, dual) = %.3e)\n",
-                    worst_m, worst_val)
-        end
+    println()  # clean line after progress bar
+    ADMM_state["converged"] = (convergence == 1)
+    if !ADMM_state["converged"]
+        @printf("ADMM reached max_iter without convergence (best score %.4f at iter %d).\n",
+                best_score, best_iter)
     end
 
     return nothing

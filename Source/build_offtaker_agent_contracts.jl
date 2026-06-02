@@ -8,7 +8,7 @@
  #
  # HPA (pay-as-produced, bundled H2 + H2_GC equivalent):
  #   - GreenOfftaker receives h2_hpa_from[h2_id] from each GreenProducer h2_id.
- #   - Payment is λ_hpa[h2_id] × h2_hpa_from[h2_id].
+#   - Payment is K_hpa[h2_id] × h2_hpa_from[h2_id].
  #   - Contract flow is capped by hpa_cap[h2_id].
  #   - HPA-delivered H2 contributes to green-backing (bundled certificate logic).
  #
@@ -49,6 +49,7 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
     ρ_EP = mod.ext[:parameters][:ρ_EP]
 
     λ_hpa = mod.ext[:parameters][:λ_hpa]
+    K_hpa = get(mod.ext[:parameters], :K_hpa, λ_hpa)
     g_bar_hpa = mod.ext[:parameters][:g_bar_hpa]
     ρ_hpa = mod.ext[:parameters][:ρ_hpa]
     g_bar_hpa_cap = mod.ext[:parameters][:g_bar_hpa_cap]
@@ -114,7 +115,7 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
             sum(W[jd, jy] * (
                 λ_H2[jh, jd, jy] * h2_in_pool[jh, jd, jy]
                 + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy]
-                + sum(λ_hpa[v][jh, jd, jy] * h2_hpa_from[v][jh, jd, jy] for v in hpa_h2)
+                + sum(K_hpa[v][jh, jd, jy] * h2_hpa_from[v][jh, jd, jy] for v in hpa_h2)
                 + proc_cost * ep[jh, jd, jy]
                 - λ_EP[jh, jd, jy] * ep[jh, jd, jy]
             ) for jh in JH, jd in JD)
@@ -139,7 +140,7 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
         sum(W[jd, jy] * (
             λ_H2[jh, jd, jy] * h2_in_pool[jh, jd, jy]
             + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy]
-            + sum(λ_hpa[v][jh, jd, jy] * h2_hpa_from[v][jh, jd, jy] for v in hpa_h2)
+            + sum(K_hpa[v][jh, jd, jy] * h2_hpa_from[v][jh, jd, jy] for v in hpa_h2)
             + proc_cost * ep[jh, jd, jy]
             - λ_EP[jh, jd, jy] * ep[jh, jd, jy]
         ) for jh in JH, jd in JD, jy in JY)

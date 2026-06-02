@@ -11,12 +11,12 @@
 #
 #   PER-VRES PPAs (pay-as-produced, bundled elec+elec_GC):
 #   - The electrolyzer receives g_ppa_from[vres_id] (MWh) from each VRES.
-#   - Payment: λ_ppa[vres_id] × g_ppa_from[vres_id] per VRES (bundled price).
+#   - Payment: K_ppa[vres_id] × g_ppa_from[vres_id] per VRES (bundled strike).
 #   - Total electricity input: e_in_pool + sum(g_ppa_from).
 #   - PPA electricity comes with embedded GC — real-world package.
 #
 # HPA (pay-as-produced, bundled H2 + H2_GC equivalent):
-#   - GreenProducer supplies h2_hpa at λ_hpa.
+#   - GreenProducer supplies h2_hpa at strike K_hpa.
 #   - h2_hpa <= hpa_cap at each hour; if producer is not running, delivery is 0.
 #   - Contracted output is removed from pool H2 and pool H2_GC.
 #
@@ -60,6 +60,7 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
 
     # Per-VRES PPA params (electrolyzer has Dict vres_id => array)
     λ_ppa     = mod.ext[:parameters][:λ_ppa]
+    K_ppa     = get(mod.ext[:parameters], :K_ppa, λ_ppa)
     g_bar_ppa = mod.ext[:parameters][:g_bar_ppa]
     ρ_ppa     = mod.ext[:parameters][:ρ_ppa]
     g_bar_ppa_cap = mod.ext[:parameters][:g_bar_ppa_cap]
@@ -67,6 +68,7 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
     ppa_vres = collect(keys(λ_ppa))
 
     λ_hpa     = mod.ext[:parameters][:λ_hpa]
+    K_hpa     = get(mod.ext[:parameters], :K_hpa, λ_hpa)
     g_bar_hpa = mod.ext[:parameters][:g_bar_hpa]
     ρ_hpa     = mod.ext[:parameters][:ρ_hpa]
     g_bar_hpa_cap = mod.ext[:parameters][:g_bar_hpa_cap]
@@ -163,11 +165,11 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
             sum(W[jd, jy] * (
                 λ_elec[jh, jd, jy]       * e_in_pool[jh, jd, jy]
                 + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
-                + sum(λ_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
+                + sum(K_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
                 + op_cost * h2_out[jh, jd, jy]
                 - λ_H2[jh, jd, jy]       * (h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
-                - λ_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
+                - K_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
         loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y[jy])
@@ -194,11 +196,11 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
         sum(W[jd, jy] * (
             λ_elec[jh, jd, jy]       * e_in_pool[jh, jd, jy]
             + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
-            + sum(λ_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
+            + sum(K_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
             + op_cost * h2_out[jh, jd, jy]
             - λ_H2[jh, jd, jy]       * (h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
             - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
-            - λ_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
+            - K_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
         ) for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec/2 * W[jd, jy] * ((-e_in_pool[jh, jd, jy])      - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)

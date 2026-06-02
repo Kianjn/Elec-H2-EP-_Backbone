@@ -21,6 +21,8 @@
 #
 # ==============================================================================
 
+include(joinpath(@__DIR__, "print_run_summary.jl"))
+
 function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
                      H2_GC_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict)
     results_dir = joinpath(@__DIR__, "..", "market_exposure_results")
@@ -727,92 +729,7 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     prices_df = DataFrame(prices_rows)
     CSV.write(joinpath(results_dir, "Market_Prices.csv"), prices_df)
 
-    # Print equilibrium prices (ADMM λ) to the output log
-    println()
-    println("Equilibrium prices (ADMM λ, saved to Market_Prices.csv):")
-    println("  Electricity     mean = ", round(mean(λ_elec), digits=6))
-    println("  Hydrogen        mean = ", round(mean(λ_H2), digits=6))
-    println("  Electricity_GC  mean = ", round(mean(λ_elec_GC), digits=6))
-    println("  H2_GC           mean = ", round(mean(λ_H2_GC), digits=6))
-    println("  End_Product     mean = ", round(mean(λ_EP), digits=6))
-    if n_yr > 1
-        println("  (base scenario jy=1 means: Elec=", round(mean(λ_elec[:, :, 1]), digits=6),
-                ", H2=", round(mean(λ_H2[:, :, 1]), digits=6),
-                ", Elec_GC=", round(mean(λ_elec_GC[:, :, 1]), digits=6),
-                ", H2_GC=", round(mean(λ_H2_GC[:, :, 1]), digits=6),
-                ", EP=", round(mean(λ_EP[:, :, 1]), digits=6), ")")
-    end
-
-    # ----------------------------------------------------------------------
-    # Capacity consensus summary (per-agent equality split)
-    # Final per-agent r_m, s_m, ρ_m to surface which capacity agent (if any)
-    # gated convergence. See DOCUMENTATION.md §5.4.
-    # ----------------------------------------------------------------------
-    if !isempty(cap_agents_save)
-        println()
-        println("Capacity consensus (per-agent equality split, x_cap = z_cap):")
-        for m in cap_agents_save
-            rp = get(get(cap_state_save, "Primal", Dict()), m, Float64[])
-            rd = get(get(cap_state_save, "Dual",   Dict()), m, Float64[])
-            ρh = get(get(cap_state_save, "ρ",      Dict()), m, Float64[])
-            rp_v = isempty(rp) ? NaN : rp[end]
-            rd_v = isempty(rd) ? NaN : rd[end]
-            ρ_v  = isempty(ρh) ? NaN : ρh[end]
-            @printf("  %-20s  primal = %.3e,  dual = %.3e,  ρ = %.3f\n", m, rp_v, rd_v, ρ_v)
-        end
-    end
-
-    # --------------------------------------------------------------------------
-    # Comparison with social planner benchmark (if available)
-    # --------------------------------------------------------------------------
-    admm_prices_path = joinpath(results_dir, "Market_Prices.csv")
-    sp_path = joinpath(@__DIR__, "..", "social_planner_results", "Market_Prices.csv")
-    if isfile(sp_path)
-        # Guard against stale benchmark comparisons:
-        # ADMM writes market_exposure_results/Market_Prices.csv in this function.
-        # If the SP prices file is older than the just-written ADMM file, the
-        # benchmark likely comes from a previous model/config run.
-        try
-            sp_mtime = stat(sp_path).mtime
-            admm_mtime = isfile(admm_prices_path) ? stat(admm_prices_path).mtime : time()
-            if sp_mtime < admm_mtime
-                println("  (Warning: social planner Market_Prices.csv is older than this ADMM run.")
-                println("   Rerun social_planner.jl before using the benchmark comparison.)")
-            end
-        catch
-            # Keep benchmark printing robust if filesystem metadata is unavailable.
-        end
-
-        sp_df = CSV.read(sp_path, DataFrame)
-        # Compare like-for-like horizon:
-        # - If SP and ADMM have same number of slots, compare all-scenario means.
-        # - If SP has one year while ADMM has multiple years, compare ADMM base scenario jy=1.
-        admm_slots = n_ts * n_rd * n_yr
-        sp_slots = nrow(sp_df)
-        use_base_compare = (sp_slots == n_ts * n_rd) && (n_yr > 1)
-        use_full_compare = (sp_slots == admm_slots)
-
-        admm_cmp_elec = use_base_compare ? mean(λ_elec[:, :, 1]) : mean(λ_elec)
-        admm_cmp_H2 = use_base_compare ? mean(λ_H2[:, :, 1]) : mean(λ_H2)
-        admm_cmp_elec_GC = use_base_compare ? mean(λ_elec_GC[:, :, 1]) : mean(λ_elec_GC)
-        admm_cmp_H2_GC = use_base_compare ? mean(λ_H2_GC[:, :, 1]) : mean(λ_H2_GC)
-        admm_cmp_EP = use_base_compare ? mean(λ_EP[:, :, 1]) : mean(λ_EP)
-
-        println()
-        println("Comparison with social planner benchmark:")
-        if use_base_compare
-            println("  (ADMM compared on base scenario jy=1; all-scenario means shown above.)")
-        elseif !use_full_compare
-            println("  (Warning: SP/ADMM horizon mismatch in Market_Prices rows; comparing ADMM all-scenario mean.)")
-        end
-        println("  Market          | Social planner |   ADMM λ mean")
-        println("  " * repeat("-", 52))
-        @printf("  %-14s | %14.6f | %14.6f\n", "Electricity",    mean(sp_df.Elec_Price),    admm_cmp_elec)
-        @printf("  %-14s | %14.6f | %14.6f\n", "Hydrogen",       mean(sp_df.H2_Price),      admm_cmp_H2)
-        @printf("  %-14s | %14.6f | %14.6f\n", "Electricity_GC", mean(sp_df.Elec_GC_Price), admm_cmp_elec_GC)
-        @printf("  %-14s | %14.6f | %14.6f\n", "H2_GC",          mean(sp_df.H2_GC_Price),   admm_cmp_H2_GC)
-        @printf("  %-14s | %14.6f | %14.6f\n", "End_Product",    mean(sp_df.EP_Price),      admm_cmp_EP)
-    end
+    print_admm_run_summary!(ADMM_state, results, agents; results_dir=results_dir)
 
     return nothing
 end

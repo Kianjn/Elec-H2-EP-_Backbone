@@ -49,6 +49,7 @@ function define_contract_parameters!(m::String, mod::Model, data::Dict, agents::
 
         if agent_type == "VRES"
             mod.ext[:parameters][:λ_ppa]     = zeros(shp)
+            mod.ext[:parameters][:K_ppa]     = zeros(shp)
             mod.ext[:parameters][:g_bar_ppa] = zeros(shp)
             mod.ext[:parameters][:ρ_ppa]     = 1.0
             mod.ext[:parameters][:g_bar_ppa_cap] = 0.0
@@ -56,6 +57,7 @@ function define_contract_parameters!(m::String, mod::Model, data::Dict, agents::
         else
             ppa_vres = get(agents, :ppa_vres, String[])
             mod.ext[:parameters][:λ_ppa]     = Dict(v => zeros(shp) for v in ppa_vres)
+            mod.ext[:parameters][:K_ppa]     = Dict(v => zeros(shp) for v in ppa_vres)
             mod.ext[:parameters][:g_bar_ppa] = Dict(v => zeros(shp) for v in ppa_vres)
             mod.ext[:parameters][:ρ_ppa]     = Dict(v => 1.0 for v in ppa_vres)
             mod.ext[:parameters][:g_bar_ppa_cap] = Dict(v => 0.0 for v in ppa_vres)
@@ -79,6 +81,7 @@ function define_contract_parameters!(m::String, mod::Model, data::Dict, agents::
 
         if agent_type == "GreenProducer"
             mod.ext[:parameters][:λ_hpa]     = zeros(shp)
+            mod.ext[:parameters][:K_hpa]     = zeros(shp)
             mod.ext[:parameters][:g_bar_hpa] = zeros(shp)
             mod.ext[:parameters][:ρ_hpa]     = 1.0
             mod.ext[:parameters][:g_bar_hpa_cap] = 0.0
@@ -86,6 +89,7 @@ function define_contract_parameters!(m::String, mod::Model, data::Dict, agents::
         else
             hpa_h2 = get(agents, :hpa_h2, String[])
             mod.ext[:parameters][:λ_hpa]     = Dict(v => zeros(shp) for v in hpa_h2)
+            mod.ext[:parameters][:K_hpa]     = Dict(v => zeros(shp) for v in hpa_h2)
             mod.ext[:parameters][:g_bar_hpa] = Dict(v => zeros(shp) for v in hpa_h2)
             mod.ext[:parameters][:ρ_hpa]     = Dict(v => 1.0 for v in hpa_h2)
             mod.ext[:parameters][:g_bar_hpa_cap] = Dict(v => 0.0 for v in hpa_h2)
