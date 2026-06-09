@@ -68,22 +68,10 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     q_elec_gc = mod.ext[:variables][:q_elec_gc] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "elec_GC")
     q_h2gc    = mod.ext[:variables][:q_h2gc]    = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "h2_GC_prod")
 
-    # Capacity and investment decision variables for electrolyzer (per year).
-    # cap_H2_y[jy] = available H₂ output capacity (MW_H2) in year jy.
-    # inv_cap_H2[jy] = new H₂ capacity investment (MW_H2) in year jy.
-    cap_H2_y   = mod.ext[:variables][:cap_H2_y]   = @variable(mod, [jy in JY], lower_bound = 0, base_name = "cap_H2")
-    inv_cap_H2 = mod.ext[:variables][:inv_cap_H2] = @variable(mod, [jy in JY], lower_bound = 0, base_name = "inv_cap_H2")
-
-    # Capacity evolution over years: cumulative investment on top of initial capacity.
-    JY_vec = collect(JY)
-    first_jy = JY_vec[1]
-    mod.ext[:constraints][:cap_H2_init] = @constraint(mod, cap_H2_y[first_jy] == cap_H2_initial + inv_cap_H2[first_jy])
-    for (k, jy) in enumerate(JY_vec)
-        k == 1 && continue
-        prev_jy = JY_vec[k - 1]
-        cname = Symbol("cap_H2_dyn_", jy)
-        mod.ext[:constraints][cname] = @constraint(mod, cap_H2_y[jy] == cap_H2_y[prev_jy] + inv_cap_H2[jy])
-    end
+    # Single capacity and one-shot investment (same H₂ capacity in all weather scenarios).
+    cap_H2_y   = mod.ext[:variables][:cap_H2_y]   = @variable(mod, lower_bound = 0, base_name = "cap_H2")
+    inv_cap_H2 = mod.ext[:variables][:inv_cap_H2] = @variable(mod, lower_bound = 0, base_name = "inv_cap_H2")
+    mod.ext[:constraints][:cap_H2_init] = @constraint(mod, cap_H2_y == cap_H2_initial + inv_cap_H2)
 
     # ── Net market positions ──────────────────────────────────────────────
     # Sign convention: NEGATIVE for purchases, POSITIVE for sales.
@@ -108,7 +96,7 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     mod.ext[:constraints][:gc_phys_limit]  = @constraint(mod, [jh in JH, jd in JD, jy in JY], q_h2gc[jh, jd, jy] <= h2_out[jh, jd, jy])
 
     # Single equipment capacity limit on H₂ output (implicitly bounds electricity input via stoichiometry).
-    mod.ext[:constraints][:cap_h2]         = @constraint(mod, [jh in JH, jd in JD, jy in JY], h2_out[jh, jd, jy] <= cap_H2_y[jy])
+    mod.ext[:constraints][:cap_h2] = @constraint(mod, [jh in JH, jd in JD, jy in JY], h2_out[jh, jd, jy] <= cap_H2_y)
 
     # Annual green-backing constraint: over each year (weighted by
     # representative-day weights W), the electricity GCs purchased must be
@@ -143,7 +131,7 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
-        loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y[jy])
+        loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y)
     end
     mod.ext[:expressions][:loss_H2] = loss_H2
 
@@ -189,8 +177,7 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2/2 * W[jd, jy] * (h2_out[jh, jd, jy]         - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2_GC/2 * W[jd, jy] * (q_h2gc[jh, jd, jy]      - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-        # Fixed annualised investment cost across model years (no W weighting).
-        + F_cap * sum(cap_H2_y[jy] for jy in JY)
+        + F_cap * cap_H2_y
     )
     return mod
 end
@@ -225,19 +212,11 @@ function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
     h_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="h_sell_$(id)")
     gc_h_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_h_sell_$(id)")
 
-    cap_H2_y = @variable(planner, [jy in JY], lower_bound=0, base_name="cap_H2_$(id)")
-    inv_cap_H2 = @variable(planner, [jy in JY], lower_bound=0, base_name="inv_cap_H2_$(id)")
+    cap_H2_y = @variable(planner, lower_bound=0, base_name="cap_H2_$(id)")
+    inv_cap_H2 = @variable(planner, lower_bound=0, base_name="inv_cap_H2_$(id)")
+    @constraint(planner, cap_H2_y == H_bar + inv_cap_H2)
 
-    JY_vec = collect(JY)
-    first_jy = JY_vec[1]
-    @constraint(planner, cap_H2_y[first_jy] == H_bar + inv_cap_H2[first_jy])
-    for (k, jy) in enumerate(JY_vec)
-        k == 1 && continue
-        prev_jy = JY_vec[k - 1]
-        @constraint(planner, cap_H2_y[jy] == cap_H2_y[prev_jy] + inv_cap_H2[jy])
-    end
-
-    @constraint(planner, [jh in JH, jd in JD, jy in JY], h_sell[jh, jd, jy] <= cap_H2_y[jy])
+    @constraint(planner, [jh in JH, jd in JD, jy in JY], h_sell[jh, jd, jy] <= cap_H2_y)
     @constraint(planner, [jh in JH, jd in JD, jy in JY], h_sell[jh, jd, jy] == η * e_buy[jh, jd, jy])
     @constraint(planner, [jh in JH, jd in JD, jy in JY], gc_h_sell[jh, jd, jy] <= h_sell[jh, jd, jy])
 
@@ -253,7 +232,7 @@ function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
     for jy in JY
         welfare_per_year[jy] = @expression(planner,
             -(sum(W_dict[jy][jd] * (C_H * h_sell[jh, jd, jy]) for jh in JH, jd in JD)
-              + F_cap * cap_H2_y[jy])
+              + F_cap * cap_H2_y)
         )
     end
 

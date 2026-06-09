@@ -5,7 +5,7 @@
 using JuMP
 using DataFrames
 using CSV
-using Printf
+import Printf: @sprintf, @printf
 using Statistics
 
 """
@@ -58,15 +58,15 @@ function _agent_welfare_per_year(m::Model, agents::Dict; JH, JD, JY, W)
         C = get(p, :MarginalCost, 0.0)
         F_cap = get(p, :FixedCost_per_MW, 0.0)
         cap = vars[:cap_VRES]
-        if haskey(vars, :g_EOM) && haskey(vars, :g_ppa)
-            gen_at(jh, jd, jy) = value(vars[:g_EOM][jh, jd, jy]) + value(vars[:g_ppa][jh, jd, jy])
+        gen_at = if haskey(vars, :g_EOM) && haskey(vars, :g_ppa)
+            (jh, jd, jy) -> value(vars[:g_EOM][jh, jd, jy]) + value(vars[:g_ppa][jh, jd, jy])
         else
             g = vars[:g]
-            gen_at(jh, jd, jy) = value(g[jh, jd, jy])
+            (jh, jd, jy) -> value(g[jh, jd, jy])
         end
         for jy in JY
             op = sum(Wd[jy][jd] * C * gen_at(jh, jd, jy) for jh in JH, jd in JD)
-            wy[jy] = -(op + F_cap * value(cap[jy]))
+            wy[jy] = -(op + F_cap * value(cap))
         end
 
     elseif atype == "Conventional"
@@ -97,7 +97,7 @@ function _agent_welfare_per_year(m::Model, agents::Dict; JH, JD, JY, W)
         h = vars[:h2_out]
         for jy in JY
             op = sum(Wd[jy][jd] * C_H * value(h[jh, jd, jy]) for jh in JH, jd in JD)
-            wy[jy] = -(op + F_cap * value(cap[jy]))
+            wy[jy] = -(op + F_cap * value(cap))
         end
 
     elseif haskey(vars, :d_H)
@@ -114,7 +114,7 @@ function _agent_welfare_per_year(m::Model, agents::Dict; JH, JD, JY, W)
         ep = vars[:ep]
         for jy in JY
             op = sum(Wd[jy][jd] * C_proc * value(ep[jh, jd, jy]) for jh in JH, jd in JD)
-            wy[jy] = -(op + F_cap * value(cap[jy]))
+            wy[jy] = -(op + F_cap * value(cap))
         end
 
     elseif atype == "GreyOfftaker"
@@ -212,7 +212,12 @@ function extract_sp_risk_metrics(planner::Model, planner_state::Dict, mdict::Dic
     cvar_check, alpha_check, _ = empirical_cvar(loss_y, P, beta)
 
     expected_welfare = sum(P[jy] * sw_y[jy] for jy in JY)
-    risk_adj_obj = gamma * sum(sw_y) - (1 - gamma) * cvar_model
+    # Must match build_social_planner! objective: γ·Σ P[y]·sw_aux[y] − (1−γ)·CVaR.
+    # Read from the solved model (not sum(sw_y), which ignores P and inflates by nYears).
+    risk_adj_obj = objective_value(planner)
+    if !isfinite(risk_adj_obj)
+        risk_adj_obj = gamma * expected_welfare - (1 - gamma) * cvar_model
+    end
 
     return (
         case = "social_planner",

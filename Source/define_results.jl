@@ -326,7 +326,7 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
         # Per-agent penalty ρ_m history (one push per iteration; first entry = rho_cap_initial)
         "ρ" => Dict{String, Vector{Float64}}(m => [rho_cap_init] for m in cap_agents),
         # Per-agent dual λ_m history; each entry is a length-nYears vector
-        "λ" => Dict{String, Vector{Vector{Float64}}}(m => [zeros(n_yr)] for m in cap_agents),
+        "λ" => Dict{String, Vector{Vector{Float64}}}(m => [[0.0]] for m in cap_agents),
         # Per-agent auxiliary z_m history; filled by ADMM_subroutine each iter
         "z" => Dict{String, Vector{Vector{Float64}}}(m => Vector{Float64}[] for m in cap_agents),
         # Per-agent residuals (one scalar per iteration). Primal = ||x_m-z_m||,
@@ -363,25 +363,11 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
             # AgentID, jy, cap
             if all(sym -> hasproperty(cap_df, sym), (:AgentID, :jy, :cap))
                 for m in cap_agents
-                    z_init = zeros(n_yr)
-                    have_all = true
-                    for jy in 1:n_yr
-                        row = cap_df[(cap_df.AgentID .== m) .& (cap_df.jy .== jy), :]
-                        if nrow(row) == 0
-                            # Fallback: if SP file has one-year rows only, reuse jy=1.
-                            row = cap_df[(cap_df.AgentID .== m) .& (cap_df.jy .== 1), :]
-                        end
-                        if nrow(row) > 0
-                            z_init[jy] = Float64(row.cap[1])
-                        else
-                            have_all = false
-                            break
-                        end
-                    end
-                    if have_all
+                    rows = cap_df[cap_df.AgentID .== m, :]
+                    if nrow(rows) > 0
+                        z_init = Float64(rows.cap[1])
                         push!(ADMM["Capacity"]["z"][m], z_init)
-                        # Keep λ neutral at startup; we only warm-start target z.
-                        ADMM["Capacity"]["λ"][m][1] .= 0.0
+                        ADMM["Capacity"]["λ"][m][1] = [0.0]
                     end
                 end
                 cap_state_warm_loaded = true

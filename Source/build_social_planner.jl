@@ -57,6 +57,7 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
     JD = collect(m0.ext[:sets][:JD])
     JY = collect(m0.ext[:sets][:JY])
     W = m0.ext[:parameters][:W]
+    P = m0.ext[:parameters][:P]
     # W_dict: nested Dict {year => {day => weight}} that mirrors the W matrix.
     # WHY: JuMP @expression macros are more readable with W_dict[jy][jd] than
     # W[jd, jy], and the nested structure naturally matches the (jy, jd) loop
@@ -160,13 +161,13 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
     for id in agents[:power]
         wpy = add_power_agent_to_planner!(planner, id, mdict[id], var_dict, W)
         agent_welfare_per_year[id] = wpy
-        agent_welfare[id] = @expression(planner, sum(wpy[jy] for jy in JY))
+        agent_welfare[id] = @expression(planner, sum(P[jy] * wpy[jy] for jy in JY))
     end
 
     for id in H2_producers
         wpy = add_H2_agent_to_planner!(planner, id, mdict[id], var_dict, W)
         agent_welfare_per_year[id] = wpy
-        agent_welfare[id] = @expression(planner, sum(wpy[jy] for jy in JY))
+        agent_welfare[id] = @expression(planner, sum(P[jy] * wpy[jy] for jy in JY))
     end
 
     # H₂ consumers: inelastic demand with linear utility (no quadratic
@@ -191,26 +192,26 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
             )
         end
         agent_welfare_per_year[id] = wpy
-        agent_welfare[id] = @expression(planner, sum(wpy[jy] for jy in JY))
+        agent_welfare[id] = @expression(planner, sum(P[jy] * wpy[jy] for jy in JY))
         var_dict[:H2_d_H][id] = d_H
     end
 
     for id in agents[:offtaker]
         wpy = add_offtaker_agent_to_planner!(planner, id, mdict[id], var_dict, W)
         agent_welfare_per_year[id] = wpy
-        agent_welfare[id] = @expression(planner, sum(wpy[jy] for jy in JY))
+        agent_welfare[id] = @expression(planner, sum(P[jy] * wpy[jy] for jy in JY))
     end
 
     for id in agents[:elec_GC_demand]
         wpy = add_elec_GC_demand_agent_to_planner!(planner, id, mdict[id], var_dict, W)
         agent_welfare_per_year[id] = wpy
-        agent_welfare[id] = @expression(planner, sum(wpy[jy] for jy in JY))
+        agent_welfare[id] = @expression(planner, sum(P[jy] * wpy[jy] for jy in JY))
     end
 
     for id in agents[:EP_demand]
         wpy = add_EP_demand_agent_to_planner!(planner, id, mdict[id], var_dict, W)
         agent_welfare_per_year[id] = wpy
-        agent_welfare[id] = @expression(planner, sum(wpy[jy] for jy in JY))
+        agent_welfare[id] = @expression(planner, sum(P[jy] * wpy[jy] for jy in JY))
     end
 
     # ── Market-clearing constraints ──────────────────────────────────────
@@ -284,7 +285,7 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
     # Keep a single planner formulation for all gamma values: CVaR becomes
     # inactive automatically when gamma = 1 via the objective coefficient.
     sw_aux = @variable(planner, [jy in JY], base_name = "sw_aux")
-    @constraint(planner, social_welfare_epigraph[jy in JY],
+    social_welfare_epigraph = @constraint(planner, social_welfare_epigraph[jy in JY],
         sw_aux[jy] <= social_welfare[jy]
     )
 
@@ -301,7 +302,7 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
     )
 
     @objective(planner, Max,
-        gamma * sum(sw_aux[jy] for jy in JY)
+        gamma * sum(P[jy] * sw_aux[jy] for jy in JY)
         - (1 - gamma) * cvar_social
     )
 
@@ -343,6 +344,7 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
         :beta => beta_conf,
         :demand_var_keys => [:power_d_E, :elec_GC_demand_d_GC_E, :EP_demand_d_EP],
         :sw_aux => sw_aux,
+        :social_welfare_epigraph => social_welfare_epigraph,
         :cvar_social => cvar_social,
         :alpha_social => alpha_social,
         :u_social => u_social,

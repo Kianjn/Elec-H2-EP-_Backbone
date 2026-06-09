@@ -90,6 +90,9 @@ using CSV
 using Statistics
 # mean, etc., used in the summary print of equilibrium prices.
 
+using Printf
+# @sprintf / @printf in save_social_planner_results! and print_run_summary.jl
+
 using YAML
 # Parse data.yaml: General, ADMM, market blocks, and agent blocks (Power,
 # Hydrogen, Hydrogen_Offtaker, Electricity_GC_Demand, EP_Demand).

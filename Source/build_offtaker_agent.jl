@@ -34,9 +34,11 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
     JY = mod.ext[:sets][:JY]          # years in the horizon
     W = mod.ext[:parameters][:W]      # W[jd,jy] = representative-day weight
 
-    # gamma_GC = 0.42 (42%) is the green certificate mandate fraction,
-    # derived from EU renewable fuel targets (e.g. RED II/III).  It specifies
-    # the minimum share of output that must be backed by green H2 certificates.
+    # [NL] gamma_GC = 0.42 (42%) is the green certificate mandate fraction, set to the
+    # EU RED III RFNBO-in-industry target (≥42% of hydrogen used in industry must be
+    # renewable/RFNBO by 2030; Directive (EU) 2023/2413) [RED-III]. It specifies the
+    # minimum share of H2 (intake or implied) that must be backed by green H2 certificates.
+    # See DOCUMENTATION.md §8.6 for the source.
     gamma_GC = get(mod.ext[:parameters], :gamma_GC, 0.42)
     agent_type = String(get(mod.ext[:parameters], :Type, ""))
 
@@ -79,22 +81,10 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         q_h2gc = mod.ext[:variables][:q_h2gc] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "h2_GC")
         ep     = mod.ext[:variables][:ep]    = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "ep")
 
-        # EP capacity and investment decision variables (per year).
-        # cap_EP_y[jy] = EP output capacity (MW_EP) in year jy.
-        # inv_EP[jy]   = new EP capacity investment (MW_EP) in year jy.
-        cap_EP_y = mod.ext[:variables][:cap_EP_y] = @variable(mod, [jy in JY], lower_bound = 0, base_name = "cap_EP")
-        inv_EP   = mod.ext[:variables][:inv_EP]   = @variable(mod, [jy in JY], lower_bound = 0, base_name = "inv_EP")
-
-        # Capacity evolution over years.
-        JY_vec = collect(JY)
-        first_jy = JY_vec[1]
-        mod.ext[:constraints][:cap_EP_init] = @constraint(mod, cap_EP_y[first_jy] == cap_ep_initial + inv_EP[first_jy])
-        for (k, jy) in enumerate(JY_vec)
-            k == 1 && continue
-            prev_jy = JY_vec[k - 1]
-            cname = Symbol("cap_EP_dyn_", jy)
-            mod.ext[:constraints][cname] = @constraint(mod, cap_EP_y[jy] == cap_EP_y[prev_jy] + inv_EP[jy])
-        end
+        # EP capacity and one-shot investment (same capacity in all weather scenarios).
+        cap_EP_y = mod.ext[:variables][:cap_EP_y] = @variable(mod, lower_bound = 0, base_name = "cap_EP")
+        inv_EP   = mod.ext[:variables][:inv_EP]   = @variable(mod, lower_bound = 0, base_name = "inv_EP")
+        mod.ext[:constraints][:cap_EP_init] = @constraint(mod, cap_EP_y == cap_ep_initial + inv_EP)
 
         # Net positions: H2 purchased (negative), H2-GCs purchased (negative),
         # EP sold (positive).
@@ -121,7 +111,7 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
                     - λ_EP[jh, jd, jy]      * ep[jh, jd, jy]
                 ) for jh in JH, jd in JD)
             )
-            loss_total[jy] = @expression(mod, loss_G[jy] + F_cap * cap_EP_y[jy])
+            loss_total[jy] = @expression(mod, loss_G[jy] + F_cap * cap_EP_y)
         end
         mod.ext[:expressions][:loss_GreenOfftaker] = loss_G
 
@@ -154,7 +144,7 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         )
 
         # Single capacity limit based on EP output; H₂ intake is implied via stoichiometry ep = alpha * h2_in.
-        mod.ext[:constraints][:cap_ep]    = @constraint(mod, [jh in JH, jd in JD, jy in JY], ep[jh, jd, jy] <= cap_EP_y[jy])
+        mod.ext[:constraints][:cap_ep] = @constraint(mod, [jh in JH, jd in JD, jy in JY], ep[jh, jd, jy] <= cap_EP_y)
 
         # GC purchase upper bound: cannot buy more green certificates than
         # the H₂ actually consumed (each certificate certifies 1 MWh_H2).
@@ -177,7 +167,7 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
             + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             # Fixed annualised investment cost, summed over model years (no W weighting).
-            + F_cap * sum(cap_EP_y[jy] for jy in JY)
+            + F_cap * cap_EP_y
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -281,18 +271,11 @@ function add_offtaker_agent_to_planner!(planner::Model, id::String, mod::Model,
         gc_h_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_h_buy_$(id)")
         ep_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="ep_sell_$(id)")
 
-        cap_EP_y = @variable(planner, [jy in JY], lower_bound=0, base_name="cap_EP_$(id)")
-        inv_EP = @variable(planner, [jy in JY], lower_bound=0, base_name="inv_EP_$(id)")
-        JY_vec = collect(JY)
-        first_jy = JY_vec[1]
-        @constraint(planner, cap_EP_y[first_jy] == EP_sell_bar_initial + inv_EP[first_jy])
-        for (k, jy) in enumerate(JY_vec)
-            k == 1 && continue
-            prev_jy = JY_vec[k - 1]
-            @constraint(planner, cap_EP_y[jy] == cap_EP_y[prev_jy] + inv_EP[jy])
-        end
+        cap_EP_y = @variable(planner, lower_bound=0, base_name="cap_EP_$(id)")
+        inv_EP = @variable(planner, lower_bound=0, base_name="inv_EP_$(id)")
+        @constraint(planner, cap_EP_y == EP_sell_bar_initial + inv_EP)
 
-        @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] <= cap_EP_y[jy])
+        @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] <= cap_EP_y)
         @constraint(planner, [jh in JH, jd in JD, jy in JY], ep_sell[jh, jd, jy] == alpha * h_buy[jh, jd, jy])
         @constraint(planner, [jh in JH, jd in JD, jy in JY], gc_h_buy[jh, jd, jy] <= h_buy[jh, jd, jy])
 
@@ -308,7 +291,7 @@ function add_offtaker_agent_to_planner!(planner::Model, id::String, mod::Model,
         for jy in JY
             welfare_per_year[jy] = @expression(planner,
                 -(sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD)
-                  + F_cap * cap_EP_y[jy])
+                  + F_cap * cap_EP_y)
             )
         end
         var_dict[:offtaker_h_buy][id] = h_buy

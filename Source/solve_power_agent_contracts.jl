@@ -67,24 +67,18 @@ function solve_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
                 - K_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
-        loss_total[jy] = @expression(mod, loss_VRES[jy] + F_cap * cap_VRES[jy])
+        loss_total[jy] = @expression(mod, loss_VRES[jy] + F_cap * cap_VRES)
     end
     mod.ext[:expressions][:loss_VRES] = loss_VRES
 
-    # Capacity ADMM equality split (per-agent): same augmented Lagrangian as
-    # in solve_power_agent.jl. In the contracts case VRES capacity supports
-    # BOTH the pool flow and the PPA flow, which is reflected in how z_cap
-    # is derived inside ADMM_subroutine_contracts.jl. See DOCUMENTATION.md
-    # §5.4 for the formal model and units check.
-    z_cap   = get(mod.ext[:parameters], :z_cap, zeros(length(JY)))
-    λ_cap   = get(mod.ext[:parameters], :λ_cap, zeros(length(JY)))
+    z_cap   = get(mod.ext[:parameters], :z_cap, 0.0)
+    λ_cap   = get(mod.ext[:parameters], :λ_cap, 0.0)
     ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
     cap_pen = haskey(mod.ext[:parameters], :z_cap) ?
-        sum(λ_cap[jy] * (cap_VRES[jy] - z_cap[jy]) +
-            ρ_cap/2 * (cap_VRES[jy] - z_cap[jy])^2 for jy in JY) : 0.0
+        λ_cap * (cap_VRES - z_cap) + ρ_cap/2 * (cap_VRES - z_cap)^2 : 0.0
 
     mod.ext[:objective] = @objective(mod, Min,
-        gamma * sum(loss_total[jy] for jy in JY)
+        gamma * (F_cap * cap_VRES + sum(P[jy] * loss_VRES[jy] for jy in JY))
         + (1 - gamma) * cvar_VRES
         + sum(ρ_elec/2 * W[jd, jy] * (g_EOM[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * (g_EOM[jh, jd, jy] - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)

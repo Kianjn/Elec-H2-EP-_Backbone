@@ -68,17 +68,9 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
     q_h2gc = mod.ext[:variables][:q_h2gc] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "h2_GC")
     ep = mod.ext[:variables][:ep] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "ep")
 
-    cap_EP_y = mod.ext[:variables][:cap_EP_y] = @variable(mod, [jy in JY], lower_bound = 0, base_name = "cap_EP")
-    inv_EP = mod.ext[:variables][:inv_EP] = @variable(mod, [jy in JY], lower_bound = 0, base_name = "inv_EP")
-
-    JY_vec = collect(JY)
-    first_jy = JY_vec[1]
-    mod.ext[:constraints][:cap_EP_init] = @constraint(mod, cap_EP_y[first_jy] == cap_ep_initial + inv_EP[first_jy])
-    for (k, jy) in enumerate(JY_vec)
-        k == 1 && continue
-        prev_jy = JY_vec[k - 1]
-        mod.ext[:constraints][Symbol("cap_EP_dyn_", jy)] = @constraint(mod, cap_EP_y[jy] == cap_EP_y[prev_jy] + inv_EP[jy])
-    end
+    cap_EP_y = mod.ext[:variables][:cap_EP_y] = @variable(mod, lower_bound = 0, base_name = "cap_EP")
+    inv_EP = mod.ext[:variables][:inv_EP] = @variable(mod, lower_bound = 0, base_name = "inv_EP")
+    mod.ext[:constraints][:cap_EP_init] = @constraint(mod, cap_EP_y == cap_ep_initial + inv_EP)
 
     mod.ext[:expressions][:g_net_H2] = @expression(mod, -h2_in_pool)
     mod.ext[:expressions][:g_net_H2_GC] = @expression(mod, -q_h2gc)
@@ -88,7 +80,7 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
     h2_hpa_total = sum(h2_hpa_from[v] for v in hpa_h2)
     mod.ext[:constraints][:ep_from_h2] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
         ep[jh, jd, jy] == alpha * (h2_in_pool[jh, jd, jy] + sum(h2_hpa_from[v][jh, jd, jy] for v in hpa_h2)))
-    mod.ext[:constraints][:cap_ep] = @constraint(mod, [jh in JH, jd in JD, jy in JY], ep[jh, jd, jy] <= cap_EP_y[jy])
+    mod.ext[:constraints][:cap_ep] = @constraint(mod, [jh in JH, jd in JD, jy in JY], ep[jh, jd, jy] <= cap_EP_y)
     mod.ext[:constraints][:gc_cap] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
         q_h2gc[jh, jd, jy] <= h2_in_pool[jh, jd, jy] + sum(h2_hpa_from[v][jh, jd, jy] for v in hpa_h2))
     mod.ext[:constraints][:gc_mandate_yearly] = @constraint(mod, [jy in JY],
@@ -120,7 +112,7 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
                 - λ_EP[jh, jd, jy] * ep[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
-        loss_total[jy] = @expression(mod, loss_G[jy] + F_cap * cap_EP_y[jy])
+        loss_total[jy] = @expression(mod, loss_G[jy] + F_cap * cap_EP_y)
     end
     mod.ext[:expressions][:loss_GreenOfftaker] = loss_G
 
@@ -148,7 +140,7 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
         + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + obj_hpa
-        + F_cap * sum(cap_EP_y[jy] for jy in JY)
+        + F_cap * cap_EP_y
     )
 
     return mod

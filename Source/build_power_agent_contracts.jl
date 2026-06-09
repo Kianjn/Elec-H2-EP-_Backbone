@@ -68,17 +68,9 @@ function build_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
     P           = mod.ext[:parameters][:P]
 
     # ── Capacity and investment variables (same as base VRES) ───────────────
-    cap_VRES = mod.ext[:variables][:cap_VRES] = @variable(mod, [jy in JY], lower_bound=0, base_name="cap_VRES")
-    inv_VRES = mod.ext[:variables][:inv_VRES] = @variable(mod, [jy in JY], lower_bound=0, base_name="inv_VRES")
-
-    JY_vec = collect(JY)
-    first_jy = JY_vec[1]
-    mod.ext[:constraints][:cap_VRES_init] = @constraint(mod, cap_VRES[first_jy] == cap_initial + inv_VRES[first_jy])
-    for (k, jy) in enumerate(JY_vec)
-        k == 1 && continue
-        prev_jy = JY_vec[k - 1]
-        mod.ext[:constraints][Symbol("cap_VRES_dyn_", jy)] = @constraint(mod, cap_VRES[jy] == cap_VRES[prev_jy] + inv_VRES[jy])
-    end
+    cap_VRES = mod.ext[:variables][:cap_VRES] = @variable(mod, lower_bound=0, base_name="cap_VRES")
+    inv_VRES = mod.ext[:variables][:inv_VRES] = @variable(mod, lower_bound=0, base_name="inv_VRES")
+    mod.ext[:constraints][:cap_VRES_init] = @constraint(mod, cap_VRES == cap_initial + inv_VRES)
 
     # ── Generation split: EOM (pool) vs contract ────────────────────────────
     # g_EOM     = electricity sold to the day-ahead / spot market (MWh)
@@ -108,7 +100,7 @@ function build_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
     # ── Physical constraints ──────────────────────────────────────────────
     # Total generation limited by availability × capacity.
     mod.ext[:constraints][:cap] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
-        g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy] <= AF[jh, jd, jy] * cap_VRES[jy])
+        g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy] <= AF[jh, jd, jy] * cap_VRES)
 
     # PPA delivery cannot exceed PPA capacity at any hour.
     mod.ext[:constraints][:ppa_cap_limit] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
@@ -155,7 +147,7 @@ function build_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
         + sum(ρ_ppa/2 * W[jd, jy] * (g_ppa[jh, jd, jy] - g_bar_ppa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         # ppa_cap consensus: both parties must agree (penalty only, no separate price).
         + (ρ_ppa_cap/2) * (ppa_cap - g_bar_ppa_cap)^2
-        + F_cap * sum(cap_VRES[jy] for jy in JY)
+        + F_cap * cap_VRES
     )
 
     return mod

@@ -1,649 +1,151 @@
 # Multi-Agent Energy Market Simulation
 
-**Author:** Kian Jafarinejad — PhD Researcher at TU Delft ([K.Jafarinejad@tudelft.nl](mailto:K.Jafarinejad@tudelft.nl))
+> Competitive equilibrium for coupled electricity, hydrogen, certificate, and end-product markets — decentralised **ADMM** with a **social-planner** benchmark.
 
-*A multi-market, multi-agent equilibrium model with endogenous investment, risk aversion, and rigorous convergence diagnostics.*
+**Kian Jafarinejad** · PhD Researcher, TU Delft · [K.Jafarinejad@tudelft.nl](mailto:K.Jafarinejad@tudelft.nl)
 
-A multi-agent equilibrium model for coupled **electricity**, **hydrogen**, **green-certificate**, and **end-product** markets, solved via **ADMM** (Alternating Direction Method of Multipliers) with a centralised **social planner** benchmark.
+---
 
-The project offers **three entry points**. Each has a code name and an **economic label** (d’Aertrycke et al., 2018 — see `DOCUMENTATION.md` §4.4.3):
+## About
 
-| Script | Economic case |
+Julia model of a multi-agent energy system where independent firms trade across **five coupled spot markets**, with optional **endogenous investment** (VRES, electrolyzer, green offtaker) and **CVaR risk aversion**. A centralised social planner solves the same technology stack as a welfare benchmark.
+
+| | |
 |---|---|
-| **`social_planner.jl`** | **Complete risk trading** — centralised planner with one social CVaR on aggregate welfare |
-| **`market_exposure.jl`** | **Incomplete risk trading** — decentralised ADMM; private per-agent CVaR (no explicit risk market) |
-| **`market_exposure_contracts.jl`** | **Incomplete risk trading with bilateral contracts** — same risk institution as ME, plus PPA/HPA pools |
-
-**Risk-neutral (`gamma = 1`):** SP is the welfare benchmark; ME (and ME+C) should match SP quantities and prices at ADMM convergence.
-
-**Risk-averse (`gamma < 1`):** SP is the **centralised risk-pooling** benchmark; ME/ME+C are **private-hedging** equilibria — different quantities and prices are expected. SP duals are still valid **risk-adjusted social shadow prices** per commodity; they are not meant to equal ADMM prices in that regime.
-
-Entry points:
-
-- **`market_exposure.jl`** — Distributed ADMM simulation (five markets, no bilateral contracts).
-- **`social_planner.jl`** — Centralised **complete risk trading** benchmark; prices from balance-constraint duals.
-- **`market_exposure_contracts.jl`** — Same incomplete-risk-trading ADMM as ME, with **two bilateral contract pools**:
-  - **PPA** (VRES -> GreenProducer, electricity + elec_GC bundled),
-  - **HPA** (GreenProducer -> GreenOfftaker, hydrogen + H2_GC equivalent bundled).
-  Both are **pay-as-produced** with contract capacity consensus via ADMM.
-
-At a high level:
-
-- **Agents** (generators, electrolyzer, offtakers, GC demand) each solve their own optimisation problem.
-- **Markets** (power, hydrogen, certificates, end product; plus **PPA and HPA contract pools** in the contracts case) are cleared by **prices** updated iteratively by ADMM.
-- A **social planner** model with a single welfare-maximising objective provides a rigorous benchmark for the decentralised ADMM solution.
+| **Theory & maths** | [DOCUMENTATION.md](DOCUMENTATION.md) — equilibrium (§4), formulation (§5), ADMM (§6), calibration (§9) |
+| **Configuration** | [Data/data.yaml](Data/data.yaml) |
+| **Outputs** | [DOCUMENTATION.md §12](DOCUMENTATION.md#12-output-files) |
 
 ---
 
-## Table of Contents
+## Entry points
 
-- [Overview](#overview)
-- [Features](#features)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Project Structure](#project-structure)
-- [Configuration](#configuration)
-- [Running the Model](#running-the-model)
-- [Output Files](#output-files)
-- [Visualisation & Analysis](#visualisation--analysis)
-- [How It Works](#how-it-works)
-- [Extending the Model](#extending-the-model)
-- [Troubleshooting](#troubleshooting)
-- [References](#references)
-- [License](#license)
+| Script | What it computes |
+|--------|------------------|
+| [`social_planner.jl`](social_planner.jl) | Centralised welfare optimum — **complete risk trading** |
+| [`market_exposure.jl`](market_exposure.jl) | Decentralised equilibrium via ADMM — **incomplete risk trading** |
+| [`market_exposure_contracts.jl`](market_exposure_contracts.jl) | Same as above + bilateral **PPA** (VRES→electrolyzer) and **HPA** (electrolyzer→green offtaker) pools |
+
+**Recommended order:** `social_planner.jl` → `market_exposure.jl` (ADMM warm-starts from planner prices, quantities, and capacities). See [DOCUMENTATION.md §6.6](DOCUMENTATION.md#66-warm-start-from-social-planner).
+
+At `gamma = 1`, decentralised and planner solutions should agree; at `gamma < 1`, they represent different risk institutions — details in [§4.8](DOCUMENTATION.md#48-literature-labels-and-price-interpretation-daertrycke-et-al).
 
 ---
 
-## Overview
+## Requirements
 
-This project simulates a multi-agent energy system where independent agents (generators, consumers, hydrogen producers, offtakers) trade across five interconnected markets. The agents are coordinated through ADMM, a distributed optimisation algorithm that iteratively adjusts prices until all markets clear simultaneously.
+| Component | Purpose |
+|-----------|---------|
+| [Julia](https://julialang.org/downloads/) **1.9+** | Runtime (tested on 1.10) |
+| [Gurobi](https://www.gurobi.com/) **10+** | ADMM agent subproblems |
+| [Ipopt](https://coin-or.github.io/Ipopt/) via `Ipopt.jl` | Social planner QCP |
 
-A centralized **social planner** benchmark (**complete risk trading**) maximises risk-adjusted social welfare in a single optimization, providing theoretical prices and quantities. At `gamma = 1`, the distributed ADMM (**incomplete risk trading**) solution can be compared against it; at `gamma < 1`, SP and ADMM answer different risk-sharing institutions (see `DOCUMENTATION.md` §4.4.3).
-
-If you are mainly interested in the **mathematical formulation** and algorithmic details, see `DOCUMENTATION.md` (technical documentation). This `README` focuses on **installation**, **configuration**, and **how to run and interpret** the model.
-
-Both the ADMM and social planner use the **same problem definition** from the `Source/` folder. Changing a constraint or objective in one place automatically propagates to both.
-
----
-
-## Features
-
-- **Five coupled base markets**: Electricity, Electricity Guarantees of Origin (GC), Hydrogen, Hydrogen GC, End Product (plus optional **PPA + HPA bilateral pools** in `market_exposure_contracts.jl`)
-- **Seven agent types**: VRES generator, conventional generator, elastic consumer, electrolyzer, green offtaker, grey offtaker, EP importer
-- **More realistic conventional fleet proxy**: Conventional generation uses a 3-stage increasing marginal-cost curve (coal-like, biomass-like, NG-like), with configurable stage shares and technology-specific stage base costs plus a final high-load marginal cost.
-- **Endogenous capacity investment**: VRES, electrolyzer, and green offtaker decide yearly capacity and investment (MW), with fixed annualised CAPEX proportional to installed capacity.
-- **Per-agent capacity ADMM equality split**: Capacity consensus is enforced via a textbook per-agent split `x_cap = z_cap` with explicit dual `λ_cap` and per-agent penalty `ρ_cap`. This restores the missing first-order force that drives `x → z` exactly in the limit and removes the persistent capacity-residual issue of pure-quadratic penalty designs. See `DOCUMENTATION.md` §5.4 for the formal model and justification.
-- **Optional risk aversion (CVaR)**: In ADMM, VRES, electrolyzer, and green offtaker use **private** per-agent CVaR (`gamma`, `beta` in `data.yaml`). In the social planner, one **social** CVaR applies to aggregate welfare. `gamma = 1.0` is risk-neutral; `gamma < 1.0` is the **incomplete-risk-trading** (ADMM) vs **complete-risk-trading** (SP) pair — see `DOCUMENTATION.md` §4.4.3.
-- **Distributed ADMM**: Per-agent QP subproblems coordinated by iterative price updates
-- **Three-stage adaptive penalty (Boyd rule)**: Market-specific ρ adaptation with (1) normal rp/rd balancing, (2) a gentle push far from tolerance, and (3) a fixed-ρ stability zone near convergence. The same three regimes are applied PER AGENT to the capacity penalties `ρ_cap[m]`, so each capacity-owning agent has an independent controller.
-- **Advanced ADMM controller**: Scale-aware dual-step damping, per-market step-scale adaptation, and best-iterate checkpoint/restart logic for anti-stall robustness in multi-scenario runs.
-  - Implemented consistently in both `market_exposure.jl` and `market_exposure_contracts.jl`; contracts adds only PPA/HPA-specific states and updates.
-- **Centralised benchmark (complete risk trading)**: Social planner solved with IPOPT (SP only) for stable direct QCP dual price extraction (valid at `gamma = 1` and `gamma < 1` as risk-adjusted shadow prices); ADMM remains on Gurobi
-- **Green certificate mandate**: 42% H₂ GC requirement for offtakers (configurable)
-- **Representative days**: Temporal reduction from 8760 hours to a small set of representative days with weights
-- **Quadratic demand**: Elastic electricity and GC demand with inverse-demand parameterisation
-- **Comprehensive diagnostics**: Convergence plots, market histories, GC compliance, per-agent quantities, and capacity-investment summaries
-
----
-
-## Prerequisites
-
-### Julia
-
-- **Julia 1.9+** (tested with 1.10). Download from [julialang.org](https://julialang.org/downloads/).
-- Add Julia to your system PATH so that `julia` is available from the command line.
-
-### Gurobi Optimizer
-
-- **Gurobi 10.0+** with a valid license. Academic licenses are free: [gurobi.com/academia](https://www.gurobi.com/academia/academic-program-and-licenses/).
-- After installing Gurobi, ensure the `GUROBI_HOME` environment variable is set and `grbgetkey` has been used to activate the license.
-- The Julia `Gurobi.jl` package will automatically link to the installed Gurobi library.
-
-### Operating System
-
-- Tested on **Windows 10/11**. Should work on macOS and Linux with appropriate path adjustments.
+Academic Gurobi licenses: [gurobi.com/academia](https://www.gurobi.com/academia/academic-program-and-licenses/).
 
 ---
 
 ## Installation
 
-### Step 1: Clone the Repository
-
 ```bash
 git clone <repository-url>
 cd Now
-```
-
-Or download and extract the project archive into a folder (e.g. `Now/`).
-
-### Step 2: Install Julia Dependencies
-
-Open a terminal in the project root (`Now/`) and run:
-
-```bash
 julia --project=. -e "using Pkg; Pkg.instantiate()"
 ```
 
-This reads `Project.toml` and `Manifest.toml` to install the exact package versions:
-
-| Package | Purpose |
-|---|---|
-| `JuMP` | Algebraic modelling for optimization |
-| `Gurobi` | ADMM solver backend (requires Gurobi installation + license) |
-| `Ipopt` | Social-planner QCP solver backend (SP-only) |
-| `DataFrames` | Tabular data manipulation |
-| `CSV` | Read/write CSV files |
-| `YAML` | Parse `data.yaml` configuration |
-| `MathOptInterface` | Solver status constants (e.g. `MOI.OPTIMAL`) |
-| `ProgressBars` | ADMM iteration progress bar |
-| `TimerOutputs` | Profiling ADMM loop sections |
-| `ArgParse` | Command-line argument parsing (future use) |
-| `DataStructures` | Additional data structures (available if needed) |
-
-### Step 3: Verify Gurobi
+Verify Gurobi:
 
 ```bash
-julia --project=. -e "using Gurobi; env = Gurobi.Env(); println(\"Gurobi OK\")"
+julia --project=. -e "using Gurobi; Gurobi.Env(); println(\"Gurobi OK\")"
 ```
 
-You should see `Gurobi OK` (plus license information). If this fails, check your Gurobi installation and license.
-
-### Step 4: Verify Input Data
-
-Ensure the following files exist:
-
-```
-Data/data.yaml
-Input/timeseries_2021.csv
-Input/output_2021/decision_variables_short.csv
-Input/output_2021/ordering_variable.csv
-```
-
-The timeseries CSV must have columns: `Time`, `SOLAR`, `LOAD_E`, `LOAD_H`, `LOAD_EP`, `WIND` (192 rows for 8 representative days × 24 hours, or 8760 for full year).
-
-The representative-days CSV must have columns: `periods`, `weights`, `selected_periods`.
-
----
-
-## Quick Start
-
-The following minimal sequence should work on a properly configured machine:
-
-1. **Instantiate Julia environment**
-
-   ```bash
-   julia --project=. -e "using Pkg; Pkg.instantiate()"
-   ```
-
-2. **Check that Gurobi is available to Julia**
-
-   ```bash
-   julia --project=. -e "using Gurobi; Gurobi.Env(); println(\"Gurobi OK\")"
-   ```
-
-3. **Run the distributed ADMM simulation**
-
-   ```bash
-   julia --project=. market_exposure.jl
-   ```
-
-4. **Run the social planner benchmark**
-
-   ```bash
-   julia --project=. social_planner.jl
-   ```
-
-5. **Run the ADMM simulation with bilateral PPA + HPA contracts** (optional)
-
-   ```bash
-   julia --project=. market_exposure_contracts.jl
-   ```
-
-   This produces the same major ADMM outputs plus `PPAs.csv`, `HPAs.csv`, and `Green_Agents_Detail.csv` (contracted capacity, transferred energy, and contract prices).
-
-6. **Optionally generate figures** (after both runs have completed)
-
-   ```bash
-   python visualization/visualize_results.py
-   ```
-
-For a deeper understanding of what these scripts do internally, see the **How It Works** section below and the full `DOCUMENTATION.md`.
-
-## Project Structure
-
-```
-Now/
-├── market_exposure.jl          # ADMM — incomplete risk trading (entry point)
-├── social_planner.jl           # Complete risk trading benchmark (entry point)
-├── market_exposure_contracts.jl # ADMM + PPA/HPA — incomplete risk trading w/ contracts (entry point)
-├── Project.toml                # Julia dependencies
-├── Manifest.toml               # Dependency lock file
-├── DOCUMENTATION.md            # Full technical documentation
-├── README.md                   # This file
-│
-├── Data/
-│   └── data.yaml               # All configuration: agents, markets, ADMM
-│
-├── Input/
-│   ├── timeseries_<year>.csv   # Full-year hourly profiles (normalized 0–1)
-│   └── output_<year>/
-│       ├── decision_variables_short.csv   # Representative days
-│       └── ordering_variable.csv          # Ordering matrix
-│
-├── Source/                     # All problem definition and algorithm logic
-│   ├── define_*.jl             # Parameter and market setup
-│   ├── build_*.jl              # JuMP model construction (ADMM + planner)
-│   ├── solve_*.jl              # Per-iteration objective reset + optimize
-│   ├── ADMM.jl                 # Main ADMM coordination loop
-│   ├── ADMM_subroutine.jl      # Per-agent ADMM step
-│   ├── update_rho.jl           # Adaptive penalty update
-│   ├── save_results.jl         # Market-exposure CSV output
-│   ├── save_results_contracts.jl # Contract-aware CSV output (PPAs.csv, HPAs.csv, Green_Agents_Detail.csv)
-│   ├── ADMM_contracts.jl      # ADMM loop with PPA + HPA pools
-│   ├── ADMM_subroutine_contracts.jl
-│   ├── update_rho_contracts.jl
-│   ├── build_power_agent_contracts.jl
-│   ├── build_H2_agent_contracts.jl
-│   └── save_social_planner_results.jl  # Planner CSV output
-│
-├── market_exposure_results/    # Output from market_exposure.jl
-├── market_exposure_contracts_results/  # Output from market_exposure_contracts.jl
-└── social_planner_results/     # Output from social_planner.jl
-```
-
----
-
-## Configuration
-
-All configuration is in **`Data/data.yaml`**. The file is fully annotated with inline comments.
-
-### Key Settings
-
-```yaml
-General:
-  nTimesteps: 24      # Hours per representative day
-  nReprDays: 3        # Number of representative days
-  nYears: 1           # Fallback year count if ADMM.nScenarioYears is not set
-  base_year: 2021     # Calendar year for timeseries
-
-ADMM:
-  rho_initial: 1.0    # Starting penalty weight
-  nScenarioYears: 10  # Scenario years for market_exposure*.jl (e.g., 2021..2030)
-  max_iter: 10000     # Max ADMM iterations
-  epsilon: 0.1        # Convergence tolerance (L2 norm)
-```
-
-### Adding a New Agent
-
-1. Add the agent block under the appropriate section in `data.yaml` (e.g. `Power:`, `Hydrogen:`, `Hydrogen_Offtaker:`).
-2. Set the `Type` field to one of the supported types (`VRES`, `Conventional`, `Consumer`, `GreenProducer`, `GreenOfftaker`, `GreyOfftaker`, `EPImporter`, `GC_Demand`).
-3. Provide all required parameters for that type.
-4. Run — no code changes needed. The `define_common_parameters!` function automatically classifies the agent and assigns it to the correct markets.
-
-### Contracts Configuration (market_exposure_contracts.jl only)
-
-Under `PPAs:` and `HPAs:` in `data.yaml`:
-
-```yaml
-PPAs:
-  initial_price: 60.0    # €/MWh — seed for λ_ppa (clearing price state)
-  rho_initial: 0.5
-  pricing_mode: "endogenous_clearing"  # or "fixed" / "indexed"
-  fixed_strike: 60.0
-  index_terms: {constant: 0.0, elec: 1.0, elec_GC: 0.0, H2: 0.0, H2_GC: 0.0, EP: 0.0}
-
-HPAs:
-  initial_price: 60.0    # €/MWh_H2 — seed for λ_hpa (clearing price state)
-  rho_initial: 0.5
-  pricing_mode: "endogenous_clearing"  # or "fixed" / "indexed"
-  fixed_strike: 60.0
-  index_terms: {constant: 0.0, elec: 0.0, elec_GC: 0.0, H2: 1.0, H2_GC: 0.0, EP: 0.0}
-```
-
-Both pools enforce scalar capacity consensus (`ppa_cap`, `hpa_cap`) with no separate capacity price. Contract settlement uses strike prices (`K_ppa`, `K_hpa`): by default these are endogenous (`K = λ`), but `fixed` and `indexed` modes are available for scenario analysis.
-
-### Scenarios and Risk Aversion
-
-- `ADMM.nScenarioYears` controls the active scenario horizon for both ADMM entry points and the social planner benchmark (for aligned comparisons).
-- `General.nYears` acts as fallback if `ADMM.nScenarioYears` is not provided.
-- Risk aversion effects (`gamma < 1`) are meaningful only with multiple scenarios.
-
-**Case names when `gamma < 1`:**
-
-| Entry point | Name |
-|---|---|
-| `social_planner.jl` | **Complete risk trading** — social CVaR on aggregate welfare; `Market_Prices.csv` = risk-adjusted social shadow prices |
-| `market_exposure.jl` | **Incomplete risk trading** — per-agent CVaR; ADMM prices = decentralised equilibrium prices |
-| `market_exposure_contracts.jl` | **Incomplete risk trading with bilateral contracts** (PPA/HPA) |
-
-At `gamma = 1`, SP and ME should agree; at `gamma < 1`, they generally should not. Full discussion: `DOCUMENTATION.md` §4.4.3.
-
-### Conventional Generator Staging
-
-The conventional unit can be configured as a 3-stage increasing-cost stack in `data.yaml`:
-
-```yaml
-Power:
-  Gen_Conv_01:
-    Type: Conventional
-    Capacity: 100.0
-    StageCapacityShares: [0.333333, 0.333333, 0.333333]
-    StageBaseCosts: [35.0, 55.0, 85.0]   # €/MWh: coal, biomass, NG start MC
-    FinalMarginalCost: 140.0              # €/MWh: MC at end of stage 3
-```
-
-Internally, the model normalizes capacity shares and constructs stage capacities from total `Capacity`, while:
-- stage costs are increasing with dispatch and across stages,
-- stage transitions are continuous (`end MC of stage s = start MC of stage s+1`),
-- total capacity remains unchanged, and
-- changing `StageCapacityShares` changes the aggregate average variable cost of the conventional fleet.
-
-Why these defaults are realistic:
-- `StageBaseCosts = [35, 55, 85]` EUR/MWh approximates a thermal merit order from lower-variable-cost baseload-like blocks to higher-variable-cost flexible gas blocks.
-- `FinalMarginalCost = 140` EUR/MWh represents the high-load tail where less efficient/flexible thermal output sets the margin.
-- Continuity across stage boundaries avoids artificial jumps in short-run dispatch costs while keeping the technology-stack interpretation.
-
-### Changing Tolerances
-
-The ADMM stopping rule uses Boyd-style scaled tolerances per market:
-
-`ε_pri = ε_abs * sqrt(n_slots) + ε_rel * scale_primal`,  
-`ε_dual = ε_abs * sqrt(n_slots) + ε_rel * scale_dual`.
-
-`epsilon` (or `epsilon_abs`) controls the absolute part for `market_exposure`.  
-For the contracts case, `epsilon_contracts` can be set separately (falls back to `epsilon` if omitted).
-
-Because residuals are L2 norms over all slots (hours × representative days × years), raw residual magnitudes increase with horizon size; compare runs using RMS-style interpretation, not raw norms alone.
-
----
-
-## Running the Model
-
-### Market Exposure (ADMM — incomplete risk trading)
+Ensure input data exists under `Data/` and `Input/` (see [DOCUMENTATION.md §9.7](DOCUMENTATION.md#97-weather-and-representative-day-inputs)). To regenerate weather scenarios from ERA5:
 
 ```bash
+python Input/generate_weather_scenarios.py
+```
+
+---
+
+## Usage
+
+```bash
+# 1. Benchmark (run first)
+julia --project=. social_planner.jl
+
+# 2. Decentralised equilibrium
 julia --project=. market_exposure.jl
-```
 
-This will:
-1. Load configuration and timeseries.
-2. Build per-agent JuMP models.
-3. Run the ADMM coordination loop (progress bar shown).
-4. Print convergence status, iteration count, and final residuals.
-5. Write results to `market_exposure_results/`.
-
-**Typical runtime:** 1–30 minutes depending on `max_iter`, `epsilon`, and system hardware.
-
-### Market Exposure with Contracts (incomplete risk trading + PPA/HPA)
-
-```bash
+# 3. Optional — bilateral contract pools
 julia --project=. market_exposure_contracts.jl
 ```
 
-This runs the same **incomplete-risk-trading** ADMM architecture as `market_exposure.jl`, but with:
-- **PPA pool**: VRES commits capacity and delivers electricity+elec_GC to GreenProducer pay-as-produced.
-- **HPA pool**: GreenProducer commits H2 capacity and delivers hydrogen+H2_GC equivalent to GreenOfftaker pay-as-produced.
+Results are written to `social_planner_results/`, `market_exposure_results/`, and `market_exposure_contracts_results/`.
 
-Outputs go to `market_exposure_contracts_results/`, including `PPAs.csv`, `HPAs.csv`, and `Green_Agents_Detail.csv`.
-
-**Typical runtime:** Similar to market_exposure; convergence is typically achieved within 100–500 iterations with the adaptive ρ and ε logic.
-
-### Social Planner (complete risk trading benchmark)
-
-```bash
-julia --project=. social_planner.jl
-```
-
-This will:
-1. Load the same configuration and timeseries.
-2. Build a single centralised social-planner model (epigraph + social CVaR structure).
-3. Solve it as a convex QCP with the SP-only solver from `Data/data.yaml` (`SocialPlanner.solver`, default `ipopt`), then extract commodity prices from balance-constraint duals (risk-adjusted shadow prices when `gamma < 1`).
-4. Write results to `social_planner_results/`.
-
-Why SP uses IPOPT by default:
-- On this model family, Gurobi can return a primal-optimal convex QCP solution but still fail to return usable QCP duals (prices) on large/scaled runs.
-- IPOPT provides stable dual multipliers for the social-planner QCP benchmark in this workflow.
-- ADMM subproblems continue using Gurobi; only `social_planner.jl` switches solver.
-
-### Comparing Results
-
-- **`gamma = 1`:** Compare `market_exposure_results/` to `social_planner_results/` to verify that ADMM converges toward the SP benchmark (quantities and prices).
-- **`gamma < 1`:** SP (**complete risk trading**) and ME (**incomplete risk trading**) are different institutions; compare **`Risk_Metrics.csv`** (expected social welfare, ex-post social CVaR, gap vs SP). Do not expect price or quantity equality. See `DOCUMENTATION.md` §4.4.3 and §6.6.
-
----
-
-## Output Files
-
-### Market Exposure (`market_exposure_results/`)
-
-| File | Description |
-|---|---|
-| `ADMM_Convergence.csv` | Primal and dual residuals per iteration for all 5 markets; includes aggregate `cap_primal` / `cap_dual` (L2 norm over agents) **and** per-agent columns `cap_primal_<m>` / `cap_dual_<m>` from the equality-split capacity ADMM |
-| `ADMM_Diagnostics.csv` | ρ, mean price, mean imbalance per iteration for all markets; the legacy `cap_rho` column is replaced by per-agent `cap_rho_<m>` columns (one per cap-owning agent) |
-| `Capacity_Consensus.csv` | (new) Per-iteration, per-agent, per-year snapshot of the capacity equality split: `iter, AgentID, jy, x_cap, z_cap, lambda_cap, rho_cap, primal_local, dual_local`. Diagnostic file for the per-agent ADMM split — use this to identify the agent / year that gates capacity convergence. See `DOCUMENTATION.md` §5.4 and §11. |
-| `Electricity_Market_History.csv` | Per-iteration history for the electricity market |
-| `Hydrogen_Market_History.csv` | Per-iteration history for the hydrogen market |
-| `Electricity_GC_Market_History.csv` | Per-iteration history for the elec-GC market |
-| `H2_GC_Market_History.csv` | Per-iteration history for the H₂-GC market |
-| `End_Product_Market_History.csv` | Per-iteration history for the EP market |
-| `Agent_Summary.csv` | Agent group membership and per-agent objective value at the final iteration |
-| `Agent_Quantities_Final.csv` | Final-iteration net quantities per agent per market (sums over all (h,d,y)) |
-| `Offtaker_GC_Diagnostics.csv` | Green-certificate compliance per offtaker |
-| `H2_Producer_Diagnostics.csv` | GC-to-production ratio for electrolyzers |
-| `Capacity_Investments.csv` | For VRES, electrolyzer, and green offtaker: per-year installed capacity and investment (MW) at the final ADMM iteration |
-| `TimerOutput.yaml` | Profiling data (time per ADMM section) |
-
-### Market Exposure with Contracts (`market_exposure_contracts_results/`)
-
-`market_exposure_contracts.jl` produces the **same major ADMM outputs** as `market_exposure.jl` (ADMM_Convergence, ADMM_Diagnostics, Capacity_Consensus, 5× Market_History, Agent_Summary, Market_Prices), with additional PPA/HPA columns for convergence and diagnostics. The capacity columns and `Capacity_Consensus.csv` from the per-agent equality split (§5.4) are mirrored here. It adds focal contract outputs:
-
-| File | Description |
-|---|---|
-| `PPAs.csv` | Per-VRES summary: `capacity_contracted_MW`, `energy_transferred_MWh`, `ppa_price_EUR_per_MWh` |
-| `HPAs.csv` | Per-GreenProducer summary: `capacity_contracted_MW`, `energy_transferred_MWh`, `hpa_price_EUR_per_MWh` |
-| `Green_Agents_Detail.csv` | Per-agent breakdown for PPA participants (VRES, GreenProducer): total capacity, contracted vs pool energy, contract/pool prices |
-
-**Contract model**:
-- **PPA**: VRES commits `ppa_cap` (MW) and delivers `g_ppa` pay-as-produced at strike `K_ppa` (default `K_ppa = λ_ppa`).
-- **HPA**: GreenProducer commits `hpa_cap` (MW_H2) and delivers `h2_hpa` pay-as-produced at strike `K_hpa` (default `K_hpa = λ_hpa`).
-- If contracted production is zero at a timestep, delivery/payment are zero at that timestep.
-
-### Social Planner (`social_planner_results/`)
-
-Complete-risk-trading benchmark outputs:
-
-| File | Description |
-|---|---|
-| `Market_Prices.csv` | Commodity shadow prices (duals of balance constraints): expected marginal social value at `gamma = 1`, **risk-adjusted** marginal social value at `gamma < 1` |
-| `Risk_Metrics.csv` | Expected social welfare, social CVaR, $\alpha$; see `DOCUMENTATION.md` §6.6 |
-| `Social_Welfare_Per_Year.csv` | Aggregate welfare and loss per scenario year |
-| `Agent_Summary.csv` | Per-agent total quantity and ADMM-style objective value (cost − revenue) evaluated at planner prices |
-| `Risk_Metrics.csv` | Same metrics as SP; includes `sum_private_CVaR` and gap vs SP when planner results exist |
-| `Private_CVaR_By_Agent.csv` | Private CVaR per risk-averse agent (when `gamma < 1`) |
-| `Capacity_Investments_Planner.csv` | For VRES, electrolyzer, and green offtaker: per-year installed capacity and investment (MW) in the planner solution |
-
----
-
-## Visualisation & Analysis
-
-The folder `visualization/` contains a Python script for **side-by-side comparison** of the ADMM market-exposure results and the social planner benchmark:
-
-- **File**: `visualization/visualize_results.py`
-- **Inputs** (expected to exist after running both Julia scripts):
-  - `social_planner_results/Market_Prices.csv`
-  - `social_planner_results/Agent_Summary.csv`
-  - `market_exposure_results/Market_Prices.csv`
-  - `market_exposure_results/Agent_Quantities_Final.csv`
-  - Other diagnostic CSVs in `market_exposure_results/`
-- **Outputs**:
-  - Publication-ready figures in `visualization/figures/` (`.png` and `.pdf`), including:
-    - Price differences (social planner vs ADMM) per market
-    - Quantity comparison per agent
-    - Price evolution over time
-    - ADMM convergence plots (primal/dual residuals)
-    - Market history (price and imbalance)
-    - Price heatmaps (hour-of-day vs representative day)
-
-### Python environment
-
-The script uses standard scientific Python packages:
-
-- `pandas`
-- `numpy`
-- `matplotlib`
-
-You can install them, for example, via:
+**Figures** (after planner + market-exposure runs):
 
 ```bash
 pip install pandas numpy matplotlib
-```
-
-Then run:
-
-```bash
 python visualization/visualize_results.py
 ```
 
-For notebook-style use, you can also open the script in an IDE and execute the `# %%` cells interactively.
+---
+
+## Project structure
+
+```
+Now/
+├── social_planner.jl              # Centralised benchmark
+├── market_exposure.jl             # ADMM — five markets
+├── market_exposure_contracts.jl   # ADMM + PPA/HPA
+├── Data/data.yaml                 # All configuration
+├── Input/                         # Timeseries & representative days
+├── Source/                        # Agents, markets, ADMM, planner
+├── DOCUMENTATION.md               # Full technical reference
+└── visualization/                 # Python comparison plots
+```
 
 ---
 
-## How It Works
+## Configuration (essentials)
 
-### ADMM (Alternating Direction Method of Multipliers)
+Edit **`Data/data.yaml`**:
 
-Each iteration:
+```yaml
+General:
+  nTimesteps: 24
+  nReprDays: 8
+  base_year: 2021
 
-1. **Agent solves**: Each agent independently minimises its cost minus revenue plus an ADMM quadratic penalty that pushes its net position toward a market consensus target.
-2. **Imbalance**: Sum of all agents' net positions in each market. Should be zero at equilibrium.
-3. **Price update**: prices are updated in the **direction of imbalance**. In compact form for a given market $k$:
-
-   ```math
-   \lambda_{k}^{(t+1)} = \lambda_{k}^{(t)} - \eta_k^{(t)} \,\rho_k^{(t)} \, r_k^{(t)},
-   ```
-
-   where $r_k^{(t)}$ is the current imbalance (sum of net positions), $\rho_k^{(t)}$ is the penalty weight, and $\eta_k^{(t)} \in (0,1]$ is a residual-aware step size. **Excess supply** ($r_k>0$) reduces prices; **excess demand** ($r_k<0$) increases prices.
-4. **Penalty update**:
-   - `update_rho!` applies residual-balancing updates:
-     - increase `ρ` when primal residual dominates dual,
-     - decrease `ρ` when dual residual dominates primal,
-     - otherwise keep `ρ`.
-   - The same pattern is used for per-agent capacity penalties.
-5. **Convergence**: Stops when all markets have both primal and dual residuals below tolerance.
-
-### Social Planner (complete risk trading)
-
-Solves a single convex QCP maximising **risk-adjusted social welfare** (epigraph + social CVaR when `gamma < 1`):
-
-```math
-\max \;\gamma \sum_y SW_y - (1-\gamma)\,\mathrm{CVaR}_\text{social}(-SW)
+ADMM:
+  nScenarioYears: 10    # weather scenarios for market_exposure*.jl
+  max_iter: 1000
+  epsilon: 0.1          # convergence tolerance (Boyd-scaled)
+  gamma: 1.0            # 1 = risk-neutral; 0.5 = risk-averse
+  beta: 0.95            # CVaR tail level (see §4.10)
 ```
 
-subject to:
-- All individual agent constraints (capacity, conversion, GC mandates).
-- Market-clearing constraints (supply = demand in each market).
-
-Equilibrium prices are the **dual variables** (shadow prices) of the balance constraints. At `gamma = 1` these are expected marginal social values; at `gamma < 1` they are **risk-adjusted** marginal social values for the complete-risk-trading benchmark (still valid commodity prices for SP).
-
-### Market Coupling (market_exposure.jl)
-
-```
-Electricity Market  ←──  VRES, Conventional, Consumer, Electrolyzer
-        │
-        ├──→  Elec GC Market  ←──  VRES, Electrolyzer, GC Demand
-        │
-        └──→  Electrolyzer  ──→  H₂ Market  ←──  Green Offtaker
-                    │
-                    └──→  H₂ GC Market  ←──  Green Offtaker, Grey Offtaker
-                                │
-                                └──→  EP Market  ←──  Green, Grey, Importer  ──→  D_EP
-```
-
-### Market Coupling with Contracts (market_exposure_contracts.jl)
-
-In the contracts case, two bilateral pools are added:
-
-```
-VRES  ──g_EOM──→  Electricity Market  ←──  Consumer, GreenProducer (e_in_pool)
-  │
-  └──g_ppa──→  PPA Pool  ←──  GreenProducer (g_ppa_from)
-       (pay-as-produced at λ_ppa; ppa_cap agreed via ADMM consensus)
-
-GreenProducer ──h2_pool──→ Hydrogen/H2_GC markets
-      │
-      └──h2_hpa──→ HPA Pool ←── GreenOfftaker (h2_hpa_from)
-           (pay-as-produced at λ_hpa; hpa_cap agreed via ADMM consensus)
-```
-
-VRES splits generation into `g_EOM` and `g_ppa`. GreenProducer uses `e_in_pool + g_ppa_from` for electrolysis, then splits hydrogen sales between pool and HPA (`h2_out - h2_hpa` to pool, `h2_hpa` to HPA). Both contracts are pay-as-produced: if output is zero at a timestep, delivery/payment are zero.
-
----
-
-## Extending the Model
-
-### Adding a New Agent Type
-
-1. Create `Source/define_<type>_parameters.jl` to populate `mod.ext[:parameters]`.
-2. Create `Source/build_<type>_agent.jl` with:
-   - `build_<type>_agent!()` for ADMM (with λ/ρ/ḡ penalty terms).
-   - `add_<type>_agent_to_planner!()` for social planner (same constraints, welfare expression, no ADMM terms).
-3. Create `Source/solve_<type>_agent.jl` to rebuild the objective each ADMM iteration.
-4. Add the agent section in `data.yaml`.
-5. Update `market_exposure.jl` and `social_planner.jl` to include the new files and iterate over the new agent group.
-6. Update `define_common_parameters.jl` to map the new type to the appropriate markets.
-
-### Adding a New Market
-
-1. Create `Source/define_<market>_market_parameters.jl`.
-2. Add `λ_<market>`, `g_bar_<market>`, `ρ_<market>` to the ADMM placeholder arrays in `define_common_parameters.jl`.
-3. Add the new market to `define_results.jl` (results["λ"], ADMM ρ, Imbalances, Residuals, Tolerance).
-4. Add the imbalance computation, residual computation, price update, and convergence check for the new market in `ADMM.jl`.
-5. Add the market-clearing constraint in `build_social_planner.jl`.
-
-### Changing Objectives or Constraints
-
-Simply edit the relevant `build_*_agent.jl` file. Both the ADMM version (`build_*_agent!`) and the planner version (`add_*_to_planner!`) live in the same file, so you can update them together and ensure consistency.
+Add agents by adding blocks under `Power:`, `Hydrogen:`, etc. — no code changes required for supported types. Full parameter reference: [DOCUMENTATION.md §9](DOCUMENTATION.md#9-configuration-reference-datayaml).
 
 ---
 
 ## Troubleshooting
 
-### "No Gurobi license found"
+| Issue | What to try |
+|-------|-------------|
+| Gurobi license error | Set `GUROBI_HOME`; run `grbgetkey` |
+| ADMM does not converge | Run SP first; lower `epsilon` or raise `max_iter`; see [§6.5](DOCUMENTATION.md#65-convergence-tolerances-boyd-style) |
+| SP non-optimal | Check `data.yaml` for infeasible capacities or demands |
 
-- Ensure `GUROBI_HOME` is set correctly.
-- Run `grbgetkey <your-key>` to activate the license.
-- Academic licenses require renewal annually.
-
-### ADMM Does Not Converge
-
-- **Increase `max_iter`** in `data.yaml`.
-- **Interpret tolerance correctly**: raw residuals are L2 norms over all slots; with more scenarios they are naturally larger.
-- **Check `ADMM_Diagnostics.csv` and `ADMM_Convergence.csv` together**:
-  - If one market oscillates while others settle, inspect that market’s `rho`, price, and imbalance histories.
-  - If progress stalls, tune that market’s `rho_initial` / `rho_cap_initial` and verify residual-balance behavior in `update_rho!`.
-- **Increase `epsilon` only if justified by your accepted RMS imbalance budget**, not only to force a stop.
-- **Check residuals**: if primal residuals plateau above tolerance, the L2 norm may be hitting an "error floor" due to the representative-day discretisation. The solution may still be economically meaningful (compare against the social planner).
-
-### Social Planner Warns "Non-Optimal Status"
-
-- Check if the model is infeasible (conflicting constraints or insufficient capacity).
-- Check `data.yaml` for misconfigured parameters (e.g. Total_Demand too high for available capacity).
-
-### CSV Parsing Warnings
-
-The "parsed expected N columns" warning from CSV.jl is harmless — it indicates the ordering_variable CSV has trailing data that is automatically handled.
+More detail: [DOCUMENTATION.md](DOCUMENTATION.md) and `ADMM_Convergence.csv` / `ADMM_Diagnostics.csv`.
 
 ---
 
 ## References
 
-- Boyd, S., Parikh, N., Chu, E., Peleato, B., & Eckstein, J. (2011). *Distributed Optimization and Statistical Learning via the Alternating Direction Method of Multipliers*. Foundations and Trends in Machine Learning, 3(1), 1–122.
-- de Maere d’Aertrycke, G., Ehrenmann, A., Ralph, D., & Smeers, Y. (2018). *Risk trading in capacity equilibrium models* (EPRG Working Paper 1720). Complete vs incomplete risk trading labels used in this README and `DOCUMENTATION.md`.
-- Dunning, I., Huchette, J., & Lubin, M. (2017). *JuMP: A Modeling Language for Mathematical Optimization*. SIAM Review, 59(2), 295–320.
+Key sources are listed in [DOCUMENTATION.md §14](DOCUMENTATION.md#14-references), including Boyd et al. (2011) for ADMM, d'Aertrycke et al. (2018) for risk-trading institutions, and Hoschle et al. (2018) for risk-averse equilibrium.
 
 ---
 
 ## License
 
-This project is developed for academic research at TU Delft. Contact the author for licensing and collaboration inquiries.
+Developed for academic research at TU Delft. Contact the author for licensing and collaboration.

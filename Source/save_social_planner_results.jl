@@ -31,8 +31,14 @@
 #
 # ==============================================================================
 
-include(joinpath(@__DIR__, "print_run_summary.jl"))
-include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
+import Printf: @sprintf, @printf
+
+if !isdefined(@__MODULE__, :print_social_planner_run_summary!)
+    include(joinpath(@__DIR__, "print_run_summary.jl"))
+end
+if !isdefined(@__MODULE__, :print_risk_metrics_summary!)
+    include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
+end
 
 function save_social_planner_results!(planner::Model, planner_state::Dict, agents::Dict,
                                       mdict::Dict, results_folder::String)
@@ -87,25 +93,58 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     # timestep. Extracting duals is the standard way to recover prices from
     # a centralized welfare-maximization problem. Includes all 5 markets.
     #
-    # IMPORTANT: The raw duals of per-timestep constraints include the
-    # representative-day weight W[jd,jy] as a scaling factor, because the
-    # objective sums W * welfare but the constraints are unweighted:
-    #   raw_dual = W * true_price.
-    # We divide by W[jd,jy] to recover the actual equilibrium price.
+    # IMPORTANT: The raw duals of per-timestep constraints carry TWO scaling
+    # factors that must be removed to recover the true economic price:
     #
-    # H2_GC is now hourly (same as other markets), so we divide by W to recover
-    # the true price from the raw dual.
+    #   (1) Representative-day weight W[jd,jy]: the objective sums W * welfare
+    #       over days, so each dual is proportional to W.
+    #
+    #   (2) Effective probability weight μ[jy]: the objective scales per-year
+    #       welfare by γ * P[jy] (plus the CVaR adjustment for tail scenarios).
+    #       For a risk-neutral planner (γ=1): μ[jy] = P[jy].
+    #       For a risk-adjusted planner (γ<1) the CVaR adds extra weight to
+    #       tail scenarios: μ[jy] = γ*P[jy] + ξ[jy], where ξ[jy] is the dual
+    #       of the shortfall constraint u_social[jy] ≥ -sw_aux[jy] - α_social.
+    #
+    #   True price = raw_dual / (W[jd,jy] * μ[jy])
+    #
+    # We obtain μ[jy] as the dual of the epigraph constraint
+    # sw_aux[jy] ≤ social_welfare[jy], which at optimality equals
+    # γ*P[jy] + ξ[jy] (the full probability+risk weight for that scenario).
+    # This is the most general and correct normalisation: it handles any γ, β,
+    # and any number of tail scenarios without special-casing.
+    #
+    # Guard: if an epigraph dual is numerically zero (degenerate solver
+    # output), fall back to γ * P[jy] to avoid division by zero.
+    epigraph_constr = planner_state[:social_welfare_epigraph]
+    gamma_val = Float64(planner_state[:gamma])
+    ref_m0 = mdict[agents[:all][1]]
+    P_arr = ref_m0.ext[:parameters][:P]
+    mu_y = Dict{Int, Float64}()
+    for jy in JY
+        mu_raw = dual(epigraph_constr[jy])
+        # dual() is positive for a ≤ constraint in a MAX problem when the
+        # constraint is tight (relaxing it improves the objective).
+        mu_eff = abs(mu_raw)
+        if mu_eff < 1e-12
+            # Fallback: use γ * P[jy] (exact for non-tail, conservative for tail)
+            mu_eff = max(gamma_val * Float64(P_arr[jy]), 1e-12)
+        end
+        mu_y[jy] = mu_eff
+    end
+
     prices_rows = []
     t_index = 1
     for jy in JY, jd in JD, jh in JH
         w = W[jd, jy]
+        wmu = w * mu_y[jy]
         push!(prices_rows, (
             Time = t_index,
-            Elec_Price = dual(elec_balance[jy, jh, jd]) / w,
-            H2_Price = dual(H2_balance[jy, jh, jd]) / w,
-            Elec_GC_Price = dual(elec_GC_balance[jy, jh, jd]) / w,
-            H2_GC_Price = dual(H2_GC_balance[jy, jh, jd]) / w,
-            EP_Price = dual(EP_balance[jy, jh, jd]) / w,
+            Elec_Price    = dual(elec_balance[jy, jh, jd])    / wmu,
+            H2_Price      = dual(H2_balance[jy, jh, jd])      / wmu,
+            Elec_GC_Price = dual(elec_GC_balance[jy, jh, jd]) / wmu,
+            H2_GC_Price   = dual(H2_GC_balance[jy, jh, jd])   / wmu,
+            EP_Price      = dual(EP_balance[jy, jh, jd])       / wmu,
         ))
         t_index += 1
     end
@@ -176,26 +215,20 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     primal_df = DataFrame(primal_rows)
     CSV.write(joinpath(results_folder, "SP_Primal_Quantities.csv"), primal_df)
 
-    # ── SP_Capacities.csv — Per-agent per-year capacity for ME warm-start ─
-    # One row per (AgentID, jy) with cap value. ME loads and set_start_value
-    # on capacity variables before first ADMM iteration to seed the solver.
+    # ── SP_Capacities.csv — Per-agent installed capacity for ME warm-start ─
+    # One row per agent (jy=1 label); capacity is scenario-invariant.
     cap_rows = []
     for id in agents[:all]
-        cap_vec = Float64[]
+        cap_val = nothing
         if id in power_vres && haskey(var_dict, :power_cap_VRES) && haskey(var_dict[:power_cap_VRES], id)
-            cap_var = var_dict[:power_cap_VRES][id]
-            cap_vec = [_val(cap_var[jy]) for jy in JY]
+            cap_val = _val(var_dict[:power_cap_VRES][id])
         elseif id in H2_producers && haskey(var_dict, :H2_cap_elec) && haskey(var_dict[:H2_cap_elec], id)
-            cap_var = var_dict[:H2_cap_elec][id]
-            cap_vec = [_val(cap_var[jy]) for jy in JY]
+            cap_val = _val(var_dict[:H2_cap_elec][id])
         elseif id in offtaker_green && haskey(var_dict, :offtaker_cap_EP_green) && haskey(var_dict[:offtaker_cap_EP_green], id)
-            cap_var = var_dict[:offtaker_cap_EP_green][id]
-            cap_vec = [_val(cap_var[jy]) for jy in JY]
+            cap_val = _val(var_dict[:offtaker_cap_EP_green][id])
         end
-        for (iy, jy) in enumerate(JY)
-            if !isempty(cap_vec)
-                push!(cap_rows, (AgentID = id, jy = jy, cap = cap_vec[iy]))
-            end
+        if cap_val !== nothing
+            push!(cap_rows, (AgentID = id, jy = 1, cap = cap_val))
         end
     end
     if !isempty(cap_rows)
@@ -218,12 +251,12 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     λ_H2_GC   = zeros(n_jh, n_jd, n_jy)
     λ_EP      = zeros(n_jh, n_jd, n_jy)
     for (iy, jy) in enumerate(JY), (id, jd) in enumerate(JD), (ih, jh) in enumerate(JH)
-        w = W[jd, jy]
-        λ_elec[ih, id, iy]    = dual(elec_balance[jy, jh, jd]) / w
-        λ_H2[ih, id, iy]      = dual(H2_balance[jy, jh, jd]) / w
-        λ_elec_GC[ih, id, iy] = dual(elec_GC_balance[jy, jh, jd]) / w
-        λ_H2_GC[ih, id, iy]   = dual(H2_GC_balance[jy, jh, jd]) / w
-        λ_EP[ih, id, iy]      = dual(EP_balance[jy, jh, jd]) / w
+        wmu = W[jd, jy] * mu_y[jy]
+        λ_elec[ih, id, iy]    = dual(elec_balance[jy, jh, jd])    / wmu
+        λ_H2[ih, id, iy]      = dual(H2_balance[jy, jh, jd])      / wmu
+        λ_elec_GC[ih, id, iy] = dual(elec_GC_balance[jy, jh, jd]) / wmu
+        λ_H2_GC[ih, id, iy]   = dual(H2_GC_balance[jy, jh, jd])   / wmu
+        λ_EP[ih, id, iy]      = dual(EP_balance[jy, jh, jd])       / wmu
     end
 
     # Helper: compute ADMM-style objective (cost − revenue) for an agent using the
@@ -247,7 +280,7 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
             quantities[:g] = [_val(q[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :power_cap_VRES) && haskey(var_dict[:power_cap_VRES], id)
                 cap = var_dict[:power_cap_VRES][id]
-                quantities[:cap_VRES] = [_val(cap[jy]) for jy in JY]
+                quantities[:cap_VRES] = [_val(cap)]
             end
             return compute_agent_objective_economic(:power_vres, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in power_conv
@@ -261,7 +294,7 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
             quantities[:q_h2gc] = [_val(var_dict[:H2_gc_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :H2_cap_elec) && haskey(var_dict[:H2_cap_elec], id)
                 cap = var_dict[:H2_cap_elec][id]
-                quantities[:cap_H2_y] = [_val(cap[jy]) for jy in JY]
+                quantities[:cap_H2_y] = [_val(cap)]
             end
             return compute_agent_objective_economic(:H2_producer, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in H2_consumers
@@ -273,7 +306,7 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
             quantities[:ep] = [_val(var_dict[:offtaker_ep_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :offtaker_cap_EP_green) && haskey(var_dict[:offtaker_cap_EP_green], id)
                 cap = var_dict[:offtaker_cap_EP_green][id]
-                quantities[:cap_EP_y] = [_val(cap[jy]) for jy in JY]
+                quantities[:cap_EP_y] = [_val(cap)]
             end
             return compute_agent_objective_economic(:offtaker_green, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in offtaker_grey
@@ -390,33 +423,33 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
             inv_dict = get(var_dict, :power_inv_VRES, nothing)
             if cap_dict !== nothing && haskey(cap_dict, id)
                 cap_var = cap_dict[id]
-                cap_final = _val(cap_var[JY[end]])
+                cap_final = _val(cap_var)
             end
             if inv_dict !== nothing && haskey(inv_dict, id)
                 inv_var = inv_dict[id]
-                inv_total = sum(_val(inv_var[jy]) for jy in JY)
+                inv_total = _val(inv_var)
             end
         elseif id in H2_producers
             cap_dict = get(var_dict, :H2_cap_elec, nothing)
             inv_dict = get(var_dict, :H2_inv_elec, nothing)
             if cap_dict !== nothing && haskey(cap_dict, id)
                 cap_var = cap_dict[id]
-                cap_final = _val(cap_var[JY[end]])
+                cap_final = _val(cap_var)
             end
             if inv_dict !== nothing && haskey(inv_dict, id)
                 inv_var = inv_dict[id]
-                inv_total = sum(_val(inv_var[jy]) for jy in JY)
+                inv_total = _val(inv_var)
             end
         elseif id in offtaker_green
             cap_dict = get(var_dict, :offtaker_cap_EP_green, nothing)
             inv_dict = get(var_dict, :offtaker_inv_EP_green, nothing)
             if cap_dict !== nothing && haskey(cap_dict, id)
                 cap_var = cap_dict[id]
-                cap_final = _val(cap_var[JY[end]])
+                cap_final = _val(cap_var)
             end
             if inv_dict !== nothing && haskey(inv_dict, id)
                 inv_var = inv_dict[id]
-                inv_total = sum(_val(inv_var[jy]) for jy in JY)
+                inv_total = _val(inv_var)
             end
         end
 
@@ -505,7 +538,7 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
             q = var_dict[:power_q_E][id]
             quantities[:g] = [_val(q[jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :power_cap_VRES) && haskey(var_dict[:power_cap_VRES], id)
-                quantities[:cap_VRES] = [_val(var_dict[:power_cap_VRES][id][jy]) for jy in JY]
+                quantities[:cap_VRES] = [_val(var_dict[:power_cap_VRES][id])]
             end
         elseif id in power_conv
             agent_type = :power_conv
@@ -518,7 +551,7 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
             quantities[:h2_out] = [_val(var_dict[:H2_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             quantities[:q_h2gc] = [_val(var_dict[:H2_gc_h_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :H2_cap_elec) && haskey(var_dict[:H2_cap_elec], id)
-                quantities[:cap_H2_y] = [_val(var_dict[:H2_cap_elec][id][jy]) for jy in JY]
+                quantities[:cap_H2_y] = [_val(var_dict[:H2_cap_elec][id])]
             end
         elseif id in H2_consumers
             agent_type = :H2_consumer
@@ -529,7 +562,7 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
             quantities[:q_h2gc] = [_val(var_dict[:offtaker_gc_h_buy][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             quantities[:ep] = [_val(var_dict[:offtaker_ep_sell][id][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(var_dict, :offtaker_cap_EP_green) && haskey(var_dict[:offtaker_cap_EP_green], id)
-                quantities[:cap_EP_y] = [_val(var_dict[:offtaker_cap_EP_green][id][jy]) for jy in JY]
+                quantities[:cap_EP_y] = [_val(var_dict[:offtaker_cap_EP_green][id])]
             end
         elseif id in offtaker_grey
             agent_type = :offtaker_grey

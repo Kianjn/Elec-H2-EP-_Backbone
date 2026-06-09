@@ -28,6 +28,8 @@
 # residuals. Tune via data["ADMM"]["cap_tol_relax"] if present.
 const CAP_CONSENSUS_TOL_RELAX_DEFAULT = 100.0
 
+_cap_scalar(x) = x isa Real ? Float64(x) : (isempty(x) ? 0.0 : Float64(x[1]))
+
 function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Dict,
                          elec_GC_market::Dict, H2_GC_market::Dict, EP_market::Dict,
                          ppa_market::Dict, hpa_market::Dict, mdict::Dict, agents::Dict, data::Dict, TO::TimerOutput)
@@ -299,10 +301,10 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                     cap_vec = results["Cap_EP_Green"][m][end]
                 end
                 z_hist = cap_state["z"][m]
-                z_vec  = isempty(z_hist) ? zeros(length(cap_vec)) : z_hist[end]
+                z_vec  = isempty(z_hist) ? cap_vec : z_hist[end]
                 local_r = 0.0
-                if !isempty(cap_vec) && length(cap_vec) == length(z_vec)
-                    local_r = sqrt(sum((cap_vec[i] - z_vec[i])^2 for i in eachindex(cap_vec)))
+                if !isempty(cap_vec)
+                    local_r = abs(_cap_scalar(cap_vec) - _cap_scalar(z_vec))
                 end
                 push!(cap_state["Primal"][m], local_r)
                 if cap_state["ResidualScale_Primal"][m] == 0.0 && local_r > 0.0
@@ -334,15 +336,15 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                     cap_vec = results["Cap_EP_Green"][m][end]
                 end
                 z_hist = cap_state["z"][m]
-                z_vec  = isempty(z_hist) ? zeros(length(cap_vec)) : z_hist[end]
+                z_vec  = isempty(z_hist) ? cap_vec : z_hist[end]
                 ρ_m    = cap_state["ρ"][m][end]
                 λ_prev = cap_state["λ"][m][end]
-                λ_new  = if isempty(cap_vec) || length(cap_vec) != length(λ_prev)
-                    copy(λ_prev)
+                if isempty(cap_vec)
+                    push!(cap_state["λ"][m], copy(λ_prev))
                 else
-                    [λ_prev[i] + ρ_m * (cap_vec[i] - z_vec[i]) for i in eachindex(λ_prev)]
+                    λ_new = [_cap_scalar(λ_prev) + ρ_m * (_cap_scalar(cap_vec) - _cap_scalar(z_vec))]
+                    push!(cap_state["λ"][m], λ_new)
                 end
-                push!(cap_state["λ"][m], λ_new)
             end
         end
 
@@ -503,9 +505,9 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                     z_hist = cap_state["z"][m]
                     ρ_m    = cap_state["ρ"][m][end]
                     if length(z_hist) >= 2
-                        z_new = z_hist[end]
-                        z_old = z_hist[end-1]
-                        local_s = sqrt(sum((ρ_m * (z_new[i] - z_old[i]))^2 for i in eachindex(z_new)))
+                        z_new = _cap_scalar(z_hist[end])
+                        z_old = _cap_scalar(z_hist[end - 1])
+                        local_s = abs(ρ_m * (z_new - z_old))
                         push!(cap_state["Dual"][m], local_s)
                         if cap_state["ResidualScale_Dual"][m] == 0.0 && local_s > 0.0 && isfinite(local_s)
                             cap_state["ResidualScale_Dual"][m] = local_s
@@ -880,7 +882,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         # data.yaml configuration. See DOCUMENTATION.md §5.4.
         # ----------------------------------------------------------------
         cap_tol_relax = get(get(data, "ADMM", Dict()), "cap_tol_relax", CAP_CONSENSUS_TOL_RELAX_DEFAULT)
-        sqrt_y = sqrt(n_yr)
+        sqrt_y = 1.0
         cap_state = ADMM_state["Capacity"]
         cap_consensus_ok = true
         for m in cap_agents

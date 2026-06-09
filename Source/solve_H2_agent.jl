@@ -72,34 +72,17 @@ function solve_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
-        loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y[jy])
+        loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y)
     end
     mod.ext[:expressions][:loss_H2] = loss_H2
 
-    # ── Risk-adjusted objective ───────────────────────────────────────────
-    #   min  γ · ( Σ_y loss_total[y] )   ← (1) expected full loss
-    #      + (1−γ) · CVaR_H2             ← (2) CVaR of full loss
-    #      + (ρ_elec/2)    · Σ W·(−e_in     − ḡ_elec)²                  ← (3)
-    #      + (ρ_GC/2)      · Σ W·(−gc_e     − ḡ_GC)²                   ← (4)
-    #      + (ρ_H2/2)      · Σ W·(+h2       − ḡ_H2)²                   ← (5)
-    #      + (ρ_H2GC/2)    · Σ W·(+gc_h2    − ḡ_H2GC)²                 ← (6)
-    #
-    # (1) Expected full loss (operational + fixed CAPEX).
-    # (2) CVaR of full loss. With nYears=1, CVaR = loss_total ⇒ γ has no effect.
-    # (3)–(6) ADMM augmented-Lagrangian penalties for each market.
-    # (7) Capacity ADMM equality split: enforces x_cap = z_cap with both the
-    #     linear dual λ_cap·(x-z) and the quadratic (ρ_cap/2)·(x-z)². The
-    #     linear term is what distinguishes a proper ADMM split from a soft
-    #     penalty and is essential for converging the capacity residual when
-    #     ρ_cap is bounded. See DOCUMENTATION.md §5.4.
-    z_cap   = get(mod.ext[:parameters], :z_cap, zeros(length(JY)))
-    λ_cap   = get(mod.ext[:parameters], :λ_cap, zeros(length(JY)))
+    z_cap   = get(mod.ext[:parameters], :z_cap, 0.0)
+    λ_cap   = get(mod.ext[:parameters], :λ_cap, 0.0)
     ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
     cap_pen = haskey(mod.ext[:parameters], :z_cap) ?
-        sum(λ_cap[jy] * (cap_H2_y[jy] - z_cap[jy]) +
-            ρ_cap/2 * (cap_H2_y[jy] - z_cap[jy])^2 for jy in JY) : 0.0
+        λ_cap * (cap_H2_y - z_cap) + ρ_cap/2 * (cap_H2_y - z_cap)^2 : 0.0
     mod.ext[:objective] = @objective(mod, Min,
-        gamma * sum(loss_total[jy] for jy in JY)
+        gamma * (F_cap * cap_H2_y + sum(P[jy] * loss_H2[jy] for jy in JY))
         + (1 - gamma) * cvar_H2
         + sum(ρ_elec/2 * W[jd, jy] * ((-e_in[jh, jd, jy])      - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)

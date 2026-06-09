@@ -190,8 +190,8 @@ function define_common_parameters!(m::String, mod::Model, data::Dict, ts::Dict, 
     # ADMM_subroutine overwrites them each iteration from ADMM["Capacity"][m].
     rho_cap = get(data, "rho_cap_initial", 0.1)
     if agent_type in ("VRES", "GreenProducer", "GreenOfftaker")
-        mod.ext[:parameters][:z_cap]  = zeros(n_years)
-        mod.ext[:parameters][:λ_cap]  = zeros(n_years)
+        mod.ext[:parameters][:z_cap]  = 0.0
+        mod.ext[:parameters][:λ_cap]  = 0.0
         mod.ext[:parameters][:ρ_cap]  = rho_cap
     end
 

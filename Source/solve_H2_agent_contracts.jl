@@ -76,7 +76,7 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
                 - K_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
-        loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y[jy])
+        loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y)
     end
     mod.ext[:expressions][:loss_H2] = loss_H2
 
@@ -88,19 +88,14 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
     obj_hpa = sum(ρ_hpa/2 * W[jd, jy] * (h2_hpa[jh, jd, jy] - g_bar_hpa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY) +
               (ρ_hpa_cap/2) * (hpa_cap - g_bar_hpa_cap)^2
 
-    # Capacity ADMM equality split (per-agent): same augmented Lagrangian as
-    # in solve_H2_agent.jl. In the contracts case z_cap is derived from the
-    # sum of pool and HPA flow consensus inside ADMM_subroutine_contracts.jl.
-    # See DOCUMENTATION.md §5.4.
-    z_cap   = get(mod.ext[:parameters], :z_cap, zeros(length(JY)))
-    λ_cap   = get(mod.ext[:parameters], :λ_cap, zeros(length(JY)))
+    z_cap   = get(mod.ext[:parameters], :z_cap, 0.0)
+    λ_cap   = get(mod.ext[:parameters], :λ_cap, 0.0)
     ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
     cap_pen = haskey(mod.ext[:parameters], :z_cap) ?
-        sum(λ_cap[jy] * (cap_H2_y[jy] - z_cap[jy]) +
-            ρ_cap/2 * (cap_H2_y[jy] - z_cap[jy])^2 for jy in JY) : 0.0
+        λ_cap * (cap_H2_y - z_cap) + ρ_cap/2 * (cap_H2_y - z_cap)^2 : 0.0
 
     mod.ext[:objective] = @objective(mod, Min,
-        gamma * sum(loss_total[jy] for jy in JY)
+        gamma * (F_cap * cap_H2_y + sum(P[jy] * loss_H2[jy] for jy in JY))
         + (1 - gamma) * cvar_H2
         + sum(ρ_elec/2 * W[jd, jy] * ((-e_in_pool[jh, jd, jy])      - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)

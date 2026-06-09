@@ -120,18 +120,18 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
             # On the first ADMM iteration, if z was warm-started from SP
             # capacities, use that target directly to keep x and z aligned.
             if get(ADMM_state, "n_iter", 0) == 0 && !isempty(cap_state["z"][m])
-                z_cap = copy(cap_state["z"][m][end])
+                z_raw = cap_state["z"][m][end]
+                z_cap = z_raw isa Real ? Float64(z_raw) :
+                        (isempty(z_raw) ? 0.0 : Float64(maximum(z_raw)))
                 mod.ext[:parameters][:z_cap] = z_cap
-                mod.ext[:parameters][:λ_cap] = copy(cap_state["λ"][m][end])
+                λ_raw = cap_state["λ"][m][end]
+                mod.ext[:parameters][:λ_cap] = λ_raw isa Real ? Float64(λ_raw) :
+                    (isempty(λ_raw) ? 0.0 : Float64(λ_raw[1]))
                 mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
             else
                 agent_type = String(get(mod.ext[:parameters], :Type, ""))
                 JY = mod.ext[:sets][:JY]
-                z_cap = zeros(length(JY))
-                # Structural feasibility floor: capacity variables cannot go
-                # below model-internal initial installed capacity (inv >= 0 in
-                # all green agents). Enforce the same floor on z so ADMM does
-                # not chase impossible x=z targets.
+                z_cap = 0.0
                 cap_floor = if agent_type == "VRES"
                     get(mod.ext[:parameters], :Capacity, 0.0)
                 elseif agent_type == "GreenProducer"
@@ -141,75 +141,49 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
                 else
                     0.0
                 end
+                z_cap = cap_floor
                 if agent_type == "VRES"
-                    # Use the agent's latest realized flow when available; this
-                    # keeps z tied to physically achieved dispatch instead of
-                    # raw consensus targets that can overshoot in coupled runs.
                     flow_ref = isempty(get(results["g"], m, [])) ?
                                mod.ext[:parameters][:g_bar_elec] : results["g"][m][end]
                     AF = mod.ext[:timeseries][:AF]
-                    for (iy, jy) in enumerate(JY)
-                        mx = 0.0
+                    for jy in JY
                         for jh in 1:n_ts, jd in 1:n_rd
                             af = AF[jh, jd, jy]
-                            mx = max(mx, af > 1e-9 ? max(0.0, flow_ref[jh, jd, jy] / af) : 0.0)
+                            if af > 1e-9
+                                z_cap = max(z_cap, max(0.0, flow_ref[jh, jd, jy] / af))
+                            end
                         end
-                        z_cap[iy] = mx
                     end
                 elseif agent_type == "GreenProducer"
-                    # Electrolyzer H2 output capacity from latest realized H2 flow.
                     flow_ref = isempty(get(results["h2"], m, [])) ?
                                mod.ext[:parameters][:g_bar_H2] : results["h2"][m][end]
-                    for (iy, jy) in enumerate(JY)
-                        z_cap[iy] = max(0.0, maximum(flow_ref[:, :, jy]))
+                    for jy in JY
+                        z_cap = max(z_cap, max(0.0, maximum(flow_ref[:, :, jy])))
                     end
                 elseif agent_type == "GreenOfftaker"
-                    # Green offtaker EP capacity from latest realized EP flow.
                     flow_ref = isempty(get(results["EP"], m, [])) ?
                                mod.ext[:parameters][:g_bar_EP] : results["EP"][m][end]
-                    for (iy, jy) in enumerate(JY)
-                        z_cap[iy] = max(0.0, maximum(flow_ref[:, :, jy]))
+                    for jy in JY
+                        z_cap = max(z_cap, max(0.0, maximum(flow_ref[:, :, jy])))
                     end
-                end
-                # z_cap projection for feasibility:
-                # enforce only nondecreasing across years (inv >= 0 dynamics).
-                for iy in eachindex(z_cap)
-                    if iy > 1
-                        z_cap[iy] = max(z_cap[iy], z_cap[iy - 1])
-                    end
-                    z_cap[iy] = max(z_cap[iy], cap_floor)
                 end
 
-                # Optional under-relaxation of z update (damped target tracking):
-                # z^k <- α*z_raw^k + (1-α)*z^{k-1}. This suppresses jumpy target
-                # motion in tightly coupled runs and helps prevent dual blow-ups.
-                # α=1.0 recovers the original undamped behaviour.
                 z_alpha = get(get(data, "ADMM", Dict()), "cap_z_relax", 1.0)
                 z_alpha = min(1.0, max(0.05, z_alpha))
                 if !isempty(cap_state["z"][m])
                     z_prev = cap_state["z"][m][end]
-                    if length(z_prev) == length(z_cap)
-                        z_cap .= z_alpha .* z_cap .+ (1.0 - z_alpha) .* z_prev
-                        # Re-apply monotonic projection after damping.
-                        for iy in eachindex(z_cap)
-                            if iy > 1
-                                z_cap[iy] = max(z_cap[iy], z_cap[iy - 1])
-                            end
-                            z_cap[iy] = max(z_cap[iy], cap_floor)
-                        end
-                    end
+                    z_prev_scalar = z_prev isa Real ? Float64(z_prev) :
+                        (isempty(z_prev) ? z_cap : Float64(z_prev[1]))
+                    z_cap = z_alpha * z_cap + (1.0 - z_alpha) * z_prev_scalar
                 end
+                z_cap = max(z_cap, cap_floor)
 
-                # Push z^k into history; ADMM.jl reads z^{k} and z^{k-1} after the
-                # solve to compute the dual residual s_m = ||ρ·(z^k - z^{k-1})||.
-                push!(cap_state["z"][m], copy(z_cap))
+                push!(cap_state["z"][m], z_cap)
 
-                # Refresh JuMP model parameters from ADMM state. λ is the
-                # PREVIOUS iteration's dual (λ^{k-1}); ρ is the current per-agent
-                # penalty (ρ_m^{k-1}, updated by update_rho! at the end of the
-                # previous iteration).
                 mod.ext[:parameters][:z_cap] = z_cap
-                mod.ext[:parameters][:λ_cap] = copy(cap_state["λ"][m][end])
+                λ_raw = cap_state["λ"][m][end]
+                mod.ext[:parameters][:λ_cap] = λ_raw isa Real ? Float64(λ_raw) :
+                    (isempty(λ_raw) ? 0.0 : Float64(λ_raw[1]))
                 mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
             end
         end
@@ -266,20 +240,20 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
         # Capacity and investment results for green agents (per year, 1D vectors).
         agent_type = String(get(mod.ext[:parameters], :Type, ""))
         if agent_type == "VRES" && haskey(mod.ext[:variables], :cap_VRES)
-            cap_vec = collect(value.(mod.ext[:variables][:cap_VRES]))
-            inv_vec = collect(value.(mod.ext[:variables][:inv_VRES]))
+            cap_vec = [value(mod.ext[:variables][:cap_VRES])]
+            inv_vec = [value(mod.ext[:variables][:inv_VRES])]
             push!(results["Cap_VRES"][m], cap_vec)
             push!(results["Inv_VRES"][m], inv_vec)
         end
         if (haskey(mod.ext[:variables], :cap_H2_y) && haskey(mod.ext[:variables], :inv_cap_H2))
-            cap_vec = collect(value.(mod.ext[:variables][:cap_H2_y]))
-            inv_vec = collect(value.(mod.ext[:variables][:inv_cap_H2]))
+            cap_vec = [value(mod.ext[:variables][:cap_H2_y])]
+            inv_vec = [value(mod.ext[:variables][:inv_cap_H2])]
             push!(results["Cap_Elec_H2"][m], cap_vec)
             push!(results["Inv_Elec_H2"][m], inv_vec)
         end
         if agent_type == "GreenOfftaker" && haskey(mod.ext[:variables], :cap_EP_y)
-            cap_vec = collect(value.(mod.ext[:variables][:cap_EP_y]))
-            inv_vec = collect(value.(mod.ext[:variables][:inv_EP]))
+            cap_vec = [value(mod.ext[:variables][:cap_EP_y])]
+            inv_vec = [value(mod.ext[:variables][:inv_EP])]
             push!(results["Cap_EP_Green"][m], cap_vec)
             push!(results["Inv_EP_Green"][m], inv_vec)
         end

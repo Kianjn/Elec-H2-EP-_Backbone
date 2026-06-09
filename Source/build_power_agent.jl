@@ -8,11 +8,12 @@
 #   corresponding block to the social planner model.
 #
 #   - VRES: variable renewable generator with endogenous yearly capacity
-#     cap_VRES[jy] and investment inv_VRES[jy]. Supplies electricity and
+#     scalar cap_VRES and one-shot investment inv_VRES (same capacity in all
+#     weather scenarios). Supplies electricity and
 #     electricity GCs 1:1. Net positions: g_net_elec = +g, g_net_elec_GC = +g.
 #     ADMM objective = generation cost − elec revenue − GC revenue
 #     + ADMM penalties + fixed annualised CAPEX on cap_VRES + optional CVaR
-#     term (γ·β_VRES). Capacity constraint: g ≤ AF × cap_VRES[jy].
+#     term (γ·β_VRES). Capacity constraint: g ≤ AF × cap_VRES (non-anticipative).
 #
 #   - Conventional: dispatchable generator with fixed Capacity and a 3-stage
 #     convex variable-cost stack (single aggregated agent). Net position:
@@ -79,24 +80,12 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
         P = mod.ext[:parameters][:P]
         n_years = length(JY)   # apply the annualised charge once per model year
 
-        # ── Capacity and investment decision variables (per year) ──────────────
-        # cap_VRES[jy] = available VRES capacity (MW) in year jy.
-        # inv_VRES[jy] = new VRES capacity investment (MW) in year jy.
-        cap_VRES = mod.ext[:variables][:cap_VRES] = @variable(mod, [jy in JY], lower_bound = 0, base_name = "cap_VRES")
-        inv_VRES = mod.ext[:variables][:inv_VRES] = @variable(mod, [jy in JY], lower_bound = 0, base_name = "inv_VRES")
-
-        # Capacity evolution over years: cumulative investment on top of initial capacity.
-        JY_vec = collect(JY)
-        first_jy = JY_vec[1]
-        # First year: initial capacity plus first-year investment.
-        mod.ext[:constraints][:cap_VRES_init] = @constraint(mod, cap_VRES[first_jy] == cap_initial + inv_VRES[first_jy])
-        # Subsequent years: add new investment on top of previous year's capacity.
-        for (k, jy) in enumerate(JY_vec)
-            k == 1 && continue
-            prev_jy = JY_vec[k - 1]
-            cname = Symbol("cap_VRES_dyn_", jy)
-            mod.ext[:constraints][cname] = @constraint(mod, cap_VRES[jy] == cap_VRES[prev_jy] + inv_VRES[jy])
-        end
+        # ── Capacity and investment (single decision, all weather scenarios) ───
+        # cap_VRES = installed VRES capacity (MW), chosen once before weather is known.
+        # inv_VRES = new capacity investment (MW) in this decision year.
+        cap_VRES = mod.ext[:variables][:cap_VRES] = @variable(mod, lower_bound = 0, base_name = "cap_VRES")
+        inv_VRES = mod.ext[:variables][:inv_VRES] = @variable(mod, lower_bound = 0, base_name = "inv_VRES")
+        mod.ext[:constraints][:cap_VRES_init] = @constraint(mod, cap_VRES == cap_initial + inv_VRES)
 
         # Generation variable g ≥ 0 (MWh produced in each hour/day/year).
         g = mod.ext[:variables][:g] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "gen")
@@ -127,7 +116,7 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
                     - λ_elec[jh, jd, jy] * g[jh, jd, jy]
                     - λ_elec_GC[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD)
             )
-            loss_total[jy] = @expression(mod, loss_VRES[jy] + F_cap * cap_VRES[jy])
+            loss_total[jy] = @expression(mod, loss_VRES[jy] + F_cap * cap_VRES)
         end
         mod.ext[:expressions][:loss_VRES] = loss_VRES
 
@@ -159,14 +148,12 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
                 - λ_elec_GC[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_elec_GC/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-            # Fixed annualised investment cost: F_cap [€/MW-year] × capacity in each model year.
-            + F_cap * sum(cap_VRES[jy] for jy in JY)
+            # Fixed annualised investment cost once (same capacity in every scenario).
+            + F_cap * cap_VRES
         )
 
-        # Capacity constraint: generation limited by the hour-specific
-        # availability factor (AF) times installed capacity.  For VRES this
-        # captures the physical resource limit (e.g. wind speed, irradiance).
-        mod.ext[:constraints][:cap] = @constraint(mod, [jh in JH, jd in JD, jy in JY], g[jh, jd, jy] <= AF[jh, jd, jy] * cap_VRES[jy])
+        # Capacity constraint: generation limited by AF × single installed capacity.
+        mod.ext[:constraints][:cap] = @constraint(mod, [jh in JH, jd in JD, jy in JY], g[jh, jd, jy] <= AF[jh, jd, jy] * cap_VRES)
 
     elseif agent_type == "Conventional"
         cap = mod.ext[:parameters][:Capacity]        # installed capacity (MW)
@@ -297,29 +284,21 @@ function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
         F_cap = get(mod.ext[:parameters], :FixedCost_per_MW, 0.0)
         cap_initial = _p(mod, :Capacity)
 
-        cap_VRES = @variable(planner, [jy in JY], lower_bound=0, base_name="cap_VRES_$(id)")
-        inv_VRES = @variable(planner, [jy in JY], lower_bound=0, base_name="inv_VRES_$(id)")
-
-        JY_vec = collect(JY)
-        first_jy = JY_vec[1]
-        @constraint(planner, cap_VRES[first_jy] == cap_initial + inv_VRES[first_jy])
-        for (k, jy) in enumerate(JY_vec)
-            k == 1 && continue
-            prev_jy = JY_vec[k - 1]
-            @constraint(planner, cap_VRES[jy] == cap_VRES[prev_jy] + inv_VRES[jy])
-        end
+        cap_VRES = @variable(planner, lower_bound=0, base_name="cap_VRES_$(id)")
+        inv_VRES = @variable(planner, lower_bound=0, base_name="inv_VRES_$(id)")
+        @constraint(planner, cap_VRES == cap_initial + inv_VRES)
 
         q_E = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="q_E_$(id)")
-        @constraint(planner, [jh in JH, jd in JD, jy in JY], q_E[jh, jd, jy] <= AF[jh, jd, jy] * cap_VRES[jy])
+        @constraint(planner, [jh in JH, jd in JD, jy in JY], q_E[jh, jd, jy] <= AF[jh, jd, jy] * cap_VRES)
 
-        # Per-year welfare = −(production cost + fixed capacity cost).
-        # No per-agent CVaR: a single social CVaR is applied in
-        # build_social_planner! to the aggregate social welfare.
+        # Per-scenario operational welfare; fixed CAPEX −F_cap·cap is included in
+        # each scenario's loss for CVaR (same cap every jy). Planner objective
+        # uses P-weighted sum in build_social_planner!.
         welfare_per_year = Dict{Int, Any}()
         for jy in JY
             welfare_per_year[jy] = @expression(planner,
                 -(sum(W_dict[jy][jd] * (C * q_E[jh, jd, jy]) for jh in JH, jd in JD)
-                  + F_cap * cap_VRES[jy])
+                  + F_cap * cap_VRES)
             )
         end
         var_dict[:power_q_E][id] = q_E

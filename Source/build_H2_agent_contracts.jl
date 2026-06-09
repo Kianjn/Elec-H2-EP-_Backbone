@@ -86,8 +86,9 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
     q_elec_gc = mod.ext[:variables][:q_elec_gc] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="elec_GC")
     q_h2gc    = mod.ext[:variables][:q_h2gc]    = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="h2_GC_prod")
 
-    cap_H2_y   = mod.ext[:variables][:cap_H2_y]   = @variable(mod, [jy in JY], lower_bound=0, base_name="cap_H2")
-    inv_cap_H2 = mod.ext[:variables][:inv_cap_H2] = @variable(mod, [jy in JY], lower_bound=0, base_name="inv_cap_H2")
+    cap_H2_y   = mod.ext[:variables][:cap_H2_y]   = @variable(mod, lower_bound=0, base_name="cap_H2")
+    inv_cap_H2 = mod.ext[:variables][:inv_cap_H2] = @variable(mod, lower_bound=0, base_name="inv_cap_H2")
+    mod.ext[:constraints][:cap_H2_init] = @constraint(mod, cap_H2_y == cap_H2_initial + inv_cap_H2)
 
     # PPA capacity (MW) per VRES: upper bound on g_ppa_from at each hour.
     ppa_cap = mod.ext[:variables][:ppa_cap] = Dict(
@@ -95,16 +96,6 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
         for v in ppa_vres
     )
     hpa_cap = mod.ext[:variables][:hpa_cap] = @variable(mod, lower_bound=0, base_name="hpa_cap")
-
-    # Capacity evolution
-    JY_vec = collect(JY)
-    first_jy = JY_vec[1]
-    mod.ext[:constraints][:cap_H2_init] = @constraint(mod, cap_H2_y[first_jy] == cap_H2_initial + inv_cap_H2[first_jy])
-    for (k, jy) in enumerate(JY_vec)
-        k == 1 && continue
-        prev_jy = JY_vec[k - 1]
-        mod.ext[:constraints][Symbol("cap_H2_dyn_", jy)] = @constraint(mod, cap_H2_y[jy] == cap_H2_y[prev_jy] + inv_cap_H2[jy])
-    end
 
     # ── Net market positions ────────────────────────────────────────────────
     # Electricity market: electrolyzer buys e_in_pool (negative = buyer).
@@ -129,7 +120,7 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
         q_h2gc[jh, jd, jy] <= h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
 
     mod.ext[:constraints][:cap_h2] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
-        h2_out[jh, jd, jy] <= cap_H2_y[jy])
+        h2_out[jh, jd, jy] <= cap_H2_y)
     # HPA delivery is physical hydrogen and cannot exceed instantaneous production.
     mod.ext[:constraints][:hpa_prod_link] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
         h2_hpa[jh, jd, jy] <= h2_out[jh, jd, jy])
@@ -172,7 +163,7 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
                 - K_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
             ) for jh in JH, jd in JD)
         )
-        loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y[jy])
+        loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y)
     end
     mod.ext[:expressions][:loss_H2] = loss_H2
 
@@ -208,7 +199,7 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
         + sum(ρ_H2_GC/2 * W[jd, jy] * (q_h2gc[jh, jd, jy]      - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + obj_ppa
         + obj_hpa
-        + F_cap * sum(cap_H2_y[jy] for jy in JY)
+        + F_cap * cap_H2_y
     )
 
     return mod

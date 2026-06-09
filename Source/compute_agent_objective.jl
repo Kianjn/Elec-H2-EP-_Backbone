@@ -53,9 +53,7 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
             obj += W[jd, jy] * (MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy] - λ_elec_GC[jh, jd, jy] * g[jh, jd, jy])
         end
         if haskey(quantities, :cap_VRES)
-            for jy in JY
-                obj += F_cap * quantities[:cap_VRES][jy]
-            end
+            obj += F_cap * (quantities[:cap_VRES] isa Real ? quantities[:cap_VRES] : quantities[:cap_VRES][1])
         end
 
     elseif agent_type == :power_conv
@@ -103,9 +101,7 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
             )
         end
         if haskey(quantities, :cap_H2_y)
-            for jy in JY
-                obj += F_cap * quantities[:cap_H2_y][jy]
-            end
+            obj += F_cap * (quantities[:cap_H2_y] isa Real ? quantities[:cap_H2_y] : quantities[:cap_H2_y][1])
         end
 
     elseif agent_type == :H2_consumer
@@ -134,9 +130,7 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
             )
         end
         if haskey(quantities, :cap_EP_y)
-            for jy in JY
-                obj += F_cap * quantities[:cap_EP_y][jy]
-            end
+            obj += F_cap * (quantities[:cap_EP_y] isa Real ? quantities[:cap_EP_y] : quantities[:cap_EP_y][1])
         end
 
     elseif agent_type == :offtaker_grey
@@ -193,9 +187,7 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
             )
         end
         if haskey(quantities, :cap_VRES)
-            for jy in JY
-                obj += F_cap * quantities[:cap_VRES][jy]
-            end
+            obj += F_cap * (quantities[:cap_VRES] isa Real ? quantities[:cap_VRES] : quantities[:cap_VRES][1])
         end
 
     elseif agent_type == :H2_producer_ppa
@@ -226,9 +218,7 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
             )
         end
         if haskey(quantities, :cap_H2_y)
-            for jy in JY
-                obj += F_cap * quantities[:cap_H2_y][jy]
-            end
+            obj += F_cap * (quantities[:cap_H2_y] isa Real ? quantities[:cap_H2_y] : quantities[:cap_H2_y][1])
         end
 
     else

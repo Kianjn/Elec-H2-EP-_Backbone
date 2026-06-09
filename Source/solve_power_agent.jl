@@ -75,35 +75,19 @@ function solve_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
                     - λ_elec[jh, jd, jy] * g[jh, jd, jy]
                     - λ_elec_GC[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD)
             )
-            loss_total[jy] = @expression(mod, loss_VRES[jy] + F_cap * cap_VRES[jy])
+            loss_total[jy] = @expression(mod, loss_VRES[jy] + F_cap * cap_VRES)
         end
         mod.ext[:expressions][:loss_VRES] = loss_VRES
 
         # ── Risk-adjusted objective ───────────────────────────────────────
-        #   min  γ · ( Σ_y loss_total[y] )   ← (1) expected full loss
-        #      + (1−γ) · CVaR_VRES           ← (2) CVaR of full loss
-        #      + (ρ_elec/2) · Σ W·(g − ḡ_elec)²                        ← (3)
-        #      + (ρ_GC /2)  · Σ W·(g − ḡ_GC)²                          ← (4)
-        #
-        # (1) Expected full loss (operational + fixed capacity cost).
-        # (2) CVaR of full loss. When γ=1 (risk-neutral) this term vanishes.
-        #     With nYears=1, CVaR = loss_total, so objective = loss_total = risk-neutral.
-        # (3) ADMM augmented-Lagrangian penalty for the electricity market.
-        # (4) ADMM augmented-Lagrangian penalty for the elec-GC market.
-        # (5) Capacity ADMM equality split: enforces x_cap = z_cap via the
-        #     full augmented Lagrangian (dual λ_cap + quadratic ρ_cap/2).
-        #     The linear λ_cap term is what makes this a true ADMM split
-        #     (rather than a soft penalty): with only the quadratic term,
-        #     once ρ_cap saturates the CAPEX gradient leaves a persistent
-        #     residual x − z ≠ 0. See DOCUMENTATION.md §5.4.
-        z_cap   = get(mod.ext[:parameters], :z_cap,  zeros(length(JY)))
-        λ_cap   = get(mod.ext[:parameters], :λ_cap,  zeros(length(JY)))
+        # Expected loss: F_cap·cap once + P-weighted operational loss per scenario.
+        z_cap   = get(mod.ext[:parameters], :z_cap, 0.0)
+        λ_cap   = get(mod.ext[:parameters], :λ_cap, 0.0)
         ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
         cap_pen = haskey(mod.ext[:parameters], :z_cap) ?
-            sum(λ_cap[jy] * (cap_VRES[jy] - z_cap[jy]) +
-                ρ_cap/2 * (cap_VRES[jy] - z_cap[jy])^2 for jy in JY) : 0.0
+            λ_cap * (cap_VRES - z_cap) + ρ_cap/2 * (cap_VRES - z_cap)^2 : 0.0
         mod.ext[:objective] = @objective(mod, Min,
-            gamma * sum(loss_total[jy] for jy in JY)
+            gamma * (F_cap * cap_VRES + sum(P[jy] * loss_VRES[jy] for jy in JY))
             + (1 - gamma) * cvar_VRES
             + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_elec_GC/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)

@@ -2,6 +2,8 @@
 # print_run_summary.jl — Formatted console summary for all entry points
 # ==============================================================================
 
+import Printf: @sprintf, @printf
+
 const _MARKET_LABELS = Dict(
     "elec"    => "Electricity",
     "H2"      => "Hydrogen",
@@ -87,25 +89,25 @@ function _sp_capacity_rows(var_dict, agents, JY, power_vres, H2_producers, offta
         inv_vec = Float64[]
         if id in power_vres && haskey(var_dict, :power_cap_VRES) && haskey(var_dict[:power_cap_VRES], id)
             cap_var = var_dict[:power_cap_VRES][id]
-            cap_vec = [value(cap_var[jy]) for jy in JY]
+            cap_vec = [value(cap_var)]
             if haskey(var_dict, :power_inv_VRES) && haskey(var_dict[:power_inv_VRES], id)
                 inv_var = var_dict[:power_inv_VRES][id]
-                inv_vec = [value(inv_var[jy]) for jy in JY]
+                inv_vec = [value(inv_var)]
             end
         elseif id in H2_producers && haskey(var_dict, :H2_cap_elec) && haskey(var_dict[:H2_cap_elec], id)
             cap_var = var_dict[:H2_cap_elec][id]
-            cap_vec = [value(cap_var[jy]) for jy in JY]
+            cap_vec = [value(cap_var)]
             if haskey(var_dict, :H2_inv_elec) && haskey(var_dict[:H2_inv_elec], id)
                 inv_var = var_dict[:H2_inv_elec][id]
-                inv_vec = [value(inv_var[jy]) for jy in JY]
+                inv_vec = [value(inv_var)]
             end
         elseif id in offtaker_green && haskey(var_dict, :offtaker_cap_EP_green) &&
                haskey(var_dict[:offtaker_cap_EP_green], id)
             cap_var = var_dict[:offtaker_cap_EP_green][id]
-            cap_vec = [value(cap_var[jy]) for jy in JY]
+            cap_vec = [value(cap_var)]
             if haskey(var_dict, :offtaker_inv_EP_green) && haskey(var_dict[:offtaker_inv_EP_green], id)
                 inv_var = var_dict[:offtaker_inv_EP_green][id]
-                inv_vec = [value(inv_var[jy]) for jy in JY]
+                inv_vec = [value(inv_var)]
             end
         end
         isempty(cap_vec) && continue

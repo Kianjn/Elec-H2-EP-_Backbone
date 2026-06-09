@@ -348,15 +348,9 @@ if isfile(sp_cap_file)
                 cap_var = mod.ext[:variables][:cap_EP_y]
             end
             if cap_var !== nothing
-                for jy in jy_set
-                    row = sp_cap_df[(sp_cap_df.AgentID .== m) .& (sp_cap_df.jy .== jy), :]
-                    if nrow(row) == 0
-                        # If SP was solved for one year, reuse jy=1 capacity for all scenario years.
-                        row = sp_cap_df[(sp_cap_df.AgentID .== m) .& (sp_cap_df.jy .== 1), :]
-                    end
-                    if nrow(row) >= 1
-                        set_start_value(cap_var[jy], row.cap[1])
-                    end
+                row = sp_cap_df[sp_cap_df.AgentID .== m, :]
+                if nrow(row) >= 1
+                    set_start_value(cap_var, row.cap[1])
                 end
                 global n_cap_warmstart += 1
             end

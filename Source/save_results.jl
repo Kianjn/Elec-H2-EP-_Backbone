@@ -21,8 +21,14 @@
 #
 # ==============================================================================
 
-include(joinpath(@__DIR__, "print_run_summary.jl"))
-include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
+import Printf: @sprintf, @printf
+
+if !isdefined(@__MODULE__, :print_social_planner_run_summary!)
+    include(joinpath(@__DIR__, "print_run_summary.jl"))
+end
+if !isdefined(@__MODULE__, :print_risk_metrics_summary!)
+    include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
+end
 
 function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
                      H2_GC_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict)
@@ -272,7 +278,7 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
         elseif id in power_vres
             quantities[:g] = [value(vars[:g][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(vars, :cap_VRES)
-                quantities[:cap_VRES] = [value(vars[:cap_VRES][jy]) for jy in JY]
+                quantities[:cap_VRES] = [value(vars[:cap_VRES])]
             end
             return compute_agent_objective_economic(:power_vres, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in power_conv
@@ -284,7 +290,7 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
             quantities[:h2_out] = [value(vars[:h2_out][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(vars, :cap_H2_y)
-                quantities[:cap_H2_y] = [value(vars[:cap_H2_y][jy]) for jy in JY]
+                quantities[:cap_H2_y] = [value(vars[:cap_H2_y])]
             end
             return compute_agent_objective_economic(:H2_producer, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in H2_consumers
@@ -295,7 +301,7 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
             quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             quantities[:ep] = [value(vars[:ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             if haskey(vars, :cap_EP_y)
-                quantities[:cap_EP_y] = [value(vars[:cap_EP_y][jy]) for jy in JY]
+                quantities[:cap_EP_y] = [value(vars[:cap_EP_y])]
             end
             return compute_agent_objective_economic(:offtaker_green, quantities, prices, params; JH=JH, JD=JD, JY=JY)
         elseif id in offtaker_grey
@@ -329,8 +335,8 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
         return elec_q, H2_q, elec_GC_q, H2_GC_q, EP_q
     end
 
-    # Helper: capacity summary from final ADMM iteration (final-year capacity and
-    # total investment over the horizon) for capacity-expanding agents.
+    # Helper: capacity summary from final ADMM iteration (scalar capacity and
+    # one-shot investment) for capacity-expanding agents.
     function _capacity_summary_admm(id::String)
         cap_final = 0.0
         inv_total = 0.0
@@ -340,33 +346,33 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
             inv_hist = results["Inv_VRES"][id]
             if !isempty(cap_hist)
                 cap_vec = cap_hist[end]
-                cap_final = isempty(cap_vec) ? 0.0 : cap_vec[end]
+                cap_final = isempty(cap_vec) ? 0.0 : cap_vec[1]
             end
             if !isempty(inv_hist)
                 inv_vec = inv_hist[end]
-                inv_total = sum(inv_vec)
+                inv_total = isempty(inv_vec) ? 0.0 : inv_vec[1]
             end
         elseif id in H2_producers
             cap_hist = results["Cap_Elec_H2"][id]
             inv_hist = results["Inv_Elec_H2"][id]
             if !isempty(cap_hist)
                 cap_vec = cap_hist[end]
-                cap_final = isempty(cap_vec) ? 0.0 : cap_vec[end]
+                cap_final = isempty(cap_vec) ? 0.0 : cap_vec[1]
             end
             if !isempty(inv_hist)
                 inv_vec = inv_hist[end]
-                inv_total = sum(inv_vec)
+                inv_total = isempty(inv_vec) ? 0.0 : inv_vec[1]
             end
         elseif id in offtaker_green
             cap_hist = results["Cap_EP_Green"][id]
             inv_hist = results["Inv_EP_Green"][id]
             if !isempty(cap_hist)
                 cap_vec = cap_hist[end]
-                cap_final = isempty(cap_vec) ? 0.0 : cap_vec[end]
+                cap_final = isempty(cap_vec) ? 0.0 : cap_vec[1]
             end
             if !isempty(inv_hist)
                 inv_vec = inv_hist[end]
-                inv_total = sum(inv_vec)
+                inv_total = isempty(inv_vec) ? 0.0 : inv_vec[1]
             end
         end
 
@@ -488,7 +494,7 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
             elseif id in power_vres
                 agent_type = :power_vres
                 quantities[:g] = [value(vars[:g][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-                haskey(vars, :cap_VRES) && (quantities[:cap_VRES] = [value(vars[:cap_VRES][jy]) for jy in JY])
+                haskey(vars, :cap_VRES) && (quantities[:cap_VRES] = [value(vars[:cap_VRES])])
             elseif id in power_conv
                 agent_type = :power_conv
                 quantities[:g] = [value(vars[:g][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
@@ -498,7 +504,7 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
                 quantities[:q_elec_gc] = [value(vars[:q_elec_gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
                 quantities[:h2_out] = [value(vars[:h2_out][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
                 quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-                haskey(vars, :cap_H2_y) && (quantities[:cap_H2_y] = [value(vars[:cap_H2_y][jy]) for jy in JY])
+                haskey(vars, :cap_H2_y) && (quantities[:cap_H2_y] = [value(vars[:cap_H2_y])])
             elseif id in H2_consumers
                 agent_type = :H2_consumer
                 quantities[:d_H] = [value(vars[:d_H][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
@@ -507,7 +513,7 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
                 quantities[:h2_in] = [value(vars[:h2_in][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
                 quantities[:q_h2gc] = [value(vars[:q_h2gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
                 quantities[:ep] = [value(vars[:ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
-                haskey(vars, :cap_EP_y) && (quantities[:cap_EP_y] = [value(vars[:cap_EP_y][jy]) for jy in JY])
+                haskey(vars, :cap_EP_y) && (quantities[:cap_EP_y] = [value(vars[:cap_EP_y])])
             elseif id in offtaker_grey
                 agent_type = :offtaker_grey
                 quantities[:ep] = [value(vars[:ep][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
