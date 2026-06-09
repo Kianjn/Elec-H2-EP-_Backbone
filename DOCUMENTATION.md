@@ -18,7 +18,7 @@
 13. [Code Conventions](#13-code-conventions)
 14. [References](#14-references)
 
-> **Math on GitHub:** Inline: `$\cdots$`; display: `$$\cdots$$`. Inside one `$$` block: **no blank lines**; **do not wrap a single equation row across two source lines** (finish the row with `\\` on the same line, then start the next row). Otherwise GitHub may close math early and `_` subscripts look like italics (`CVaR_i` → broken text). Multi-line display math: `\begin{aligned}...\end{aligned}` inside one `$$` pair. **Code identifiers** (`elec_GC`, `sw_aux`) stay in backticks, not in `$...$`.
+> **Math on GitHub:** Inline: `$\cdots$`; display: `$$\cdots$$`. Inside one `$$` block: **no blank lines**; **do not wrap a single equation row across two source lines** (use `\begin{aligned}...\end{aligned}`). Always **brace subscripts** (`_{i}` not `_i`); never split math (`CVaR$_\beta$` breaks — use `$\mathrm{CVaR}_{\beta}$`). Prefer `\left\lbrace` / `\right\rbrace` over `\{` / `\}`; use `_{+}` not `_+`; use `^{\ast}` not `^*` in inline math. **Code identifiers** (`elec_GC`, `sw_aux`) stay in backticks, not in `$...$`.
 
 ---
 
@@ -65,18 +65,18 @@ $$
 ### 0.4 Units
 
 - Electricity: MWh.
-- Electricity GC: $\mathrm{MWh}_{\mathrm{GC}}$ (1 certificate per renewable MWh).
-- Hydrogen: $\mathrm{MWh}_{\mathrm{H2}}$ (or equivalent energy-based unit).
-- Hydrogen GC: $\mathrm{MWh}_{\mathrm{GC,H2}}$.
-- End product (EP): $\mathrm{MWh}_{\mathrm{EP}}$ or $\mathrm{t}_{\mathrm{EP}}$ (consistent within the model, governed by `Alpha`).
+- Electricity GC: $\text{MWh}_{\text{GC}}$ (1 certificate per renewable MWh).
+- Hydrogen: $\text{MWh}_{\text{H2}}$ (or equivalent energy-based unit).
+- Hydrogen GC: $\text{MWh}_{\text{GC,H2}}$.
+- End product (EP): $\text{MWh}_{\text{EP}}$ or $\text{t}_{\text{EP}}$ (consistent within the model, governed by `Alpha`).
 
 All monetary values are in **EUR** (e.g. €/MWh, €/t, €/MW-year).
 
 ### 0.5 Risk Parameters and CVaR
 
 - $\gamma$ (or $\gamma_i$): **weight on expected loss vs CVaR** in the objective (§4.10). $\gamma=1$ ⇒ risk-neutral (CVaR inactive); $\gamma<1$ ⇒ risk-averse (typically $\gamma=0.5$ in sensitivity runs).
-- $\beta$: **CVaR confidence level** (Rockafellar–Uryasev / Hoschle et al.). CVaR$_\beta$ averages the worst $(1-\beta)$ share of scenarios; **lower $\beta$ ⇒ more risk-averse** (e.g. $\beta=0.2$ ⇒ worst 80%; $\beta=0.8$ ⇒ worst 20%). At fixed $\gamma=0.5$, sweep $\beta \in \{0.2,0.4,0.6,0.8\}$ for risk-aversion intensity (§4.10.4).
-- $\alpha_i$, $u_i(y)$, $\mathrm{CVaR}_i$: Rockafellar–Uryasev auxiliaries for agent $i$ (VaR proxy, shortfall, conditional tail loss).
+- $\beta$: **CVaR confidence level** (Rockafellar–Uryasev / Hoschle et al.). $\mathrm{CVaR}_{\beta}$ averages the worst $(1-\beta)$ share of scenarios; **lower $\beta$ ⇒ more risk-averse** (e.g. $\beta=0.2$ ⇒ worst 80%; $\beta=0.8$ ⇒ worst 20%). At fixed $\gamma=0.5$, sweep $\beta$ over $0.2$, $0.4$, $0.6$, and $0.8$ for risk-aversion intensity (§4.10.4).
+- $\alpha_i$, $u_i(y)$, $\mathrm{CVaR}_{i}$: Rockafellar–Uryasev auxiliaries for agent $i$ (VaR proxy, shortfall, conditional tail loss).
 
 Full definitions, Hoschle-style calibration workflow, and equilibrium effects: **§4.10**. Social planner CVaR structure: **§7.4**. Reporting: **§7.6**.
 
@@ -90,8 +90,8 @@ The project includes three entry points. Each has a **code name** (script / fold
 
 | Script | Code name | Economic case (competitive spot, capacity investment) |
 |---|---|---|
-| **`social_planner.jl`** | Social planner (SP) | **Complete risk trading** — centralised risk-averse welfare maximisation with a single social CVaR on aggregate welfare (their Table 1, “Averse, Competitive, Complete” → optimisation [b]). |
-| **`market_exposure.jl`** | Market exposure (ME) | **Incomplete risk trading** — decentralised equilibrium via ADMM; risk-averse agents hedge **private** tail losses with per-agent CVaR, without an explicit risk market (their “Averse, Competitive, No risk trading”). |
+| **`social_planner.jl`** | Social planner (SP) | **Complete risk trading** — centralised risk-averse welfare maximisation with a single social CVaR on aggregate welfare. |
+| **`market_exposure.jl`** | Market exposure (ME) | **Incomplete risk trading** — decentralised equilibrium via ADMM; risk-averse agents hedge **private** tail losses with per-agent CVaR, without an explicit risk market. |
 | **`market_exposure_contracts.jl`** | Market exposure with contracts (ME+C) | Same **incomplete risk trading** institution as ME, plus **bilateral contract pools** (PPA, HPA) as additional physical coordination channels; not a separate complete-risk-trading benchmark. |
 
 **When $\gamma = 1$ (risk-neutral):** SP is the stochastic welfare-maximisation benchmark; ME (and ME+C) should converge to the same quantities and spot prices as SP in the limit of exact ADMM convergence (first welfare theorem).
@@ -264,7 +264,7 @@ For this model, at ADMM convergence (penalties inactive), the economic equilibri
 $$
 \begin{aligned}
 & \min_{x_i \in \mathcal{X}_i} \; \pi_i(x_i, \lambda) \\
-& \quad\text{or}\quad \min_{x_i \in \mathcal{X}_i} \; \gamma_i \mathbb{E}[\ell_i(x_i,\lambda)] + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i)
+& \quad\text{or}\quad \min_{x_i \in \mathcal{X}_i} \; \gamma_i \mathbb{E}[\ell_i(x_i,\lambda)] + (1-\gamma_i)\,\mathrm{CVaR}_{i}(\ell_i)
 \end{aligned}
 $$
 
@@ -373,7 +373,7 @@ Quadratic $U(d) = A d - \frac{B}{2}d^2$ gives **linear inverse demand** $p(d)=A-
 
 ### 4.5 Risk-adjusted competitive equilibrium ($\gamma < 1$)
 
-With **private CVaR** (ME / ME+C), risk-averse agents minimise $\gamma_i \mathbb{E}[\ell_i] + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i)$ with **full** loss $\ell_i$ (operational + $F_{\mathrm{cap}}\cdot\mathrm{cap}$) — still **price-taking**, but **incomplete risk trading** (d'Aertrycke et al.). The **social planner** pools tail risk via **one social CVaR** on aggregate welfare (**complete risk trading**). Definitions, $\gamma$ vs $\beta$, and effects on investment: **§4.10**. Labels: **§4.8**. Planner maths: **§7.4**.
+With **private CVaR** (ME / ME+C), risk-averse agents minimise $\gamma_{i}\,\mathbb{E}[\ell_{i}] + (1-\gamma_{i})\,\mathrm{CVaR}_{i}(\ell_{i})$ with **full** loss $\ell_{i}$ (operational + $F_{\mathrm{cap}}\cdot\mathrm{cap}$) — still **price-taking**, but **incomplete risk trading** (d'Aertrycke et al.). The **social planner** pools tail risk via **one social CVaR** on aggregate welfare (**complete risk trading**). Definitions, $\gamma$ vs $\beta$, and effects on investment: **§4.10**. Labels: **§4.8**. Planner maths: **§7.4**.
 
 ### 4.6 Social planner as the welfare dual
 
@@ -386,7 +386,7 @@ $$
 \end{aligned}
 $$
 
-Per-agent welfare contributions are **utility minus real cost** (no $\lambda$ terms). At $\gamma=1$, if the coupled problem is convex, any competitive equilibrium $(x^*,\lambda^*)$ solves the planner and vice versa (**first welfare theorem**). That is why SP and ME should agree at $\gamma=1$ when ADMM converges.
+Per-agent welfare contributions are **utility minus real cost** (no $\lambda$ terms). At $\gamma=1$, if the coupled problem is convex, any competitive equilibrium $(x^{\ast},\lambda^{\ast})$ solves the planner and vice versa (**first welfare theorem**). That is why SP and ME should agree at $\gamma=1$ when ADMM converges.
 
 The planner is **not** an MCP solved directly as complementarity; it is a **mathematical program**. Its KKT multipliers on balance constraints are the **competitive prices** (§7.2).
 
@@ -469,7 +469,7 @@ Fix confidence level $\beta \in (0,1)$.
 Rockafellar & Uryasev (2000) show CVaR is **coherent** (subadditive, monotone) and can be optimised by convex programming:
 
 $$
-\mathrm{CVaR}_\beta(\ell) = \min_{\alpha} \left\{ \alpha + \frac{1}{1-\beta}\,\mathbb{E}\bigl[(\ell - \alpha)_+\bigr] \right\}, \quad (x)_+ = \max(x,0)
+\mathrm{CVaR}_{\beta}(\ell) = \min_{\alpha} \left\lbrace \alpha + \frac{1}{1-\beta}\,\mathbb{E}\bigl[(\ell - \alpha)_{+}\bigr] \right\rbrace, \quad (x)_{+} = \max(x,0)
 $$
 
 **In code** (agents and planner), this becomes linear constraints with auxiliaries $\alpha$, $u_y$, $\mathrm{CVaR}$:
@@ -485,7 +485,7 @@ Minimising CVaR in the objective (or penalising it) pushes the solution toward *
 **Market exposure (private CVaR)** — VRES, electrolyzer, green offtaker minimise:
 
 $$
-\min \;\; \gamma_i \,\mathbb{E}[\ell_i] + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i) + \text{(ADMM penalties)}
+\min \;\; \gamma_i \,\mathbb{E}[\ell_i] + (1-\gamma_i)\,\mathrm{CVaR}_{i}(\ell_i) + \text{(ADMM penalties)}
 $$
 
 equivalently written in code as $\gamma \cdot (F_{\mathrm{cap}}\cdot\mathrm{cap} + \sum_y P_y \ell^{\mathrm{op}}_y) + (1-\gamma)\cdot\mathrm{CVaR}$ with $\ell^{\mathrm{op}}$ the operational part.
@@ -518,17 +518,17 @@ This project follows the **two-step risk calibration** used in Hoschle et al. (2
 
 **Lower $\beta$ ⇒ more risk-averse** (Hoschle et al. label $\beta$ as “risk aversion” in their sensitivity figures). Mechanism:
 
-- CVaR$_\beta$ averages loss over the worst $(1-\beta)$ share of scenarios.
+- $\mathrm{CVaR}_{\beta}$ averages loss over the worst $(1-\beta)$ share of scenarios.
 - $\beta=0.8$ ⇒ worst **20%** only — mild tail focus within the risk-averse regime.
 - $\beta=0.4$ ⇒ worst **60%** — penalises most below-median years.
 - $\beta=0.2$ ⇒ worst **80%** — strongest tail penalty in the standard sweep (closest to worst-case among interior $\beta$ values).
 
 **$\gamma$ and $\beta$ are complementary, not interchangeable:**
 
-- **$\gamma$** switches risk aversion **on/off** and sets the **split** between $\mathbb{E}[\cdot]$ and CVaR$_\beta(\cdot)$ in the objective.
+- **$\gamma$** switches risk aversion **on/off** and sets the **split** between $\mathbb{E}[\cdot]$ and $\mathrm{CVaR}_{\beta}(\cdot)$ in the objective.
 - **$\beta$** defines **which part of the loss distribution** enters CVaR once $\gamma<1$. At fixed $\gamma=0.5$, varying $\beta$ is the main way to trace **increasing risk aversion** from mild ($\beta=0.8$) to strong ($\beta=0.2$).
 
-Hoschle et al. sweep $\beta$ from $1$ (risk-neutral reference in their figures) down to $0.1$ with $\gamma=0.5$. This codebase uses **$\gamma=1$** for the risk-neutral benchmark (cleaner: CVaR term vanishes) and **$\beta \in \{0.2,0.4,0.6,0.8\}$** at $\gamma=0.5$ for the risk-averse sensitivity — the same economic logic.
+Hoschle et al. sweep $\beta$ from $1$ (risk-neutral reference in their figures) down to $0.1$ with $\gamma=0.5$. This codebase uses **$\gamma=1$** for the risk-neutral benchmark (cleaner: CVaR term vanishes) and **$\beta \in \lbrace 0.2, 0.4, 0.6, 0.8 \rbrace$** at $\gamma=0.5$ for the risk-averse sensitivity — the same economic logic.
 
 In `data.yaml`, both SP and ME read **`ADMM.gamma`** and **`ADMM.beta`** (global defaults; per-agent `gamma`/`beta` in agent blocks override for ADMM agents). Defaults: `gamma: 1.0`, `beta: 0.95` (placeholder when $\gamma=1$; set explicitly when running risk-averse cases).
 
@@ -577,7 +577,7 @@ Risk aversion reshapes **capacity**, **dispatch**, and **prices** because bad sc
 | Symbol (code) | Meaning |
 |---|---|
 | `alpha_*` / `alpha_social` | Optimised VaR threshold $\alpha$ for CVaR formula |
-| `u_*[y]` / `u_social[y]` | Shortfall $(\ell_y - \alpha)_+$ in scenario $y$ |
+| `u_*[y]` / `u_social[y]` | Shortfall $(\ell_y - \alpha)_{+}$ in scenario $y$ |
 | `CVaR_*` / `CVaR_social` | Tail-average loss at level $\beta$ |
 | `sw_aux[y]` | Planner epigraph proxy for social welfare in $y$ (§7.4) |
 
@@ -592,8 +592,8 @@ Each agent minimises its **augmented Lagrangian** (possibly risk-averse for some
 $$
 \begin{aligned}
 \min \quad & \gamma_i \sum_{h,d,y} W_{d,y}\bigl(\mathrm{cost}_i(h,d,y) - \mathrm{rev}_i(h,d,y)\bigr) + F_i^{\mathrm{cap}} \\
-& \quad + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i) \\
-& \quad + \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\bigl(g_i^k(h,d,y)-\bar g_i^k(h,d,y)\bigr)^2
+& \quad + (1-\gamma_i)\,\mathrm{CVaR}_{i}(\ell_i) \\
+& \quad + \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\bigl(g_i^k(h,d,y)-\bar{g}_i^k(h,d,y)\bigr)^2
 \end{aligned}
 $$
 
@@ -604,7 +604,7 @@ where (symbols map to code names in backticks):
 - `ρ_k` is the penalty weight for market `k`.
 - `W[d,y]` scales representative days to a full year.
 - `γ_i` is a **per-agent risk weight** (`γ=1` → risk-neutral, `γ<1` → risk-averse). Non-trivial CVaR is used only for VRES, electrolyzer, and green offtaker.
-- $\mathrm{CVaR}_i(\ell_i)$ is an agent-specific Conditional Value-at-Risk on yearly loss scenarios, with auxiliary variables $\alpha_i$, $u_i(y)$ over $y \in JY$, at confidence level $\beta$.
+- $\mathrm{CVaR}_{i}(\ell_i)$ is an agent-specific Conditional Value-at-Risk on yearly loss scenarios, with auxiliary variables $\alpha_i$, $u_i(y)$ over $y \in JY$, at confidence level $\beta$.
 
 More explicitly:
 
@@ -616,15 +616,15 @@ $$
 
 contains fuel/operational costs, certificate purchases, and investment annuities on the **cost** side, and all market revenues (price × net position) on the **revenue** side.
 
-- The **risk term** $\mathrm{CVaR}_i(\ell_i)$ captures the tail of the loss distribution over years $y$. It is only active when $\gamma_i < 1$; for $\gamma_i=1$ the CVaR part drops out and the agent becomes risk-neutral.
+- The **risk term** $\mathrm{CVaR}_{i}(\ell_i)$ captures the tail of the loss distribution over years $y$. It is only active when $\gamma_i < 1$; for $\gamma_i=1$ the CVaR part drops out and the agent becomes risk-neutral.
 
 - The **quadratic ADMM penalties**
 
 $$
-\sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\,\bigl(g_i^k(h,d,y)-\bar g_i^k(h,d,y)\bigr)^2
+\sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\,\bigl(g_i^k(h,d,y)-\bar{g}_i^k(h,d,y)\bigr)^2
 $$
 
-ensure that, in equilibrium, each agent’s net position $g_i^k$ coincides with a consensus allocation $\bar g_i^k$ that satisfies market-clearing. Economically, this can be read as a **soft enforcement of market balance**: deviating from the consensus quantity becomes increasingly expensive as $\rho_k$ grows.
+ensure that, in equilibrium, each agent’s net position $g_i^k$ coincides with a consensus allocation $\bar{g}_i^k$ that satisfies market-clearing. Economically, this can be read as a **soft enforcement of market balance**: deviating from the consensus quantity becomes increasingly expensive as $\rho_k$ grows.
 
 The ADMM penalties are **algorithmic** only (§4.2, §6); at convergence they vanish and the solution is the **risk-adjusted competitive MCP** of §4.
 
@@ -632,7 +632,7 @@ The ADMM penalties are **algorithmic** only (§4.2, §6); at convergence they va
 
 For each risk-averse agent (VRES, electrolyzer, green offtaker), CVaR is linearised via:
 
-**Important**: The loss that enters CVaR must be the **full** per-scenario loss, including the fixed capacity cost (`F_cap × cap`). Capacity `cap` is a **scalar** (non-anticipative: the same installed MW in every weather scenario). If only the operational loss is used, then when $\gamma < 1$ the fixed cost appears only in the $\gamma$-weighted term, so the effective weight on `F_cap` becomes $\gamma$ instead of $1$. With one scenario, changing $\gamma$ would then change the objective, breaking the equivalence between social planner and market exposure. The correct formulation uses `loss_total[y] = loss_operational[y] + F_cap × cap` in the CVaR shortfall constraints (same `cap` in every scenario). The $\gamma$-weighted expected term is `F_cap × cap + Σ_y P_y × loss_operational[y]`. With one scenario, $\mathrm{CVaR}_i = \ell_i$, so the objective reduces to total loss regardless of $\gamma$.
+**Important**: The loss that enters CVaR must be the **full** per-scenario loss, including the fixed capacity cost (`F_cap × cap`). Capacity `cap` is a **scalar** (non-anticipative: the same installed MW in every weather scenario). If only the operational loss is used, then when $\gamma < 1$ the fixed cost appears only in the $\gamma$-weighted term, so the effective weight on `F_cap` becomes $\gamma$ instead of $1$. With one scenario, changing $\gamma$ would then change the objective, breaking the equivalence between social planner and market exposure. The correct formulation uses `loss_total[y] = loss_operational[y] + F_cap × cap` in the CVaR shortfall constraints (same `cap` in every scenario). The $\gamma$-weighted expected term is `F_cap × cap + Σ_y P_y × loss_operational[y]`. With one scenario, $\mathrm{CVaR}_{i} = \ell_i$, so the objective reduces to total loss regardless of $\gamma$.
 - `α_i` — VaR proxy (free variable, `≥ 0`)
 - `u_i[jy]` — shortfall per scenario year (`≥ 0`)
 - `cvar_i` — CVaR value (`≥ 0`)
@@ -642,7 +642,7 @@ Constraints (code names in backticks; mathematical form):
 $$
 \begin{aligned}
 u_{i,y} &\ge \ell_{i,y} - \alpha_i \quad \forall y \in \mathcal{Y} \\
-\mathrm{CVaR}_i &\ge \alpha_i + \frac{1}{1-\beta}\sum_{y \in \mathcal{Y}} P_y\, u_{i,y}
+\mathrm{CVaR}_{i} &\ge \alpha_i + \frac{1}{1-\beta}\sum_{y \in \mathcal{Y}} P_y\, u_{i,y}
 \end{aligned}
 $$
 
@@ -785,7 +785,7 @@ This section gives the **technical** risk-aversion formulation and SP–ME equiv
   - Each such agent minimises a **private risk-adjusted loss**:
 
 $$
-\gamma_i\,\mathbb{E}[\ell_i] + (1-\gamma_i)\,\mathrm{CVaR}_i(\ell_i),
+\gamma_i\,\mathbb{E}[\ell_i] + (1-\gamma_i)\,\mathrm{CVaR}_{i}(\ell_i),
 $$
 
 subject to its own technological constraints and the ADMM penalties.
@@ -890,7 +890,7 @@ The **social planner** (`social_planner.jl`) remains indispensable as a **benchm
 
 #### 6.0.4 ADMM is the solver, not the economics
 
-ADMM iterations, consensus targets $\bar g$, and penalties $\rho$ are **algorithmic artefacts**. At convergence (residuals below tolerance), they vanish from the economics: agents trade at $\lambda^*$, markets clear, and ADMM penalties are zero. The equilibrium **definition** is in §4–§5; ADMM is one reliable way to **compute** it. The social planner is the independent check that, at $\gamma=1$, decentralised and centralised optima coincide.
+ADMM iterations, consensus targets $\bar{g}$, and penalties $\rho$ are **algorithmic artefacts**. At convergence (residuals below tolerance), they vanish from the economics: agents trade at $\lambda^{\ast}$, markets clear, and ADMM penalties are zero. The equilibrium **definition** is in §4–§5; ADMM is one reliable way to **compute** it. The social planner is the independent check that, at $\gamma=1$, decentralised and centralised optima coincide.
 
 ### 6.1 Iteration Structure
 
@@ -941,7 +941,7 @@ $$
 The consensus target for agent $i$ in a market with $n$ participants:
 
 $$
-\bar g_i^k = q_i^{k-1} - \frac{1}{n+1}\sum_j q_j^{k-1}
+\bar{g}_i^k = q_i^{k-1} - \frac{1}{n+1}\sum_j q_j^{k-1}
 $$
 
 (In code: `ḡ_i^k`, `q_i`, etc.) The `(n+1)` denominator comes from the sharing ADMM formulation, which introduces one "market copy" alongside the `n` agent copies. This distributes the imbalance correction equally.
@@ -951,12 +951,12 @@ $$
 | Symbol (code) | Name | Economic / algorithmic role | Updated when |
 |---|---|---|---|
 | `λ_k` (`results["λ"]`) | **Market price** (dual) | Shadow price of market $k$ balance; €/MWh at convergence | After each iteration: dual ascent on imbalance (§6.1 step 4) |
-| `ρ_k` (`ADMM_state["ρ"]`) | **Penalty weight** | Augmented-Lagrangian curvature on $\|g_i^k - \bar g_i^k\|^2$; **not** an economic parameter | After residuals: `update_rho!` (§6.3) |
+| `ρ_k` (`ADMM_state["ρ"]`) | **Penalty weight** | Augmented-Lagrangian curvature on $\|g_i^k - \bar{g}_i^k\|^2$; **not** an economic parameter | After residuals: `update_rho!` (§6.3) |
 | `ḡ_i^k` (`g_bar_*`) | **Consensus target** | Per-agent quantity target in sharing ADMM; pulls $g_i$ toward market-clearing | Before each agent solve: `ADMM_subroutine!` |
 | `imbalance_k` | **Primal residual (unnormalised)** | $\sum_i g_i^k$ (+ fixed demand for EP); should be **0** at equilibrium | After all agents solve |
 | `r_k`, `s_k` | **Primal / dual residuals** | Scalar L2 norms for stopping test (§6.5) | After imbalance and dual-residual pass |
 
-**Intuition:** Agents optimise against **fixed** $\lambda^k$ and $\bar g_i^k$ (price-taking). The coordinator raises $\lambda$ when there is excess demand (negative imbalance) and lowers it when there is excess supply. $\rho$ controls how hard agents are pulled toward $\bar g$; if primal residuals stall while dual residuals are tiny, $\rho$ is **increased** so consensus is enforced faster.
+**Intuition:** Agents optimise against **fixed** $\lambda^{k}$ and $\bar{g}_{i}^{k}$ (price-taking). The coordinator raises $\lambda$ when there is excess demand (negative imbalance) and lowers it when there is excess supply. $\rho$ controls how hard agents are pulled toward $\bar{g}$; if primal residuals stall while dual residuals are tiny, $\rho$ is **increased** so consensus is enforced faster.
 
 ### 6.3 Adaptive Penalty (ρ)
 
@@ -1218,12 +1218,12 @@ Warm-starting ADMM from the social planner solution is **critical** for fast, re
 | # | Component | Source file | What it fixes |
 |---|---|---|---|
 | **1** | **Prices $\lambda$** | `social_planner_results/Market_Prices.csv` | Without SP prices, ADMM uses scalar `initial_price` from `data.yaml` — far from peak/off-peak structure → large early imbalances and slow λ search |
-| **2** | **Primal quantities** | `social_planner_results/SP_Primal_Quantities.csv` | Pre-populates `results["g"]`, `h2`, etc. so iteration 1 has **previous quantities = SP** → consensus targets $\bar g \approx$ SP → **near-zero imbalance on iteration 1** when λ also matches SP |
+| **2** | **Primal quantities** | `social_planner_results/SP_Primal_Quantities.csv` | Pre-populates `results["g"]`, `h2`, etc. so iteration 1 has **previous quantities = SP** → consensus targets $\bar{g} \approx$ SP → **near-zero imbalance on iteration 1** when λ also matches SP |
 | **3** | **Capacity** | `social_planner_results/SP_Capacities.csv` | `set_start_value` on `cap_*` variables; seeds capacity ADMM auxiliaries `z_cap` so $x_{\mathrm{cap}} \approx z_{\mathrm{cap}} \approx$ SP from the start |
 
 #### 6.6.2 Why each component matters
 
-**Prices only (no primal warm-start):** Agents still solve with $\bar g = 0$ on iteration 1 (empty quantity history → zero consensus target). They are penalised toward zero net positions → wrong dispatch, huge imbalances, many iterations to recover.
+**Prices only (no primal warm-start):** Agents still solve with $\bar{g} = 0$ on iteration 1 (empty quantity history → zero consensus target). They are penalised toward zero net positions → wrong dispatch, huge imbalances, many iterations to recover.
 
 **Primal without capacity:** Flow consensus may clear while `z_cap` is derived from zero flows → capacity penalty pulls investment toward **zero MW** — exactly wrong for a model where VRES/H₂/EP capacity is endogenous.
 
@@ -1284,12 +1284,12 @@ $$
 \min \sum_i f_i(x_i) \quad \text{s.t.}\quad x_i = z,\;\; \sum_i x_i = 0
 $$
 
-This project uses the **sharing ADMM** variant for market $k$: each agent $i$ has net position $g_i^k$; market clearing is $\sum_i g_i^k = 0$ (plus fixed demand for EP). The implementation introduces consensus copies via targets $\bar g_i^k$ and penalty $\frac{\rho_k}{2}\|g_i^k - \bar g_i^k\|^2$ in each agent objective (§5.1), with coordinator updates:
+This project uses the **sharing ADMM** variant for market $k$: each agent $i$ has net position $g_i^k$; market clearing is $\sum_i g_i^k = 0$ (plus fixed demand for EP). The implementation introduces consensus copies via targets $\bar{g}_i^k$ and penalty $\frac{\rho_k}{2}\|g_i^k - \bar{g}_i^k\|^2$ in each agent objective (§5.1), with coordinator updates:
 
 | Boyd / standard ADMM step | This codebase | Reference |
 |---|---|---|
 | $x$-update (local minimise augmented Lagrangian) | `ADMM_subroutine!` → `solve_*_agent!` (Gurobi) | §6.1 step 1 |
-| $z$-update (consensus average) | $\bar g_i^k = q_i^{k-1} - \frac{1}{n+1}\mathrm{imbalance}^{k-1}$ | §6.2 |
+| $z$-update (consensus average) | $\bar{g}_i^k = q_i^{k-1} - \frac{1}{n+1}\mathrm{imbalance}^{k-1}$ | §6.2 |
 | Dual ascent $u \leftarrow u + \rho(x-z)$ | $\lambda^{k+1} = \lambda^k - \eta\rho\,\mathrm{imbalance}^k$ (sign: imbalance = supply−demand) | §6.1 step 4, §6.8 |
 | Primal residual $\|Ax+Bz-c\|_2$ | $\|\mathrm{imbalance}^k\|_2$ per market | §6.1 step 3 |
 | Dual residual $\|\rho A^\top(z^k-z^{k-1})\|_2$ | $\|\rho\,\Delta(\text{consensus deviation})\|_2$; capacity uses $\Delta z$ | §6.1 step 3, §6.4.2 |
@@ -1712,18 +1712,6 @@ In the Julia model (`define_power_parameters.jl`, `define_common_parameters.jl`)
 **Annual scaling**: any per-hour, per-representative-day cost or revenue term is multiplied by **`W[jd, jy]`** when aggregating to a scenario-year total, so an 8-day optimisation approximates a weighted 365-day year.
 
 Conventional generation uses **`AF ≡ 1`** (fully dispatchable); only VRES availability varies with weather.
-
-#### Regenerating input files
-
-From the repository root (requires network on first run):
-
-```bash
-python Input/generate_weather_scenarios.py
-```
-
-This writes all `timeseries_2021.csv`–`timeseries_2030.csv`, the matching `output_<label>/` CSVs, and `weather_scenario_summary.json`. Raw API responses are cached under `Input/weather_cache/`.
-
----
 
 ## 10. Project Structure
 
