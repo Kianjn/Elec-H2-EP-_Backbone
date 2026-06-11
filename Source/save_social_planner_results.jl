@@ -36,9 +36,7 @@ import Printf: @sprintf, @printf
 if !isdefined(@__MODULE__, :print_social_planner_run_summary!)
     include(joinpath(@__DIR__, "print_run_summary.jl"))
 end
-if !isdefined(@__MODULE__, :print_risk_metrics_summary!)
-    include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
-end
+include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
 
 function save_social_planner_results!(planner::Model, planner_state::Dict, agents::Dict,
                                       mdict::Dict, results_folder::String)
@@ -70,7 +68,7 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     status = termination_status(planner)
     # This function is called after direct QCP solve.
     # LOCALLY_SOLVED is accepted as a fallback for convex models.
-    if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
+    if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED && status != MOI.ALMOST_LOCALLY_SOLVED
         @warn "Social planner did NOT solve to optimality (status: $status). " *
               "Cannot extract duals or variable values."
         if status == MOI.INFEASIBLE
@@ -239,7 +237,8 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     # Print run summary to the output log
     print_social_planner_run_summary!(prices_df, var_dict, agents, JY,
                                       power_vres, H2_producers, offtaker_green;
-                                      results_dir=results_folder)
+                                      results_dir=results_folder,
+                                      solver_status=get(planner_state, :solver_status, termination_status(planner)))
 
     # ── Build 3D price arrays [jh, jd, jy] for ADMM-style objective computation ─
     # The duals are indexed [jy, jh, jd]. We build λ[jh, jd, jy] to match the

@@ -26,13 +26,12 @@ import Printf: @sprintf, @printf
 if !isdefined(@__MODULE__, :print_social_planner_run_summary!)
     include(joinpath(@__DIR__, "print_run_summary.jl"))
 end
-if !isdefined(@__MODULE__, :print_risk_metrics_summary!)
-    include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
-end
+include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
 
 function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
-                     H2_GC_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict)
-    results_dir = joinpath(@__DIR__, "..", "market_exposure_results")
+                     H2_GC_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict;
+                     results_dir::String = joinpath(@__DIR__, "..", "market_exposure_results"),
+                     case_label::String = "market_exposure")
     isdir(results_dir) || mkdir(results_dir)
 
     # Determine the number of ADMM iterations actually performed.
@@ -314,6 +313,8 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
         elseif id in get(agents, :elec_GC_demand, String[])
             quantities[:d_gc] = [value(vars[:d_gc][jh, jd, jy]) for jh in JH, jd in JD, jy in JY]
             return compute_agent_objective_economic(:elec_GC_demand, quantities, prices, params; JH=JH, JD=JD, JY=JY)
+        elseif id in get(agents, :merged, String[])
+            return objective_value(m)
         else
             return 0.0
         end
@@ -374,6 +375,10 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
                 inv_vec = inv_hist[end]
                 inv_total = isempty(inv_vec) ? 0.0 : inv_vec[1]
             end
+        elseif haskey(results, "Cap_Merged") && !isempty(get(results["Cap_Merged"], id, []))
+            cap_vec = results["Cap_Merged"][id][end]
+            cap_final = sum(cap_vec)
+            inv_total = 0.0
         end
 
         return cap_final, inv_total
@@ -392,13 +397,15 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     inv_total_sum = Float64[]
     obj_sum       = Float64[]
 
-    for k in (:power, :H2, :offtaker, :elec_GC_demand)
+    for k in (:power, :H2, :offtaker, :elec_GC_demand, :merged)
         haskey(agents, k) || continue
         for id in agents[k]
             push!(agent_ids_sum, String(id))
             push!(group_sum, String(k))
 
-            type_label = if id in power_consumers
+            type_label = if k == :merged
+                String(get(mdict[id].ext[:parameters], :Type, "Merged"))
+            elseif id in power_consumers
                 "PowerCons"
             elseif id in power_vres || id in power_conv
                 "PowerGen"
@@ -736,8 +743,8 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     prices_df = DataFrame(prices_rows)
     CSV.write(joinpath(results_dir, "Market_Prices.csv"), prices_df)
 
-    risk_metrics = write_admm_risk_outputs!(mdict, agents, results_dir; case_label = "market_exposure")
-    print_risk_metrics_summary!(risk_metrics; title = "ADMM risk metrics (ex-post social CVaR)")
+    risk_metrics = write_admm_risk_outputs!(mdict, agents, results_dir; case_label = case_label)
+    print_risk_metrics_summary!(risk_metrics; title = "ADMM risk metrics (vs SP benchmark)")
 
     print_admm_run_summary!(ADMM_state, results, agents; results_dir=results_dir)
 

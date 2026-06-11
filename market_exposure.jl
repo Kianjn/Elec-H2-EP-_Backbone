@@ -349,8 +349,9 @@ if isfile(sp_cap_file)
             end
             if cap_var !== nothing
                 row = sp_cap_df[sp_cap_df.AgentID .== m, :]
-                if nrow(row) >= 1
-                    set_start_value(cap_var, row.cap[1])
+                cap_val = _sp_cap_scalar(row)
+                if cap_val !== nothing
+                    set_start_value(cap_var, cap_val)
                 end
                 global n_cap_warmstart += 1
             end

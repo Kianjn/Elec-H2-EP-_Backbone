@@ -178,6 +178,9 @@ function extract_private_cvar_by_agent(mdict::Dict, agents::Dict)
         elseif t == "GreenOfftaker" && haskey(vars, :CVaR_GreenOfftaker)
             cvar_val = value(vars[:CVaR_GreenOfftaker])
             alpha_val = haskey(vars, :alpha_G) ? value(vars[:alpha_G]) : NaN
+        elseif t in ("GreenH2Coalition", "GreenCoalition") && haskey(vars, :CVaR_coalition)
+            cvar_val = value(vars[:CVaR_coalition])
+            alpha_val = haskey(vars, :alpha_coalition) ? value(vars[:alpha_coalition]) : NaN
         end
         isfinite(cvar_val) || continue
         push!(rows, (agent=id, type=t, cvar_private=cvar_val, alpha_private=alpha_val))
@@ -185,13 +188,25 @@ function extract_private_cvar_by_agent(mdict::Dict, agents::Dict)
     return rows
 end
 
+"""Parse a numeric metric cell from Risk_Metrics.csv (may be String or Real)."""
+function _parse_metric_value(v)
+    v isa Real && return Float64(v)
+    v isa Missing && return nothing
+    s = strip(string(v))
+    (isempty(s) || s == "-" || lowercase(s) == "nan") && return nothing
+    return tryparse(Float64, s)
+end
+
 function load_sp_social_cvar_benchmark(project_root::String)
     path = joinpath(project_root, "social_planner_results", "Risk_Metrics.csv")
     isfile(path) || return nothing
     df = CSV.read(path, DataFrame)
-    sub = df[df.Metric .== "social_CVaR", :]
-    isempty(sub) && return nothing
-    return Float64(sub.Value[1])
+    for i in 1:nrow(df)
+        String(df.Metric[i]) == "social_CVaR" || continue
+        parsed = _parse_metric_value(df.Value[i])
+        return parsed  # first exact match (may be nothing if non-numeric)
+    end
+    return nothing
 end
 
 function extract_sp_risk_metrics(planner::Model, planner_state::Dict, mdict::Dict, agents::Dict)
@@ -236,10 +251,16 @@ function extract_sp_risk_metrics(planner::Model, planner_state::Dict, mdict::Dic
     )
 end
 
+"""Read γ and β from agent parameters (stored as :γ/:β in define_common_parameters!)."""
+function _read_risk_params(p::Dict)
+    gamma = Float64(get(p, :γ, get(p, :gamma, 1.0)))
+    beta  = Float64(get(p, :β, get(p, :beta, 0.95)))
+    return gamma, beta
+end
+
 function extract_admm_risk_metrics(mdict::Dict, agents::Dict, case_label::String; project_root::String)
     ref = mdict[agents[:all][1]]
-    gamma = Float64(get(ref.ext[:parameters], :gamma, 1.0))
-    beta = Float64(get(ref.ext[:parameters], :beta, 0.95))
+    gamma, beta = _read_risk_params(ref.ext[:parameters])
     JY, P, swelfare_y = aggregate_social_welfare_per_year(mdict, agents)
     loss_y = -swelfare_y
     cvar_expost, alpha_expost, _ = empirical_cvar(loss_y, P, beta)
@@ -323,26 +344,38 @@ function write_admm_risk_outputs!(mdict::Dict, agents::Dict, results_dir::String
 end
 
 function print_risk_metrics_summary!(metrics::NamedTuple; title::String = "Risk metrics")
+    # Internal CVaR is on loss L = -welfare; report tail welfare = -CVaR(L) (higher is better).
+    tail_welfare = -metrics.social_CVaR
+    min_sw = minimum(metrics.social_welfare_per_year)
+    spread = maximum(metrics.social_welfare_per_year) - min_sw
+    tail_pct = round(100 * (1 - metrics.beta); digits=0)
+    risk_neutral = metrics.gamma >= 1.0 - 1e-12
+
     println()
     println("-" ^ 72)
     println("  ", title)
     println("-" ^ 72)
     @printf("  Case:                    %s\n", metrics.case)
     @printf("  gamma:                   %.4f\n", metrics.gamma)
-    @printf("  beta:                    %.4f\n", metrics.beta)
-    @printf("  E[social welfare]:       %12.2f EUR\n", metrics.expected_social_welfare)
-    @printf("  Social CVaR (on loss):   %12.2f EUR\n", metrics.social_CVaR)
-    @printf("  alpha (VaR proxy):       %12.2f EUR\n", metrics.alpha_social)
+    @printf("  beta:                    %.4f  (tail = worst %.0f%% of scenario years)\n",
+            metrics.beta, tail_pct)
+    @printf("  E[social welfare]:            %10.3f bn EUR\n", metrics.expected_social_welfare / 1e9)
+    @printf("  Tail welfare (CVaR):          %10.3f bn EUR  (higher = safer tail)\n", tail_welfare / 1e9)
+    @printf("  Min scenario welfare:         %10.3f bn EUR\n", min_sw / 1e9)
+    @printf("  Welfare spread (max−min):     %10.3f bn EUR\n", spread / 1e9)
+
     if metrics.case == "social_planner"
-        @printf("  Risk-adjusted objective: %12.2f EUR\n", metrics.risk_adjusted_objective)
-    else
-        @printf("  Sum private agent CVaR:  %12.2f EUR\n", metrics.sum_private_CVaR)
-        if isfinite(metrics.social_CVaR_gap_vs_SP)
-            @printf("  Ex-post social CVaR gap vs SP: %+12.2f EUR\n", metrics.social_CVaR_gap_vs_SP)
-        end
+        @printf("  Risk-adjusted objective:        %10.3f bn EUR\n", metrics.risk_adjusted_objective / 1e9)
+    elseif isfinite(metrics.social_CVaR_gap_vs_SP)
+        sp_tail = tail_welfare + metrics.social_CVaR_gap_vs_SP  # gap is on loss: ME − SP
+        tail_gap = -metrics.social_CVaR_gap_vs_SP               # ME tail − SP tail
+        @printf("  SP tail welfare (benchmark):    %10.3f bn EUR\n", sp_tail / 1e9)
+        @printf("  Tail welfare gap vs SP:        %+10.1f M EUR  (negative ⇒ ME worse)\n", tail_gap / 1e6)
     end
-    if metrics.gamma >= 1.0 - 1e-12
-        println("  (gamma = 1: risk-neutral; CVaR term inactive in objectives.)")
+
+    if risk_neutral
+        println("  (gamma = 1: risk-neutral; tail lines are ex-post at the stated beta.)")
     end
+    println("  (Placeholder scenario years — if welfare is similar across years, risk shifts stay small.)")
     return nothing
 end

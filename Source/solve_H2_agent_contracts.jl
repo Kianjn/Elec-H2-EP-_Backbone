@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   For market_exposure_contracts: re-builds the electrolyzer objective with
+#   For me_pap / me_top / me_sop: re-builds the electrolyzer objective with
 #   current λ, g_bar, ρ (including per-VRES contract energy and capacity)
 #   and calls optimize!. Recomputes CVaR loss with contract cost.
 #
@@ -69,12 +69,12 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
             sum(W[jd, jy] * (
                 λ_elec[jh, jd, jy]       * e_in_pool[jh, jd, jy]
                 + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
-                + sum(K_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
                 + op_cost * h2_out[jh, jd, jy]
                 - λ_H2[jh, jd, jy]       * (h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
-                - K_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
             ) for jh in JH, jd in JD)
+            + sum_ppa_buyer_cost_jy(mod, ppa_vres, jy, W, JH, JD)
+            - sum_hpa_seller_revenue_jy(mod, jy, W, JH, JD)
         )
         loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y)
     end
@@ -82,11 +82,9 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
 
     obj_ppa = sum(
         sum(ρ_ppa[v]/2 * W[jd, jy] * ((-g_ppa_from[v][jh, jd, jy]) - g_bar_ppa[v][jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-        + (ρ_ppa_cap[v]/2) * ((-ppa_cap[v]) - g_bar_ppa_cap[v])^2
         for v in ppa_vres
     )
-    obj_hpa = sum(ρ_hpa/2 * W[jd, jy] * (h2_hpa[jh, jd, jy] - g_bar_hpa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY) +
-              (ρ_hpa_cap/2) * (hpa_cap - g_bar_hpa_cap)^2
+    obj_hpa = sum(ρ_hpa/2 * W[jd, jy] * (h2_hpa[jh, jd, jy] - g_bar_hpa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
 
     z_cap   = get(mod.ext[:parameters], :z_cap, 0.0)
     λ_cap   = get(mod.ext[:parameters], :λ_cap, 0.0)

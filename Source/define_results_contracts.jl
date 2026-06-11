@@ -4,7 +4,7 @@
 #
 # PURPOSE:
 #   Extends define_results! with the bilateral contract pool. Used ONLY by
-#   market_exposure_contracts.jl.
+#   me_pap.jl, me_top.jl, me_sop.jl.
 #
 #   PER-VRES PPA MARKETS: each VRES has its own PPA sub-market with GreenProducer.
 #   PER-H2-PRODUCER HPA MARKETS: each GreenProducer has its own HPA sub-market
@@ -137,6 +137,27 @@ function define_results_contracts!(admm_data::Dict, results::Dict, ADMM::Dict, a
         "Tolerance_cap"  => Dict(v => base_tol for v in hpa_h2),
     )
     hpa_market["hpa_h2"] = hpa_h2
+
+    # Warm-start contract clearing prices from SP spot prices when available.
+    if haskey(results, "warmstart") && get(results["warmstart"], "λ", false)
+        if haskey(results["λ"], "elec") && !isempty(results["λ"]["elec"])
+            elec_λ = results["λ"]["elec"][end]
+            for vres_id in ppa_vres
+                results["λ_ppa"][vres_id] = [copy(elec_λ)]
+            end
+        end
+        if haskey(results["λ"], "H2") && !isempty(results["λ"]["H2"])
+            h2_λ = results["λ"]["H2"][end]
+            for h2_id in hpa_h2
+                results["λ_hpa"][h2_id] = [copy(h2_λ)]
+            end
+        end
+    end
+
+    if !isdefined(@__MODULE__, :init_contract_strike_state!)
+        include(joinpath(@__DIR__, "contract_strike.jl"))
+    end
+    init_contract_strike_state!(ADMM, admm_data, ppa_market, hpa_market)
 
     return results, ADMM
 end

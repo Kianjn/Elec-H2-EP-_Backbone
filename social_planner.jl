@@ -408,19 +408,88 @@ if sp_solver == "gurobi"
     end
 else
     # IPOPT path (default): solve QCP directly and use returned multipliers.
-    set_optimizer_attribute(planner, "tol", Float64(get(sp_cfg, "ipopt_tol", 1e-8)))
-    set_optimizer_attribute(planner, "max_iter", Int(get(sp_cfg, "ipopt_max_iter", 5000)))
-    set_optimizer_attribute(planner, "print_level", 0)
-    optimize!(planner)
-    qcp_status = termination_status(planner)
-    duals_ok = has_duals(planner)
-    if qcp_status != MOI.OPTIMAL && qcp_status != MOI.LOCALLY_SOLVED
-        error("IPOPT social planner solve failed with status $qcp_status")
+    function _configure_ipopt!(planner::Model, sp_cfg::Dict; tol=nothing, max_iter=nothing, print_level=nothing)
+        set_optimizer_attribute(planner, "tol", Float64(something(tol, get(sp_cfg, "ipopt_tol", 1e-6))))
+        set_optimizer_attribute(planner, "max_iter", Int(something(max_iter, get(sp_cfg, "ipopt_max_iter", 5000))))
+        set_optimizer_attribute(planner, "print_level", Int(something(print_level, get(sp_cfg, "ipopt_print_level", 0))))
+        set_optimizer_attribute(planner, "nlp_scaling_method", "gradient-based")
+        if haskey(sp_cfg, "ipopt_mu_strategy")
+            set_optimizer_attribute(planner, "mu_strategy", String(sp_cfg["ipopt_mu_strategy"]))
+        end
+        return nothing
+    end
+
+    function _copy_primal_start!(dst::Model, src::Model)
+        for v in all_variables(dst)
+            name = var_name(v)
+            (name === nothing || isempty(name)) && continue
+            vs = variable_by_name(src, name)
+            vs === nothing && continue
+            set_start_value(v, value(vs))
+        end
+        return nothing
+    end
+
+    function _solve_ipopt_planner!(planner::Model, sp_cfg::Dict; label::String="", tol=nothing, max_iter=nothing)
+        _configure_ipopt!(planner, sp_cfg; tol=tol, max_iter=max_iter)
+        !isempty(label) && @info "IPOPT social planner$(label)"
+        optimize!(planner)
+        return termination_status(planner), has_duals(planner)
+    end
+
+    function _ipopt_success(status, duals_ok::Bool)
+        duals_ok || return false
+        return status == MOI.OPTIMAL || status == MOI.LOCALLY_SOLVED || status == MOI.ALMOST_LOCALLY_SOLVED
+    end
+
+    admm_cfg = get(data, "ADMM", Dict{String, Any}())
+    gamma_sp = Float64(get(admm_cfg, "gamma", 1.0))
+    beta_sp = Float64(get(admm_cfg, "beta", 0.95))
+    use_rn_warmstart = get(sp_cfg, "risk_warmstart", false) && gamma_sp < 1.0 - 1e-12
+
+    if use_rn_warmstart
+        # Easier auxiliary problem: γ=1 (CVaR inactive in objective) and high β so CVaR
+        # constraints are mild; only the primal (dispatch/capacity) is copied to the target run.
+        beta_warm = Float64(get(sp_cfg, "risk_warmstart_beta", 0.95))
+        @info "Social planner: warm-start solve before risk-adjusted run" gamma_warm=1.0 beta_warm=beta_warm target_gamma=gamma_sp target_beta=beta_sp
+        data_rn = deepcopy(data)
+        admm_rn = Dict{String, Any}(String(k) => v for (k, v) in pairs(admm_cfg))
+        admm_rn["gamma"] = 1.0
+        admm_rn["beta"] = beta_warm
+        data_rn["ADMM"] = admm_rn
+        planner_rn, _ = build_social_planner!(mdict, agents, elec_market, H2_market,
+                                              elec_GC_market, H2_GC_market, EP_market,
+                                              data_rn; env = sp_env, optimizer_factory = optimizer_factory)
+        rn_status, rn_duals = _solve_ipopt_planner!(planner_rn, sp_cfg; label=" (warm-start)")
+        if _ipopt_success(rn_status, rn_duals)
+            _copy_primal_start!(planner, planner_rn)
+            @info "Copied primal warm-start from auxiliary solve" status=rn_status
+        else
+            @warn "Warm-start solve did not yield usable primals ($rn_status); using CVaR variable seeds only."
+        end
+    end
+
+    @info "Social planner: IPOPT solve" gamma=gamma_sp beta=beta_sp tail_pct=round(100 * (1 - beta_sp); digits=1)
+    qcp_status, duals_ok = _solve_ipopt_planner!(planner, sp_cfg)
+    if !_ipopt_success(qcp_status, duals_ok)
+        retry_tol = Float64(get(sp_cfg, "ipopt_retry_tol", 1e-5))
+        retry_iter = Int(get(sp_cfg, "ipopt_retry_max_iter", 8000))
+        @warn "IPOPT failed with status $qcp_status; retrying with tol=$retry_tol and max_iter=$retry_iter"
+        qcp_status, duals_ok = _solve_ipopt_planner!(planner, sp_cfg; tol=retry_tol, max_iter=retry_iter, label=" (retry)")
+    end
+    if !_ipopt_success(qcp_status, duals_ok)
+        msg = "IPOPT social planner solve failed with status $qcp_status (gamma=$gamma_sp, beta=$beta_sp). "
+        if gamma_sp < 1.0 - 1e-12 && beta_sp < 0.4
+            msg *= "Very low beta (tail share $(round(100*(1-beta_sp), digits=0))%) is often numerically hard; try beta >= 0.4, " *
+                   "set risk_warmstart: true, or relax ipopt_tol / ipopt_retry_tol."
+        end
+        error(msg)
     end
     if !duals_ok
         error("IPOPT solved SP QCP but duals are unavailable.")
     end
-    @info "IPOPT QCP solve complete with duals available."
+    @info "IPOPT QCP solve complete with duals available." status=qcp_status
+    planner_state[:solver_status] = qcp_status
 end
 
 # ------------------------------------------------------------------------------

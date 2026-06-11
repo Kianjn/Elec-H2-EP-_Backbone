@@ -306,6 +306,15 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
         - (1 - gamma) * cvar_social
     )
 
+    # Feasible CVaR/epigraph starts for IPOPT (sw_aux <= social_welfare at x⁰).
+    # Default JuMP starts (sw_aux = 0) can violate epigraph when welfare is negative.
+    for jy in JY
+        set_start_value(sw_aux[jy], -1.0e15)
+        set_start_value(u_social[jy], 0.0)
+    end
+    set_start_value(alpha_social, -1.0e15)
+    set_start_value(cvar_social, 0.0)
+
     # ── Return planner model and state dictionary ─────────────────────────
     # planner_state carries all information that save_social_planner_results!
     # and post-processing scripts need:

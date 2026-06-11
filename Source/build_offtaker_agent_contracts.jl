@@ -3,7 +3,7 @@
  # ==============================================================================
  #
  # PURPOSE:
- #   Builds the GreenOfftaker model for market_exposure_contracts.jl with HPA
+ #   Builds the GreenOfftaker model for me_pap.jl, me_top.jl, me_sop.jl with HPA
  #   buy-side variables in addition to the standard H2/H2_GC/EP markets.
  #
  # HPA (pay-as-produced, bundled H2 + H2_GC equivalent):
@@ -94,7 +94,12 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
     for v in hpa_h2
         mod.ext[:constraints][Symbol("hpa_cap_limit_", v)] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
             h2_hpa_from[v][jh, jd, jy] <= hpa_cap[v])
+        # Cannot contract for more H₂ than the ammonia plant can absorb (MW_H2).
+        mod.ext[:constraints][Symbol("hpa_cap_ep_limit_", v)] = @constraint(mod, hpa_cap[v] <= cap_EP_y / alpha)
     end
+
+    mod.ext[:parameters][:hpa_volume_mode] = String(get(mod.ext[:parameters], :hpa_volume_mode, "pap"))
+    add_hpa_volume_variables!(mod; role=:buyer)
 
     alpha_G = mod.ext[:variables][:alpha_GreenOfftaker] = @variable(mod, lower_bound = 0, base_name = "alpha_GreenOfftaker_$(m)")
     cvar_G = mod.ext[:variables][:CVaR_GreenOfftaker] = @variable(mod, lower_bound = 0, base_name = "CVaR_GreenOfftaker_$(m)")
@@ -107,10 +112,10 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
             sum(W[jd, jy] * (
                 λ_H2[jh, jd, jy] * h2_in_pool[jh, jd, jy]
                 + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy]
-                + sum(K_hpa[v][jh, jd, jy] * h2_hpa_from[v][jh, jd, jy] for v in hpa_h2)
                 + proc_cost * ep[jh, jd, jy]
                 - λ_EP[jh, jd, jy] * ep[jh, jd, jy]
             ) for jh in JH, jd in JD)
+            + sum_hpa_buyer_cost_jy(mod, hpa_h2, jy, W, JH, JD)
         )
         loss_total[jy] = @expression(mod, loss_G[jy] + F_cap * cap_EP_y)
     end
@@ -124,7 +129,6 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
 
     obj_hpa = sum(
         sum(ρ_hpa[v]/2 * W[jd, jy] * ((-h2_hpa_from[v][jh, jd, jy]) - g_bar_hpa[v][jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-        + (ρ_hpa_cap[v]/2) * ((-hpa_cap[v]) - g_bar_hpa_cap[v])^2
         for v in hpa_h2
     )
 
@@ -132,10 +136,10 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
         sum(W[jd, jy] * (
             λ_H2[jh, jd, jy] * h2_in_pool[jh, jd, jy]
             + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy]
-            + sum(K_hpa[v][jh, jd, jy] * h2_hpa_from[v][jh, jd, jy] for v in hpa_h2)
             + proc_cost * ep[jh, jd, jy]
             - λ_EP[jh, jd, jy] * ep[jh, jd, jy]
         ) for jh in JH, jd in JD, jy in JY)
+        + sum_hpa_buyer_cost(mod, hpa_h2, W, JH, JD, JY)
         + sum(ρ_H2/2 * W[jd, jy] * ((-h2_in_pool[jh, jd, jy]) - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)

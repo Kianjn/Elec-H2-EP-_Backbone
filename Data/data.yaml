@@ -24,20 +24,50 @@ ADMM:
   rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
   rho_cap_initial: 0.1  # Penalty for investment/capacity consensus; low initial to avoid over-constraining early iterations
   nScenarioYears: 10    # Number of scenario years used by market_exposure*.jl (2021..2030)
-  max_iter: 1000         # Iteration budget
+  max_iter: 2000         # Iteration budget
   epsilon: 0.1          # Base absolute tolerance used in Boyd-style stopping tests for market_exposure
-  epsilon_contracts: 1.0 # [market_exposure_contracts only] Dedicated tolerance for contracts mode (falls back to epsilon if omitted)
-  cap_tol_relax: 100   # [market_exposure_contracts only] Multiplier for capacity consensus tolerance. Effective cap tolerance = standard × cap_tol_relax. Larger values allow convergence when flow markets are close but capacity lags (stronger coupling in contracts case).
-  gamma: 1.0              # Risk weight (γ=1 ⇒ risk-neutral; γ=0.5 ⇒ risk-averse Hoschle-style). SP + ADMM read this block.
-  beta: 0.95              # CVaR confidence β; lower β = more risk-averse at γ<1. Sweep 0.2,0.4,0.6,0.8 at γ=0.5 (§4.10.4). Inactive when γ=1.
+  epsilon_contracts: 0.5 # [me_pap / me_top / me_sop] Looser than ME (0.1); see DOCUMENTATION.md §6.5
+  cap_tol_relax: 25    # [me_pap / me_top / me_sop] Relax physical *investment* capacity ADMM only (§6.4); not shared contract C.
+  # Shared bilateral contract capacity C (MW): updated outside agent subproblems each ADMM iter.
+  contract_cap:
+    relaxation: 0.35   # Damping τ in C^{k+1} = (1-τ)C^k + τ C_target (see DOCUMENTATION.md §2)
+    expand_step: 2.0   # MW added per unit mean energy imbalance when cap binds
+    bind_tol: 1.0e-6   # Treat q_peak ≈ C as "cap binding"
+  gamma: 1.0             # Risk weight (γ=1 ⇒ risk-neutral; γ=0.5 ⇒ risk-averse Hoschle-style). SP + ADMM read this block.
+  beta: 0.95             # CVaR confidence β; lower β = more risk-averse at γ<1. Sweep 0.2,0.4,0.6,0.8 at γ=0.5 (§4.10.4). Inactive when γ=1.
 
 # ---------------------------------------------------------------------------
 # SocialPlanner: solver configuration for social_planner.jl only
+# Full justification for ipopt_tol (1e-6) with magnitude examples: DOCUMENTATION.md §7.2
 # ---------------------------------------------------------------------------
 SocialPlanner:
   solver: ipopt         # Social-planner solver ("ipopt" recommended; "gurobi" optional). ADMM continues to use Gurobi.
-  ipopt_tol: 1.0e-8     # IPOPT NLP convergence tolerance for SP solve.
+  ipopt_tol: 1.0e-6     # IPOPT KKT tolerance — see DOCUMENTATION.md §7.2 (typical ~67 €/MWh elec ⇒ ~7e-5 €/MWh error).
   ipopt_max_iter: 5000  # IPOPT iteration cap for SP solve.
+  ipopt_print_level: 0  # 0 = silent; 3–5 = IPOPT iteration log.
+  risk_warmstart: false # Optional gamma=1 auxiliary solve when gamma<1; usually unnecessary at ipopt_tol=1e-6 (§7.2).
+  risk_warmstart_beta: 0.95  # Beta for the optional warm-start auxiliary solve only.
+  # ipopt_retry_tol: 1.0e-5       # If first solve fails (social_planner.jl default).
+  # ipopt_retry_max_iter: 8000    # Retry iteration cap (social_planner.jl default).
+
+# ---------------------------------------------------------------------------
+# PartialPlanners: merged green agents for partial social planner ADMM cases
+# Used by green_h2_social_planner.jl and green_social_planner.jl only.
+# Member IDs must match blocks in Power / Hydrogen / Hydrogen_Offtaker below.
+# ---------------------------------------------------------------------------
+PartialPlanners:
+  GreenH2:
+    coalition_id: GreenH2_Coalition
+    members:
+      electrolyzer: Prod_H2_Green
+      green_offtaker: Offtaker_Green
+  Green:
+    coalition_id: Green_Coalition
+    members:
+      solar: Gen_VRES_Solar
+      wind: Gen_VRES_Wind
+      electrolyzer: Prod_H2_Green
+      green_offtaker: Offtaker_Green
 
 # ---------------------------------------------------------------------------
 # Market initial prices and penalty weights
@@ -98,7 +128,7 @@ Power:
      MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
      FixedCost_per_MW: 170000.0 # [NL] €/MW-year — NL offshore-leaning wind ≈2.0 M€/MW CAPEX+FOM ⇒ LCOE ≈57 €/MWh [IRENA-2022]
      gamma: 1.0                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
-     beta: 0.95                 # CVaR confidence β; lower = more risk-averse at gamma<1 (§4.10.4).
+     beta: 0.95                # CVaR confidence β; lower = more risk-averse at gamma<1 (§4.10.4).
 
   # Dispatchable conventional fleet proxy — NL gas-dominated residual (2021)
   Gen_Conv_01:
@@ -195,61 +225,47 @@ Electricity_GC_Demand:
 EP_Demand: {}
 
 # ---------------------------------------------------------------------------
-# PPAs — Power Purchase Agreements (VRES ↔ H2 producer)
-# Used ONLY by market_exposure_contracts.jl. Ignored by market_exposure.jl
-# and social_planner.jl.
+# PPAs — Power Purchase Agreements (VRES ↔ H₂ producer)
+# Used by me_pap.jl, me_top.jl, me_sop.jl only.
 #
-# VRES and the electrolyzer can enter PPAs: each VRES has its own PPA
-# sub-market. The H2 producer can contract with Solar, Wind, or both at
-# different prices. PPA bundles electricity + elec_GC (real-world: buyer
-# receives both, pay-as-produced). VRES commits ppa_cap (MW); electrolyzer
-# receives elec+GC package. Per-VRES λ_ppa (€/MWh) cleared by each PPA market.
+# Capacity: ONE shared scalar C (MW) per VRES link — ADMM["SharedCap"]["ppa"][vres_id].
+#   Updated outside agent subproblems (contract_capacity.jl); NOT two-party cap consensus.
+# Volume: always pay-as-produced (PaP) — settlement K_ppa × g_ppa on delivery.
+# Price: scalar strike K_ppa (€/MWh, uniform over hours) from W-weighted mean of
+# bilateral λ_ppa at convergence; benchmark is always negotiated.
+# Energy clearing: λ_ppa dual-ascent on g_ppa vs g_ppa_from imbalances.
 # ---------------------------------------------------------------------------
 PPAs:
-  initial_price: 60.0    # €/MWh — Default seed for PPA bundled price (pay-as-produced)
-  rho_initial: 0.5       # ADMM penalty for PPA market (moderate: thin market)
-  pricing_mode: "endogenous_clearing"  # "endogenous_clearing" | "fixed" | "indexed"
-  fixed_strike: 60.0     # €/MWh, used when pricing_mode = "fixed"
-  # Indexed strike uses affine rule:
-  # K = constant + elec*λ_elec + elec_GC*λ_elec_GC + H2*λ_H2 + H2_GC*λ_H2_GC + EP*λ_EP
-  index_terms:
-    constant: 0.0
-    elec: 1.0
-    elec_GC: 0.0
-    H2: 0.0
-    H2_GC: 0.0
-    EP: 0.0
-  price_floor: 0.0
-  price_cap: 10000.0
-  # Per-VRES initial prices (optional overrides; falls back to initial_price if absent)
+  initial_price: 60.0    # €/MWh — seed for λ_ppa at ADMM start
+  rho_initial: 0.5
   Gen_VRES_Solar:
-    initial_price: 55.0  # €/MWh — Solar-specific PPA price seed
+    initial_price: 55.0
   Gen_VRES_Wind:
-    initial_price: 65.0  # €/MWh — Wind-specific PPA price seed
+    initial_price: 65.0
 
 # ---------------------------------------------------------------------------
 # HPAs — Hydrogen Purchase Agreements (GreenProducer ↔ GreenOfftaker)
-# Used ONLY by market_exposure_contracts.jl.
+# Used by me_pap.jl, me_top.jl, me_sop.jl.
 #
-# Same pay-as-produced structure as PPAs, but for bundled H2 + H2_GC.
-# The settlement strike K_hpa can be:
-#   - endogenous_clearing: recovered from HPA supply-demand clearing (default)
-#   - fixed: exogenous fixed strike
-#   - indexed: affine indexation to model prices (coefficients below)
+# Capacity: ONE shared scalar C (MW) per H₂ producer link — ADMM["SharedCap"]["hpa"][h2_id].
+#   Same bargaining update as PPA (contract_capacity.jl); applies to all three entry points.
+#
+# Volume mode is selected by ENTRY POINT (not here):
+#   me_pap.jl → pay-as-produced
+#   me_top.jl → take-or-pay
+#   me_sop.jl → send-or-pay
+#
+# price_structure: fixed (default) | cfd
+# price_benchmark: negotiated | electricity | ammonia | NG
+#   negotiated — W-weighted mean of bilateral λ_hpa at convergence
+#   electricity  — cleared λ_elec (spot)
+#   ammonia      — cleared λ_EP (end-product / ammonia pool)
+#   NG           — grey-chain proxy from conventional + grey offtaker MC in yaml
 # ---------------------------------------------------------------------------
 HPAs:
   initial_price: 80.0
   rho_initial: 0.5
-  pricing_mode: "endogenous_clearing"
-  fixed_strike: 80.0
-  index_terms:
-    constant: 0.0
-    elec: 0.0
-    elec_GC: 0.0
-    H2: 1.0
-    H2_GC: 0.0
-    EP: 0.0
-  price_floor: 0.0
-  price_cap: 10000.0
+  price_structure: fixed
+  price_benchmark: negotiated
   Prod_H2_Green:
     initial_price: 80.0

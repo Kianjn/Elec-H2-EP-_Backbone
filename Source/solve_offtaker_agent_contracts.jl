@@ -3,7 +3,7 @@
  # ==============================================================================
  #
  # PURPOSE:
- #   Rebuilds the GreenOfftaker objective for market_exposure_contracts.jl with
+ #   Rebuilds the GreenOfftaker objective for me_pap.jl, me_top.jl, me_sop.jl with
  #   current λ/g_bar/ρ for standard markets and HPA terms, then optimize!.
  #
  # NOTES:
@@ -66,10 +66,10 @@ function solve_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
             sum(W[jd, jy] * (
                 λ_H2[jh, jd, jy] * h2_in_pool[jh, jd, jy]
                 + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy]
-                + sum(K_hpa[v][jh, jd, jy] * h2_hpa_from[v][jh, jd, jy] for v in hpa_h2)
                 + proc_cost * ep[jh, jd, jy]
                 - λ_EP[jh, jd, jy] * ep[jh, jd, jy]
             ) for jh in JH, jd in JD)
+            + sum_hpa_buyer_cost_jy(mod, hpa_h2, jy, W, JH, JD)
         )
         loss_total[jy] = @expression(mod, loss_G[jy] + F_cap * cap_EP_y)
     end
@@ -82,7 +82,6 @@ function solve_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
         λ_cap * (cap_EP_y - z_cap) + ρ_cap/2 * (cap_EP_y - z_cap)^2 : 0.0
     obj_hpa = sum(
         sum(ρ_hpa[v]/2 * W[jd, jy] * ((-h2_hpa_from[v][jh, jd, jy]) - g_bar_hpa[v][jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-        + (ρ_hpa_cap[v]/2) * ((-hpa_cap[v]) - g_bar_hpa_cap[v])^2
         for v in hpa_h2
     )
     mod.ext[:objective] = @objective(mod, Min,

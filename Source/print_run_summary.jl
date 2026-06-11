@@ -4,6 +4,10 @@
 
 import Printf: @sprintf, @printf
 
+if !isdefined(@__MODULE__, :final_contract_strike)
+    include(joinpath(@__DIR__, "contract_strike.jl"))
+end
+
 const _MARKET_LABELS = Dict(
     "elec"    => "Electricity",
     "H2"      => "Hydrogen",
@@ -157,8 +161,10 @@ function print_admm_run_summary!(ADMM_state::Dict, results::Dict, agents::Dict;
             rp = C["Primal"][vres_id][end]
             rd = C["Dual"][vres_id][end]
             λv = get(results, "λ_ppa", Dict())[vres_id][end]
+            price = final_contract_strike(ADMM_state, :ppa, vres_id)
+            price = price === nothing ? mean(λv) : price
             @printf("  %-16s  %10s  %10s  %12s\n",
-                    "PPA_$(vres_id)", _fmt_res(rp), _fmt_res(rd), _fmt_price(mean(λv)))
+                    "PPA_$(vres_id)", _fmt_res(rp), _fmt_res(rd), _fmt_price(price))
         end
     end
     if hpa_market !== nothing
@@ -167,8 +173,10 @@ function print_admm_run_summary!(ADMM_state::Dict, results::Dict, agents::Dict;
             rp = C_hpa["Primal"][h2_id][end]
             rd = C_hpa["Dual"][h2_id][end]
             λh = get(results, "λ_hpa", Dict())[h2_id][end]
+            price = final_contract_strike(ADMM_state, :hpa, h2_id)
+            price = price === nothing ? mean(λh) : price
             @printf("  %-16s  %10s  %10s  %12s\n",
-                    "HPA_$(h2_id)", _fmt_res(rp), _fmt_res(rd), _fmt_price(mean(λh)))
+                    "HPA_$(h2_id)", _fmt_res(rp), _fmt_res(rd), _fmt_price(price))
         end
     end
 
@@ -248,9 +256,10 @@ end
 
 function print_social_planner_run_summary!(prices_df::DataFrame, var_dict, agents::Dict,
                                            JY, power_vres, H2_producers, offtaker_green;
-                                           results_dir::String)
+                                           results_dir::String, solver_status=nothing)
     _print_rule("Social planner run summary")
-    println("  Status:     Optimal")
+    status_label = solver_status === nothing ? "Optimal" : string(solver_status)
+    println("  Status:     ", status_label)
 
     println()
     @printf("  %-16s  %12s\n", "Market", "Mean price")

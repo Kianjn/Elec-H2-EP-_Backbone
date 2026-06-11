@@ -1,9 +1,9 @@
 # ==============================================================================
-# save_results_contracts.jl — Write results for market_exposure_contracts
+# save_results_contracts.jl — Write results for me_pap / me_top / me_sop
 # ==============================================================================
 #
 # PURPOSE:
-#   Writes to market_exposure_contracts_results/. Keeps the same major ADMM CSVs
+#   Writes to me_pap_results/, me_top_results/, or me_sop_results/ (caller sets results_dir).
 #   as market_exposure (ADMM_Convergence, ADMM_Diagnostics, 5× Market_History,
 #   Agent_Summary, Market_Prices) plus contract columns where relevant.
 #   Adds focal contract outputs:
@@ -25,14 +25,37 @@ import Printf: @sprintf, @printf
 if !isdefined(@__MODULE__, :print_social_planner_run_summary!)
     include(joinpath(@__DIR__, "print_run_summary.jl"))
 end
-if !isdefined(@__MODULE__, :print_risk_metrics_summary!)
-    include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
+include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
+if !isdefined(@__MODULE__, :final_contract_strike)
+    include(joinpath(@__DIR__, "contract_strike.jl"))
+end
+
+function _contract_report_price(results::Dict, ADMM_state::Dict, pool::Symbol, id::String)
+    K = final_contract_strike(ADMM_state, pool, id)
+    if K !== nothing
+        return K
+    end
+    λ_dict = pool == :ppa ? results["λ_ppa"] : results["λ_hpa"]
+    return isempty(λ_dict[id]) ? 0.0 : mean(λ_dict[id][end])
+end
+
+function _contract_report_capacity(results::Dict, ADMM_state::Dict, pool::Symbol, id::String)
+    C = final_contract_capacity(ADMM_state, pool, id)
+    if C !== nothing
+        return C
+    end
+    cap_key = pool == :ppa ? "ppa_cap" : "hpa_cap"
+    cap_list = get(results, cap_key, Dict())
+    return isempty(get(cap_list, id, [])) ? 0.0 : abs(cap_list[id][end])
 end
 
 function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict,
                                  elec_GC_market::Dict, H2_GC_market::Dict,
-                                 ppa_market::Dict, hpa_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict)
-    results_dir = joinpath(@__DIR__, "..", "market_exposure_contracts_results")
+                                 ppa_market::Dict, hpa_market::Dict, ADMM_state::Dict, results::Dict, agents::Dict;
+                                 results_dir::String="", case_label::String="me_pap")
+    if isempty(results_dir)
+        results_dir = joinpath(@__DIR__, "..", "me_pap_results")
+    end
     isdir(results_dir) || mkdir(results_dir)
 
     n_it = length(ADMM_state["Imbalances"]["elec"])
@@ -238,12 +261,11 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         prices_EUR = Float64[]
         for vres_id in vres_ppa
             push!(vres_ids, vres_id)
-            cap_list = get(results["ppa_cap"], vres_id, [])
             g_list = get(results["ppa"], vres_id, [])
-            cap_MW = isempty(cap_list) ? 0.0 : abs(cap_list[end])
+            cap_MW = _contract_report_capacity(results, ADMM_state, :ppa, vres_id)
             energy_MWh = isempty(g_list) ? 0.0 : abs(sum(g_list[end]))
             λ_vres = get(results["λ_ppa"], vres_id, [fill(0.0, 1, 1, 1)])
-            price_mean = isempty(λ_vres) ? 0.0 : mean(λ_vres[end])
+            price_mean = _contract_report_price(results, ADMM_state, :ppa, vres_id)
             push!(cap_MWs, cap_MW)
             push!(energy_MWhs, energy_MWh)
             push!(prices_EUR, price_mean)
@@ -265,12 +287,11 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
         prices_EUR = Float64[]
         for h2_id in hpa_h2
             push!(h2_ids, h2_id)
-            cap_list = get(results["hpa_cap"], h2_id, [])
             g_list = get(results["hpa"], h2_id, [])
-            cap_MW = isempty(cap_list) ? 0.0 : abs(cap_list[end])
+            cap_MW = _contract_report_capacity(results, ADMM_state, :hpa, h2_id)
             energy_MWh = isempty(g_list) ? 0.0 : abs(sum(g_list[end]))
             λ_h = get(results["λ_hpa"], h2_id, [fill(0.0, 1, 1, 1)])
-            price_mean = isempty(λ_h) ? 0.0 : mean(λ_h[end])
+            price_mean = _contract_report_price(results, ADMM_state, :hpa, h2_id)
             push!(cap_MWs, cap_MW)
             push!(energy_MWhs, energy_MWh)
             push!(prices_EUR, price_mean)
@@ -318,8 +339,7 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
                 cap_contracted = isempty(cc) ? 0.0 : abs(cc[end])
                 gc = get(results["ppa"], id, [])
                 g_contract_sum = isempty(gc) ? 0.0 : abs(sum(gc[end]))
-                λ_mean = haskey(results["λ_ppa"], id) && !isempty(results["λ_ppa"][id]) ?
-                    mean(results["λ_ppa"][id][end]) : 0.0
+                λ_mean = _contract_report_price(results, ADMM_state, :ppa, id)
                 for v in ppa_vres
                     push!(vres_energy_cols[v], v == id ? g_contract_sum : 0.0)
                 end
@@ -342,8 +362,8 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
                     wsum = 0.0
                     for v in ppa_vres
                         ev = vres_energy_cols[v][end]
-                        if ev > 0 && haskey(results["λ_ppa"], v) && !isempty(results["λ_ppa"][v])
-                            λ_mean += ev * mean(results["λ_ppa"][v][end])
+                        if ev > 0
+                            λ_mean += ev * _contract_report_price(results, ADMM_state, :ppa, v)
                             wsum += ev
                         end
                     end
@@ -681,8 +701,8 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
     CSV.write(joinpath(results_dir, "Market_Prices.csv"), prices_df)
 
     risk_metrics = write_admm_risk_outputs!(mdict, agents, results_dir;
-                                            case_label = "market_exposure_contracts")
-    print_risk_metrics_summary!(risk_metrics; title = "ADMM+contracts risk metrics (ex-post social CVaR)")
+                                            case_label = case_label)
+    print_risk_metrics_summary!(risk_metrics; title = "ADMM+contracts risk metrics (vs SP benchmark)")
 
     print_admm_run_summary!(ADMM_state, results, agents;
                             results_dir=results_dir,

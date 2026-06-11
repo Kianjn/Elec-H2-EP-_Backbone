@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   For market_exposure_contracts: re-builds the objective with current λ, g_bar, ρ
+#   For me_pap / me_top / me_sop: re-builds the objective with current λ, g_bar, ρ
 #   and calls optimize!. For VRES with contract: includes contract energy and
 #   contract capacity terms; recomputes CVaR loss with contract revenue.
 #   For Conventional and Consumer: delegates to solve_power_agent!.
@@ -83,7 +83,6 @@ function solve_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
         + sum(ρ_elec/2 * W[jd, jy] * (g_EOM[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * (g_EOM[jh, jd, jy] - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_ppa/2 * W[jd, jy] * (g_ppa[jh, jd, jy] - g_bar_ppa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-        + (ρ_ppa_cap/2) * (ppa_cap - g_bar_ppa_cap)^2
         + cap_pen
     )
 

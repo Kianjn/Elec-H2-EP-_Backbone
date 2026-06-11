@@ -1,7 +1,11 @@
 # ==============================================================================
 # ADMM.jl — Main ADMM coordination loop
 # ==============================================================================
-#
+
+if !isdefined(@__MODULE__, :_cap_z_push!)
+    include(joinpath(@__DIR__, "cap_admm_helpers.jl"))
+end
+
 # PURPOSE:
 #   Runs the ADMM loop until convergence or max_iter. Each iteration:
 #   1. For each agent: ADMM_subroutine! updates λ, g_bar, ρ on the model, solves
@@ -30,9 +34,6 @@
 #   TO — TimerOutput for profiling each section.
 #
 # ==============================================================================
-
-"""Extract scalar capacity / dual value from scalar or legacy vector storage."""
-_cap_scalar(x) = x isa Real ? Float64(x) : (isempty(x) ? 0.0 : Float64(x[1]))
 
 function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Dict,
                elec_GC_market::Dict, H2_GC_market::Dict, EP_market::Dict,
@@ -255,20 +256,14 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
             cap_state = ADMM_state["Capacity"]
             rp_cap_sq = 0.0
             for m in cap_agents
-                cap_vec = Float64[]
-                if !isempty(get(results["Cap_VRES"], m, []))
-                    cap_vec = results["Cap_VRES"][m][end]
-                elseif !isempty(get(results["Cap_Elec_H2"], m, []))
-                    cap_vec = results["Cap_Elec_H2"][m][end]
-                elseif !isempty(get(results["Cap_EP_Green"], m, []))
-                    cap_vec = results["Cap_EP_Green"][m][end]
-                end
+                cap_vec = _agent_cap_vec_from_results(m, results)
                 # z_m^k pushed by ADMM_subroutine this iteration
                 z_hist = cap_state["z"][m]
                 z_vec  = isempty(z_hist) ? cap_vec : z_hist[end]
                 local_r = 0.0
                 if !isempty(cap_vec)
-                    local_r = abs(_cap_scalar(cap_vec) - _cap_scalar(z_vec))
+                    z_use = length(z_vec) == length(cap_vec) ? z_vec : _cap_z_vec(_cap_scalar(z_vec))
+                    local_r = _cap_primal_residual(cap_vec, z_use)
                 end
                 push!(cap_state["Primal"][m], local_r)
                 # Initialise per-agent primal scale from first non-zero observation
@@ -301,15 +296,7 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         @timeit TO "Capacity dual update" begin
             cap_state = ADMM_state["Capacity"]
             for m in cap_agents
-                # x_m^k from results (own decision after this iter's solve)
-                cap_vec = Float64[]
-                if !isempty(get(results["Cap_VRES"], m, []))
-                    cap_vec = results["Cap_VRES"][m][end]
-                elseif !isempty(get(results["Cap_Elec_H2"], m, []))
-                    cap_vec = results["Cap_Elec_H2"][m][end]
-                elseif !isempty(get(results["Cap_EP_Green"], m, []))
-                    cap_vec = results["Cap_EP_Green"][m][end]
-                end
+                cap_vec = _agent_cap_vec_from_results(m, results)
                 z_hist = cap_state["z"][m]
                 z_vec  = isempty(z_hist) ? cap_vec : z_hist[end]
                 ρ_m    = cap_state["ρ"][m][end]
@@ -317,7 +304,8 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
                 if isempty(cap_vec)
                     push!(cap_state["λ"][m], copy(λ_prev))
                 else
-                    λ_new = [_cap_scalar(λ_prev) + ρ_m * (_cap_scalar(cap_vec) - _cap_scalar(z_vec))]
+                    z_use = length(z_vec) == length(cap_vec) ? z_vec : _cap_z_vec(_cap_scalar(z_vec))
+                    λ_new = _cap_dual_ascent(λ_prev, ρ_m, cap_vec, z_use)
                     push!(cap_state["λ"][m], λ_new)
                 end
             end

@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   Builds power-sector agents for the market_exposure_contracts entry point.
+#   Builds power-sector agents for the me_pap / me_top / me_sop entry points.
 #   For VRES: extends the model with PPA variables and constraints.
 #   For Conventional and Consumer: delegates to build_power_agent! (unchanged).
 #
@@ -105,6 +105,7 @@ function build_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
     # PPA delivery cannot exceed PPA capacity at any hour.
     mod.ext[:constraints][:ppa_cap_limit] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
         g_ppa[jh, jd, jy] <= ppa_cap)
+    mod.ext[:constraints][:ppa_cap_plant] = @constraint(mod, ppa_cap <= cap_VRES)
 
     # ── Risk variables (CVaR, same structure as base VRES) ──────────────────
     alpha_VRES = mod.ext[:variables][:alpha_VRES] = @variable(mod, lower_bound=0, base_name="alpha_VRES_$(m)")
@@ -145,8 +146,6 @@ function build_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
         + sum(ρ_elec/2 * W[jd, jy] * (g_EOM[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * (g_EOM[jh, jd, jy] - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_ppa/2 * W[jd, jy] * (g_ppa[jh, jd, jy] - g_bar_ppa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-        # ppa_cap consensus: both parties must agree (penalty only, no separate price).
-        + (ρ_ppa_cap/2) * (ppa_cap - g_bar_ppa_cap)^2
         + F_cap * cap_VRES
     )
 

@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   Called by market_exposure_contracts.jl.
+#   Called by me_pap.jl, me_top.jl, me_sop.jl.
 #   Adds bilateral-contract participation flags and ADMM placeholder arrays.
 #   Pushes agent IDs into agents[:ppa_market]/[:hpa_market] for imbalance
 #   aggregation in ADMM_contracts.jl.
@@ -32,6 +32,10 @@ function define_contract_parameters!(m::String, mod::Model, data::Dict, agents::
 
     mod.ext[:parameters][:in_ppa_market] = in_ppa
     mod.ext[:parameters][:in_hpa_market] = in_hpa
+
+    if agent_type in ("GreenProducer", "GreenOfftaker")
+        mod.ext[:parameters][:hpa_volume_mode] = String(get(agents, :hpa_volume_mode, "pap"))
+    end
 
     if in_ppa
         push!(agents[:ppa_market], m)
@@ -82,6 +86,7 @@ function define_contract_parameters!(m::String, mod::Model, data::Dict, agents::
         if agent_type == "GreenProducer"
             mod.ext[:parameters][:λ_hpa]     = zeros(shp)
             mod.ext[:parameters][:K_hpa]     = zeros(shp)
+            mod.ext[:parameters][:B_hpa]     = zeros(shp)
             mod.ext[:parameters][:g_bar_hpa] = zeros(shp)
             mod.ext[:parameters][:ρ_hpa]     = 1.0
             mod.ext[:parameters][:g_bar_hpa_cap] = 0.0
@@ -90,6 +95,7 @@ function define_contract_parameters!(m::String, mod::Model, data::Dict, agents::
             hpa_h2 = get(agents, :hpa_h2, String[])
             mod.ext[:parameters][:λ_hpa]     = Dict(v => zeros(shp) for v in hpa_h2)
             mod.ext[:parameters][:K_hpa]     = Dict(v => zeros(shp) for v in hpa_h2)
+            mod.ext[:parameters][:B_hpa]     = Dict(v => zeros(shp) for v in hpa_h2)
             mod.ext[:parameters][:g_bar_hpa] = Dict(v => zeros(shp) for v in hpa_h2)
             mod.ext[:parameters][:ρ_hpa]     = Dict(v => 1.0 for v in hpa_h2)
             mod.ext[:parameters][:g_bar_hpa_cap] = Dict(v => 0.0 for v in hpa_h2)

@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   Builds the GreenProducer model for market_exposure_contracts.jl.
+#   Builds the GreenProducer model for me_pap.jl, me_top.jl, me_sop.jl.
 #   Extends the base model with:
 #   - PPA buy-side (receiving electricity+elec_GC from each VRES), and
 #   - HPA sell-side (delivering hydrogen bundled with H2_GC equivalent
@@ -126,12 +126,19 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
         h2_hpa[jh, jd, jy] <= h2_out[jh, jd, jy])
     mod.ext[:constraints][:hpa_cap_limit] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
         h2_hpa[jh, jd, jy] <= hpa_cap)
+    # Contract capacity is a shared scalar (fixed before each solve); see contract_capacity.jl.
+    mod.ext[:constraints][:hpa_cap_plant] = @constraint(mod, hpa_cap <= cap_H2_y)
 
     # PPA delivery cannot exceed PPA capacity (per VRES).
     for v in ppa_vres
         mod.ext[:constraints][Symbol("ppa_cap_limit_", v)] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
             g_ppa_from[v][jh, jd, jy] <= ppa_cap[v])
+        # Per-VRES contract capacity bounded by electrolyzer electricity input (MW_elec).
+        mod.ext[:constraints][Symbol("ppa_cap_electro_limit_", v)] = @constraint(mod, ppa_cap[v] <= cap_H2_y / η)
     end
+
+    mod.ext[:parameters][:hpa_volume_mode] = String(get(mod.ext[:parameters], :hpa_volume_mode, "pap"))
+    add_hpa_volume_variables!(mod; role=:producer)
 
     # Annual green-backing: elec GCs from pool + PPA electricity (bundled with GC) >= (1/η) × (pool H2_GC + HPA H2 with embedded H2_GC)
     mod.ext[:constraints][:gc_backing_yearly] = @constraint(mod, [jy in JY],
@@ -156,12 +163,12 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
             sum(W[jd, jy] * (
                 λ_elec[jh, jd, jy]       * e_in_pool[jh, jd, jy]
                 + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
-                + sum(K_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
                 + op_cost * h2_out[jh, jd, jy]
                 - λ_H2[jh, jd, jy]       * (h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
-                - K_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
             ) for jh in JH, jd in JD)
+            + sum_ppa_buyer_cost_jy(mod, ppa_vres, jy, W, JH, JD)
+            - sum_hpa_seller_revenue_jy(mod, jy, W, JH, JD)
         )
         loss_total[jy] = @expression(mod, loss_H2[jy] + F_cap * cap_H2_y)
     end
@@ -178,21 +185,20 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
         sum(
             ρ_ppa[v]/2 * W[jd, jy] * ((-g_ppa_from[v][jh, jd, jy]) - g_bar_ppa[v][jh, jd, jy])^2
             for jh in JH, jd in JD, jy in JY
-        ) + (ρ_ppa_cap[v]/2) * ((-ppa_cap[v]) - g_bar_ppa_cap[v])^2
+        )
         for v in ppa_vres
     )
-    obj_hpa = sum(ρ_hpa/2 * W[jd, jy] * (h2_hpa[jh, jd, jy] - g_bar_hpa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY) +
-              (ρ_hpa_cap/2) * (hpa_cap - g_bar_hpa_cap)^2
+    obj_hpa = sum(ρ_hpa/2 * W[jd, jy] * (h2_hpa[jh, jd, jy] - g_bar_hpa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
     mod.ext[:objective] = @objective(mod, Min,
         sum(W[jd, jy] * (
             λ_elec[jh, jd, jy]       * e_in_pool[jh, jd, jy]
             + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
-            + sum(K_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
             + op_cost * h2_out[jh, jd, jy]
             - λ_H2[jh, jd, jy]       * (h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
             - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
-            - K_hpa[jh, jd, jy]      * h2_hpa[jh, jd, jy]
         ) for jh in JH, jd in JD, jy in JY)
+        + sum_ppa_buyer_cost(mod, ppa_vres, W, JH, JD, JY)
+        - sum_hpa_seller_revenue(mod, W, JH, JD, JY)
         + sum(ρ_elec/2 * W[jd, jy] * ((-e_in_pool[jh, jd, jy])      - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2/2 * W[jd, jy] * ((h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy]) - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)

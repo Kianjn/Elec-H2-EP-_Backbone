@@ -1,6 +1,10 @@
 # ==============================================================================
 # ADMM_subroutine.jl — Per-agent step: update params, solve, record quantities
 # ==============================================================================
+
+if !isdefined(@__MODULE__, :_cap_z_push!)
+    include(joinpath(@__DIR__, "cap_admm_helpers.jl"))
+end
 #
 # PURPOSE:
 #   For one agent m: (1) For each market the agent participates in, set
@@ -28,6 +32,10 @@
 function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict,
                            elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
                            H2_GC_market::Dict, EP_market::Dict, mod::Model, agents::Dict, TO::TimerOutput)
+    if m in get(agents, :merged, String[])
+        return merged_admm_step!(m, data, results, ADMM_state,
+            elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, mod, TO)
+    end
     n_ts = data["General"]["nTimesteps"]
     n_rd = data["General"]["nReprDays"]
     n_yr = data["General"]["nYears"]
@@ -178,7 +186,7 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
                 end
                 z_cap = max(z_cap, cap_floor)
 
-                push!(cap_state["z"][m], z_cap)
+                _cap_z_push!(cap_state["z"][m], z_cap)
 
                 mod.ext[:parameters][:z_cap] = z_cap
                 λ_raw = cap_state["λ"][m][end]

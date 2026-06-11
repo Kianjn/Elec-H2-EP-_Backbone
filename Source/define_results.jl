@@ -1,7 +1,11 @@
 # ==============================================================================
 # define_results.jl — Initialize result and ADMM state structures
 # ==============================================================================
-#
+
+if !isdefined(@__MODULE__, :_cap_z_push!)
+    include(joinpath(@__DIR__, "cap_admm_helpers.jl"))
+end
+
 # PURPOSE:
 #   Allocates all dictionaries and arrays used during and after the ADMM loop:
 #   (1) results: agents reference, markets reference, initial price 3D arrays
@@ -19,6 +23,30 @@
 #     used to read initial_price and rho_initial).
 #
 # ==============================================================================
+
+"""Load one agent's SP primal 3D arrays; coalition agents sum member columns."""
+function _fill_sp_primal_agent!(g_arr, h2_arr, gc_arr, h2gc_arr, ep_arr,
+                                sp_primal::DataFrame, agent_ids,
+                                n_ts::Int, n_rd::Int, n_yr::Int)
+    cols = (
+        ("_elec", g_arr),
+        ("_H2", h2_arr),
+        ("_elec_GC", gc_arr),
+        ("_H2_GC", h2gc_arr),
+        ("_EP", ep_arr),
+    )
+    for (iy, jy) in enumerate(1:n_yr), (id, jd) in enumerate(1:n_rd), (ih, jh) in enumerate(1:n_ts)
+        row_idx = (iy - 1) * n_rd * n_ts + (id - 1) * n_ts + ih
+        for aid in agent_ids
+            for (suffix, arr) in cols
+                col = Symbol(string(aid) * suffix)
+                hasproperty(sp_primal, col) || continue
+                arr[ih, id, iy] += sp_primal[row_idx, col]
+            end
+        end
+    end
+    return nothing
+end
 
 function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dict,
                         elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
@@ -122,34 +150,19 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
             if nrow(sp_primal) == n_total
                 # CSV rows are (jy, jd, jh) order. Build 3D [jh, jd, jy] arrays.
                 for m in agents[:all]
-                    g_col = Symbol(m * "_elec")
-                    h2_col = Symbol(m * "_H2")
-                    gc_col = Symbol(m * "_elec_GC")
-                    h2gc_col = Symbol(m * "_H2_GC")
-                    ep_col = Symbol(m * "_EP")
                     g_arr = zeros(n_ts, n_rd, n_yr)
                     h2_arr = zeros(n_ts, n_rd, n_yr)
                     gc_arr = zeros(n_ts, n_rd, n_yr)
                     h2gc_arr = zeros(n_ts, n_rd, n_yr)
                     ep_arr = zeros(n_ts, n_rd, n_yr)
-                    for (iy, jy) in enumerate(1:n_yr), (id, jd) in enumerate(1:n_rd), (ih, jh) in enumerate(1:n_ts)
-                        row_idx = (iy - 1) * n_rd * n_ts + (id - 1) * n_ts + ih
-                        if hasproperty(sp_primal, g_col)
-                            g_arr[ih, id, iy] = sp_primal[row_idx, g_col]
-                        end
-                        if hasproperty(sp_primal, h2_col)
-                            h2_arr[ih, id, iy] = sp_primal[row_idx, h2_col]
-                        end
-                        if hasproperty(sp_primal, gc_col)
-                            gc_arr[ih, id, iy] = sp_primal[row_idx, gc_col]
-                        end
-                        if hasproperty(sp_primal, h2gc_col)
-                            h2gc_arr[ih, id, iy] = sp_primal[row_idx, h2gc_col]
-                        end
-                        if hasproperty(sp_primal, ep_col)
-                            ep_arr[ih, id, iy] = sp_primal[row_idx, ep_col]
-                        end
+                    member_src = if haskey(agents, :merged_members) &&
+                                    haskey(agents[:merged_members], m)
+                        agents[:merged_members][m]
+                    else
+                        [m]
                     end
+                    _fill_sp_primal_agent!(g_arr, h2_arr, gc_arr, h2gc_arr, ep_arr,
+                        sp_primal, member_src, n_ts, n_rd, n_yr)
                     push!(results["g"][m], g_arr)
                     push!(results["h2"][m], h2_arr)
                     push!(results["elec_GC"][m], gc_arr)
@@ -157,11 +170,18 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
                     push!(results["EP"][m], ep_arr)
                 end
                 primal_loaded = true
-                # Sanity check: elec market should clear (sum of g_net ≈ 0)
+                # Sanity check: elec and H2-GC markets should clear at warm-start
                 elec_sum = sum(sum(results["g"][m][end]) for m in agents[:elec_market])
                 if abs(elec_sum) > 0.01
                     @warn "SP primal warm-start: elec market sum = $elec_sum (expected ≈0). " *
                           "Index/ordering or g_net mapping may be wrong."
+                end
+                if haskey(agents, :H2_GC_market)
+                    h2gc_sum = sum(sum(results["H2_GC"][m][end]) for m in agents[:H2_GC_market])
+                    if abs(h2gc_sum) > 0.01
+                        @warn "SP primal warm-start: H2-GC market sum = $h2gc_sum (expected ≈0). " *
+                              "Merged-agent external GC exposure may be misaligned."
+                    end
                 end
             elseif n_yr > 1 && nrow(sp_primal) == n_ts * n_rd
                 @warn "SP primal file has one-year rows ($(nrow(sp_primal))) but ADMM is running $n_yr years. " *
@@ -362,15 +382,25 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
             # Expected columns from save_social_planner_results.jl:
             # AgentID, jy, cap
             if all(sym -> hasproperty(cap_df, sym), (:AgentID, :jy, :cap))
+                n_cap_z_loaded = 0
                 for m in cap_agents
-                    rows = cap_df[cap_df.AgentID .== m, :]
-                    if nrow(rows) > 0
-                        z_init = Float64(rows.cap[1])
-                        push!(ADMM["Capacity"]["z"][m], z_init)
-                        ADMM["Capacity"]["λ"][m][1] = [0.0]
+                    if haskey(agents, :merged_members) && haskey(agents[:merged_members], m)
+                        member_ids = agents[:merged_members][m]
+                        n_cap = length(member_ids)
+                        z_vec = merged_cap_z_from_sp(cap_df, member_ids, n_cap)
+                        _cap_z_push!(ADMM["Capacity"]["z"][m], z_vec)
+                        ADMM["Capacity"]["λ"][m] = [zeros(length(z_vec))]
+                        n_cap_z_loaded += 1
+                        continue
                     end
+                    rows = cap_df[cap_df.AgentID .== m, :]
+                    z_init = _sp_cap_scalar(rows)
+                    z_init === nothing && continue
+                    _cap_z_push!(ADMM["Capacity"]["z"][m], z_init)
+                    n_cap_z_loaded += 1
+                    # λ history is already seeded as [[0.0]] in ADMM["Capacity"]["λ"].
                 end
-                cap_state_warm_loaded = true
+                cap_state_warm_loaded = n_cap_z_loaded > 0
             end
         catch e
             @warn "Could not read SP capacities for capacity-state warm-start ($sp_cap_file): $e"

@@ -13,6 +13,7 @@ Julia model of a multi-agent energy system where independent firms trade across 
 | | |
 |---|---|
 | **Theory & maths** | [DOCUMENTATION.md](DOCUMENTATION.md) — equilibrium (§4), formulation (§5), ADMM (§6), calibration (§9) |
+| **Bilateral contracts** | [DOCUMENTATION.md §2](DOCUMENTATION.md#contract-pools-me-pap--me-top--me-sop) — shared capacity $C$, settlement $K$, PaP/ToP/SoP, risk at $\gamma<1$ |
 | **Configuration** | [Data/data.yaml](Data/data.yaml) |
 | **Outputs** | [DOCUMENTATION.md §12](DOCUMENTATION.md#12-output-files) |
 
@@ -24,7 +25,13 @@ Julia model of a multi-agent energy system where independent firms trade across 
 |--------|------------------|
 | [`social_planner.jl`](social_planner.jl) | Centralised welfare optimum — **complete risk trading** |
 | [`market_exposure.jl`](market_exposure.jl) | Decentralised equilibrium via ADMM — **incomplete risk trading** |
-| [`market_exposure_contracts.jl`](market_exposure_contracts.jl) | Same as above + bilateral **PPA** (VRES→electrolyzer) and **HPA** (electrolyzer→green offtaker) pools |
+| [`me_pap.jl`](me_pap.jl) | ME + bilateral **PPA** (PaP) + **HPA** (pay-as-produced) |
+| [`me_top.jl`](me_top.jl) | ME + PPA (PaP) + **HPA** (take-or-pay) |
+| [`me_sop.jl`](me_sop.jl) | ME + PPA (PaP) + **HPA** (send-or-pay) |
+
+Contract economics (shared capacity, strikes, volume modes): [DOCUMENTATION.md §2](DOCUMENTATION.md#contract-pools-me-pap--me-top--me-sop).
+| [`green_h2_social_planner.jl`](green_h2_social_planner.jl) | Partial planner — **electrolyzer + green offtaker** merged (one coalition CVaR) |
+| [`green_social_planner.jl`](green_social_planner.jl) | Partial planner — **VRES + electrolyzer + green offtaker** merged (one coalition CVaR) |
 
 **Recommended order:** `social_planner.jl` → `market_exposure.jl` (ADMM warm-starts from planner prices, quantities, and capacities). See [DOCUMENTATION.md §6.6](DOCUMENTATION.md#66-warm-start-from-social-planner).
 
@@ -76,10 +83,10 @@ julia --project=. social_planner.jl
 julia --project=. market_exposure.jl
 
 # 3. Optional — bilateral contract pools
-julia --project=. market_exposure_contracts.jl
+julia --project=. me_pap.jl    # or me_top.jl / me_sop.jl
 ```
 
-Results are written to `social_planner_results/`, `market_exposure_results/`, and `market_exposure_contracts_results/`.
+Results are written to `social_planner_results/`, `market_exposure_results/`, and `me_pap_results/` (or `me_top_results/`, `me_sop_results/`).
 
 **Figures** (after planner + market-exposure runs):
 
@@ -95,8 +102,10 @@ python visualization/visualize_results.py
 ```
 Now/
 ├── social_planner.jl              # Centralised benchmark
-├── market_exposure.jl             # ADMM — five markets
-├── market_exposure_contracts.jl   # ADMM + PPA/HPA
+├── market_exposure.jl             # ADMM — five spot markets
+├── me_pap.jl / me_top.jl / me_sop.jl  # ADMM + PPA/HPA (see DOCUMENTATION.md §2)
+├── green_h2_social_planner.jl     # Partial planner (H₂ chain merged)
+├── green_social_planner.jl        # Partial planner (full green chain merged)
 ├── Data/data.yaml                 # All configuration
 ├── Input/                         # Timeseries & representative days
 ├── Source/                        # Agents, markets, ADMM, planner
@@ -117,7 +126,7 @@ General:
   base_year: 2021
 
 ADMM:
-  nScenarioYears: 10    # weather scenarios for market_exposure*.jl
+  nScenarioYears: 10    # weather scenarios for market_exposure.jl and me_*.jl
   max_iter: 1000
   epsilon: 0.1          # convergence tolerance (Boyd-scaled)
   gamma: 1.0            # 1 = risk-neutral; 0.5 = risk-averse

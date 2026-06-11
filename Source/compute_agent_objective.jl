@@ -169,7 +169,7 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
             obj += W[jd, jy] * (λ_EP[jh, jd, jy] * d_EP[jh, jd, jy] - (A_EP * d_EP[jh, jd, jy] - B_EP/2 * d_EP[jh, jd, jy]^2))
         end
 
-    # ── PPA variants (used only by market_exposure_contracts) ─────────
+    # ── PPA variants (used only by me_pap / me_top / me_sop) ─────────
     elseif agent_type == :power_vres_ppa
         g_EOM = quantities[:g_EOM]
         g_ppa = quantities[:g_ppa]
@@ -367,7 +367,7 @@ function compute_agent_objective_contributions(agent_type::Symbol, quantities::D
             contrib[ih, id, iy] = λ_EP[jh, jd, jy] * d_EP[jh, jd, jy] - (A_EP * d_EP[jh, jd, jy] - B_EP/2 * d_EP[jh, jd, jy]^2)
         end
 
-    # ── PPA variants (used only by market_exposure_contracts) ─────────
+    # ── PPA variants (used only by me_pap / me_top / me_sop) ─────────
     elseif agent_type == :power_vres_ppa
         g_EOM = quantities[:g_EOM]
         g_ppa = quantities[:g_ppa]
