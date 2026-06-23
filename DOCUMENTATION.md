@@ -75,7 +75,7 @@ All monetary values are in **EUR** (e.g. €/MWh, €/t, €/MW-year).
 ### 0.5 Risk Parameters and CVaR
 
 - $\gamma$ (or $\gamma_i$): **weight on expected loss vs CVaR** in the objective (§4.10). $\gamma=1$ ⇒ risk-neutral (CVaR inactive); $\gamma<1$ ⇒ risk-averse (typically $\gamma=0.5$ in sensitivity runs).
-- $\beta$: **CVaR confidence level** (Rockafellar–Uryasev / Hoschle et al.). $\mathrm{CVaR}_{\beta}$ averages the worst $(1-\beta)$ share of scenarios; **lower $\beta$ ⇒ more risk-averse** (e.g. $\beta=0.2$ ⇒ worst 80%; $\beta=0.8$ ⇒ worst 20%). At fixed $\gamma=0.5$, sweep $\beta$ over $0.2$, $0.4$, $0.6$, and $0.8$ for risk-aversion intensity (§4.10.4).
+- $\beta$: **CVaR confidence level** (Rockafellar–Uryasev; implemented in code). $\mathrm{CVaR}_{\beta}$ averages loss in the worst $(1-\beta)$ share of scenarios; **higher $\beta$ ⇒ smaller tail ⇒ more risk-averse** (e.g. $\beta=0.8$ ⇒ worst 20%; $\beta=0.2$ ⇒ worst 80%). At fixed $\gamma=0.5$, sweep $\beta$ over $0.2$, $0.4$, $0.6$, and $0.8$ with **increasing** $\beta$ for stronger tail focus (§4.10.4). Hoschle et al. use $\beta$ with the **opposite** direction — see **§4.10.4** comparison paragraph.
 - $\alpha_i$, $u_i(y)$, $\mathrm{CVaR}_{i}$: Rockafellar–Uryasev auxiliaries for agent $i$ (VaR proxy, shortfall, conditional tail loss).
 
 Full definitions, Hoschle-style calibration workflow, and equilibrium effects: **§4.10**. Social planner CVaR structure: **§7.4**. Reporting: **§7.6**.
@@ -694,7 +694,7 @@ Fix confidence level $\beta \in (0,1)$.
 
 - **Value-at-Risk (VaR)** at level $\beta$: a threshold $\alpha$ such that loss exceeds $\alpha$ with probability at most $1-\beta$ (in the discrete scenario case, a quantile of the loss distribution).
 
-- **Conditional Value-at-Risk (CVaR)** at level $\beta$: the **expected loss in the worst $(1-\beta)$ fraction** of scenarios (tail average). Also called **Expected Shortfall**. Example: $\beta=0.8$ ⇒ average loss in the worst **20%** of weather years; $\beta=0.2$ ⇒ average in the worst **80%** — a much broader, more conservative tail.
+- **Conditional Value-at-Risk (CVaR)** at level $\beta$: the **expected loss in the worst $(1-\beta)$ fraction** of scenarios (tail average). Also called **Expected Shortfall**. Example: $\beta=0.8$ ⇒ average loss in the worst **20%** of weather years (extreme tail); $\beta=0.2$ ⇒ average in the worst **80%** (broad tail, typically a **lower** CVaR number because milder bad years are included).
 
 Rockafellar & Uryasev (2000) show CVaR is **coherent** (subadditive, monotone) and can be optimised by convex programming:
 
@@ -746,19 +746,19 @@ This project follows the **two-step risk calibration** used in Hoschle et al. (2
 | **2 — Turn on CVaR** | $\gamma$ | **$0.5$** | Equal weight on **mean** and **CVaR** in the objective (Hoschle case-study default for risk-averse runs). |
 | **3 — Risk-aversion intensity** | $\beta$ | **$0.2,\,0.4,\,0.6,\,0.8$** | At fixed $\gamma=0.5$, sweep $\beta$ to vary how aggressively agents penalise bad scenarios. |
 
-**Lower $\beta$ ⇒ more risk-averse** (Hoschle et al. label $\beta$ as “risk aversion” in their sensitivity figures). Mechanism:
+**Higher $\beta$ ⇒ more risk-averse** (Rockafellar–Uryasev confidence level in code). Mechanism:
 
 - $\mathrm{CVaR}_{\beta}$ averages loss over the worst $(1-\beta)$ share of scenarios.
-- $\beta=0.8$ ⇒ worst **20%** only — mild tail focus within the risk-averse regime.
-- $\beta=0.4$ ⇒ worst **60%** — penalises most below-median years.
-- $\beta=0.2$ ⇒ worst **80%** — strongest tail penalty in the standard sweep (closest to worst-case among interior $\beta$ values).
+- $\beta=0.2$ ⇒ worst **80%** — broad tail average (mildest CVaR penalty in the standard sweep).
+- $\beta=0.4$ ⇒ worst **60%**.
+- $\beta=0.8$ ⇒ worst **20%** only — narrow, extreme tail (strongest CVaR penalty in the standard sweep).
 
 **$\gamma$ and $\beta$ are complementary, not interchangeable:**
 
 - **$\gamma$** switches risk aversion **on/off** and sets the **split** between $\mathbb{E}[\cdot]$ and $\mathrm{CVaR}_{\beta}(\cdot)$ in the objective.
-- **$\beta$** defines **which part of the loss distribution** enters CVaR once $\gamma<1$. At fixed $\gamma=0.5$, varying $\beta$ is the main way to trace **increasing risk aversion** from mild ($\beta=0.8$) to strong ($\beta=0.2$).
+- **$\beta$** defines **which part of the loss distribution** enters CVaR once $\gamma<1$. At fixed $\gamma=0.5$, varying $\beta$ traces **increasing risk aversion** as $\beta$ **increases** (from $0.2$ to $0.8$).
 
-Hoschle et al. sweep $\beta$ from $1$ (risk-neutral reference in their figures) down to $0.1$ with $\gamma=0.5$. This codebase uses **$\gamma=1$** for the risk-neutral benchmark (cleaner: CVaR term vanishes) and **$\beta \in \lbrace 0.2, 0.4, 0.6, 0.8 \rbrace$** at $\gamma=0.5$ for the risk-averse sensitivity — the same economic logic.
+**Two $\beta$ conventions (Hoschle vs this codebase).** Hoschle et al. (2018) and this project both use a $\gamma$–CVaR objective of the form $\gamma\,\mathbb{E}[\cdot] + (1-\gamma)\,\mathrm{CVaR}$, but they assign **risk neutrality** and **tail depth** differently. Hoschle fixes $\gamma=0.5$ for risk-averse case studies and sweeps **their** $\beta$ from $1$ (risk-neutral on their axis) down to $0.1$ (very risk-averse); **lower Hoschle $\beta$ = stronger aversion**. The CVaR constraints in code follow **Rockafellar–Uryasev**: $\beta$ is a **confidence level**, $\mathrm{CVaR}_{\beta}$ averages the worst $(1-\beta)$ share of scenarios, and **higher $\beta$ = narrower, more extreme tail = stronger aversion** at fixed $\gamma<1$. This codebase sets **$\gamma=1$** for the risk-neutral benchmark (the $(1-\gamma)\,\mathrm{CVaR}$ term vanishes) rather than Hoschle’s $\beta=1$, then uses **$\gamma=0.5$** with Rockafellar $\beta\in\lbrace 0.2,0.4,0.6,0.8\rbrace$ for the sensitivity sweep. The **economic direction** is the same (more conservative outcomes as aversion rises), but the **parameter labels are not interchangeable**: Hoschle $\beta=0.2$ (high aversion) is not the same run as Rockafellar $\beta=0.2$ (broad 80% tail, mildest in our sweep).
 
 In `data.yaml`, both SP and ME read **`ADMM.gamma`** and **`ADMM.beta`** (global defaults; per-agent `gamma`/`beta` in agent blocks override for ADMM agents). Defaults: `gamma: 1.0`, `beta: 0.95` (placeholder when $\gamma=1$; set explicitly when running risk-averse cases).
 
@@ -773,9 +773,9 @@ In `data.yaml`, both SP and ME read **`ADMM.gamma`** and **`ADMM.beta`** (global
 | **Compare quantities to SP?** | SP is benchmark | Generally **no** (§4.8) |
 | **Compare `Risk_Metrics.csv`?** | Yes — ex-post social CVaR gap (§7.6) | Yes |
 
-#### 4.10.6 What changes in strategy when $\gamma < 1$ or $\beta$ falls?
+#### 4.10.6 What changes in strategy when $\gamma < 1$ or $\beta$ rises?
 
-Risk aversion reshapes **capacity**, **dispatch**, and **prices** because bad scenarios get **more weight** in the optimiser (directly via private CVaR in ME, via social CVaR in SP). **Within** $\gamma=0.5$ runs, **decreasing $\beta$** strengthens this effect: CVaR averages over a **larger** set of bad years, so capacity and dispatch shift further toward hedging tail losses (Hoschle et al. Fig. 6: installed capacity moves monotonically as $\beta$ decreases).
+Risk aversion reshapes **capacity**, **dispatch**, and **prices** because bad scenarios get **more weight** in the optimiser (directly via private CVaR in ME, via social CVaR in SP). **Within** $\gamma=0.5$ runs, **increasing $\beta$** strengthens this effect: CVaR focuses on a **narrower, more extreme** tail, so capacity and dispatch shift further toward hedging catastrophic years. (Hoschle et al. Fig. 6 shows monotonic capacity shifts as **their** $\beta$ decreases from $1$ toward $0$ at fixed $\gamma=0.5$ — analogous direction to **increasing** Rockafellar $\beta$ here.)
 
 **VRES (solar/wind):**
 - **Low-renewable scenarios** ($y$ with weak SOLAR/WIND) imply low output per MW installed → high $\ell_{i,y}$ for fixed `cap_VRES`.
@@ -799,7 +799,7 @@ Risk aversion reshapes **capacity**, **dispatch**, and **prices** because bad sc
 
 1. **Risk-neutral benchmark:** `gamma = 1` (any `beta`; inactive). Run SP then ME — verify convergence and quantity/price match (§5.4.2). Requires `nScenarioYears > 1` for meaningful multi-scenario dispatch; risk parameters only matter when $\gamma<1$.
 2. **Risk-averse base case:** `gamma = 0.5` in the `ADMM` block (applies to SP and ME simultaneously). Ensure `nScenarioYears > 1` (e.g. 10 weather years).
-3. **Risk-aversion sweep:** at fixed `gamma = 0.5`, run separate cases with `beta = 0.2, 0.4, 0.6, 0.8` — **lower `beta` = more risk-averse**. Compare capacities, prices, and `Risk_Metrics.csv` across the sweep.
+3. **Risk-aversion sweep:** at fixed `gamma = 0.5`, run separate cases with `beta = 0.2, 0.4, 0.6, 0.8` — **higher `beta` = more risk-averse** (narrower tail). Compare capacities, prices, and `Risk_Metrics.csv` across the sweep.
 4. **Institution comparison:** for each $(\gamma,\beta)$ pair, compare SP (complete risk trading) vs ME (incomplete); do **not** expect equal quantities/prices at $\gamma<1$ (§4.8, §7.6).
 
 #### 4.10.8 Auxiliary variables (reading outputs)
@@ -1872,7 +1872,7 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 | `rho_cap_max` | 30 | Per-agent capacity penalty upper bound. See §6.4.4 for justification. |
 | `cap_z_relax` | 1.0 | Under-relaxation factor for capacity target update `z^k <- α z_raw^k + (1-α) z^{k-1}`. `1.0` disables damping (default). Use `0.2–0.8` only if target oscillations cause large `Δz` dual spikes. See §6.4.8. |
 | `gamma` | 1.0 | Risk weight on expected loss vs CVaR ($\gamma=1$ risk-neutral; $\gamma=0.5$ risk-averse base case). Shared by SP and ME. See §4.10. |
-| `beta` | 0.95 | CVaR confidence level; **lower $\beta$ = more risk-averse** at fixed $\gamma<1$. Sensitivity sweep: $0.2,0.4,0.6,0.8$ at $\gamma=0.5$ (§4.10.4). Inactive when $\gamma=1$. |
+| `beta` | 0.95 | CVaR confidence level (Rockafellar–Uryasev); **higher $\beta$ = more risk-averse** at fixed $\gamma<1$. Sensitivity sweep: $0.2,0.4,0.6,0.8$ at $\gamma=0.5$ (§4.10.4). Inactive when $\gamma=1$. |
 
 ### 9.2.1 SocialPlanner (`SocialPlanner` block)
 
@@ -2385,7 +2385,7 @@ data.yaml  ──→  define_common_parameters!  ──→  mod.ext[:parameters]
    Taxonomy for MCP vs MPEC vs EPEC, spatial price equilibrium (nodal networks), and Cournot oligopoly models — see §4.3 for how this project maps to the perfect-competition MCP class (not SPE, not EPEC).
 
 7. H. Höschle, H. Le Cadre, Y. Smeers, A. Papavasiliou & R. Belmans, “An ADMM-Based Method for Computing Risk-Averse Equilibrium in Capacity Markets,” *IEEE Transactions on Power Systems*, 33(5), 4819–4830, 2018.  
-   Source for the **$\gamma$–CVaR objective** and **$\beta$ sensitivity** (decreasing $\beta$ = increasing risk aversion at fixed $\gamma$); ADMM for risk-averse equilibrium — see §4.10.4 and §6.
+   Source for the **$\gamma$–CVaR objective** and ADMM for risk-averse equilibrium. Their case-study $\beta$ axis (1 → 0 at fixed $\gamma=0.5$) is **not** identical to Rockafellar $\beta$ in code — see §4.10.4.
 
 ### Data sources for the NL calibration (§9.6)
 

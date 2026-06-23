@@ -34,7 +34,7 @@ ADMM:
     expand_step: 2.0   # MW added per unit mean energy imbalance when cap binds
     bind_tol: 1.0e-6   # Treat q_peak ≈ C as "cap binding"
   gamma: 1.0             # Risk weight (γ=1 ⇒ risk-neutral; γ=0.5 ⇒ risk-averse Hoschle-style). SP + ADMM read this block.
-  beta: 0.95             # CVaR confidence β; lower β = more risk-averse at γ<1. Sweep 0.2,0.4,0.6,0.8 at γ=0.5 (§4.10.4). Inactive when γ=1.
+  beta: 0.95             # CVaR confidence β (Rockafellar–Uryasev); higher β = more risk-averse at γ<1. Sweep 0.2,0.4,0.6,0.8 at γ=0.5 (§4.10.4). Inactive when γ=1.
 
 # ---------------------------------------------------------------------------
 # SocialPlanner: solver configuration for social_planner.jl only
@@ -118,7 +118,7 @@ Power:
     MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
     FixedCost_per_MW: 90000.0  # [NL] €/MW-year — NL utility solar ≈0.75 M€/MW CAPEX+FOM, 25 yr, 8% WACC ⇒ LCOE ≈43 €/MWh [IRENA-2022]
     gamma: 1.0                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
-    beta: 0.95                 # CVaR confidence β; lower = more risk-averse at gamma<1 (§4.10.4).
+    beta: 0.95                 # CVaR confidence β (Rockafellar–Uryasev); higher = more risk-averse at gamma<1 (§4.10.4).
 
   # Variable Renewable Energy Source (wind — national aggregate, on+offshore)
   Gen_VRES_Wind:
@@ -128,7 +128,7 @@ Power:
      MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
      FixedCost_per_MW: 170000.0 # [NL] €/MW-year — NL offshore-leaning wind ≈2.0 M€/MW CAPEX+FOM ⇒ LCOE ≈57 €/MWh [IRENA-2022]
      gamma: 1.0                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
-     beta: 0.95                # CVaR confidence β; lower = more risk-averse at gamma<1 (§4.10.4).
+     beta: 0.95                # CVaR confidence β (Rockafellar–Uryasev); higher = more risk-averse at gamma<1 (§4.10.4).
 
   # Dispatchable conventional fleet proxy — NL gas-dominated residual (2021)
   Gen_Conv_01:
