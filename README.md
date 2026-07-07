@@ -127,10 +127,10 @@ General:
 
 ADMM:
   nScenarioYears: 10    # weather scenarios for market_exposure.jl and me_*.jl
-  max_iter: 1000
-  epsilon: 0.1          # convergence tolerance (Boyd-scaled)
-  gamma: 1.0            # 1 = risk-neutral; 0.5 = risk-averse
-  beta: 0.95            # CVaR tail level (see §4.10)
+  max_iter: 2000        # iteration budget
+  epsilon: 0.1          # convergence tolerance (Boyd-scaled; see §6.5)
+  gamma: 1.0            # 1 = risk-neutral; 0.5 = risk-averse (see §4.10)
+  beta: 0.95            # CVaR tail level; higher = more risk-averse when gamma<1
 ```
 
 Add agents by adding blocks under `Power:`, `Hydrogen:`, etc. — no code changes required for supported types. Full parameter reference: [DOCUMENTATION.md §9](DOCUMENTATION.md#9-configuration-reference-datayaml).
