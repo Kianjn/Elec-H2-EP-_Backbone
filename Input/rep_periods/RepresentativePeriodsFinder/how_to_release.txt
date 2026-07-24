@@ -1,0 +1,7 @@
+Steps for a new release:
+
+- Run tests
+- Change the package version in Project.toml
+- Update NEWS.md
+- Push the changes
+- Create a release tag on GitLab

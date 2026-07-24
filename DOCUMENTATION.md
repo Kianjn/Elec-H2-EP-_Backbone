@@ -1969,7 +1969,7 @@ The model uses **10 scenario labels** `2021`–`2030` (`ADMM.nScenarioYears = 10
 
 - **`2021`** is the **baseline / reference** weather scenario. It matches `General.base_year`; installed capacities in `data.yaml` are NL 2021 values; the weather profile is calibrated to NL-realistic annual VRES capacity factors (see below).
 - **`2022`–`2030`** are **nine additional weather scenarios** with different solar/wind hourly shapes and annual capacity factors. They enter the **same single operating year**: the optimiser chooses one investment level, then evaluates expected profit and CVaR over all scenarios with probability `P[jy] = 1/nScenarioYears`. They are **not** years in which the agent reinvests each period.
-- A label **does not have to equal the calendar year of the underlying weather**. For example, scenario `2021` is built from ERA5 reanalysis at a central NL location for calendar **2015**, then rescaled to CBS-like annual CFs; scenario `2022` uses calendar **2010** weather, and so on. The mapping is fixed in `Input/generate_weather_scenarios.py` and summarised in `Input/weather_scenario_summary.json`.
+- A label **does not have to equal the calendar year of the underlying weather**. For example, scenario `2021` is built from ERA5 reanalysis at a central NL location for calendar **2015**, then rescaled to CBS-like annual CFs; scenario `2022` uses calendar **2010** weather, and so on. The mapping is fixed in `Input/rep_periods/generate_representative_days.jl` and summarised in `Input/weather_scenario_summary.json`.
 
 | Scenario label | Source weather year (ERA5) | Role |
 |---|---|---|
@@ -1996,22 +1996,30 @@ Hourly weather is fetched from the **[Open-Meteo Historical API](https://open-me
 | `wind_speed_100m` (km/h) | **WIND** | Standard turbine power curve (cut-in 3 m/s, rated 12 m/s, cut-out 25 m/s), cubic between cut-in and rated |
 | `temperature_2m` (°C) | **LOAD_E** (indirect) | Drives mild heating sensitivity on a fixed NL diurnal/seasonal load shape |
 
-For the **baseline scenario only** (`2021`), hourly SOLAR and WIND profiles are **rescaled** (preserving hourly shape) so that the annual mean matches NL CBS 2021 fleet averages: **~18% solar CF, ~28% wind CF** `[CBS-RE]`. Other scenarios use unscaled CFs from their source weather year, giving a realistic spread (~12–19% solar, ~14–19% wind in the current mapping).
+For the **baseline scenario only** (`2021`), hourly SOLAR and WIND profiles are **rescaled** (preserving hourly shape) so that the annual mean matches NL CBS 2021 fleet averages: **~18% solar CF, ~28% wind CF** `[CBS-RE]`. Other scenarios use unscaled CFs from their source weather year, giving a realistic spread (~12–18% solar, ~14–19% wind in the current mapping). Exact per-scenario annual CFs are written to `Input/weather_scenario_summary.json`.
 
 **LOAD_H** and **LOAD_EP** are fixed normalised shapes (0.8 and 0.9) in all scenarios; absolute H₂ and EP demand is set in `data.yaml` via agent capacities and `Total_Demand`.
 
-#### Representative-day selection (8760 h → 8 days)
+#### Representative-day selection (8760 h → 8 days) via RepresentativePeriodsFinder.jl
 
-Full-year hourly profiles (365 × 24 h) are reduced to **`nReprDays = 8`** representative days for tractability:
+Full-year hourly profiles (365 × 24 h) are reduced to **`nReprDays = 8`** representative days using **[RepresentativePeriodsFinder.jl](https://gitlab.kuleuven.be/UCM/representativedaysfinder.jl)** (RPF) with the **clustering** method (hierarchical, medoid-based; Pineda & Morales 2018) — **not** the optimisation method. Selection is driven by a YAML config (`Input/rep_periods/config_template.yaml`) and orchestrated by `Input/rep_periods/generate_representative_days.jl`:
 
-1. **Daily feature vector** (72 dimensions): concatenate the 24 hourly SOLAR, 24 hourly WIND, and 24 hourly LOAD_E values for each calendar day. SOLAR and WIND entries are **double-weighted** relative to load so clustering prioritises VRES diversity (including low-renewable days).
-2. **Standardisation**: each of the 72 features is z-scored across the 365 days.
-3. **k-medoids clustering** (`k = 8`): partition the 365 days; the **medoid** of each cluster is the actual calendar day whose profile best represents that cluster (PAM-style, implemented in `Input/generate_weather_scenarios.py`).
-4. **Weights**: for cluster `c`, `W[c] =` number of calendar days assigned to that cluster. Weights sum to **365** and are stored in `decision_variables_short.csv`.
-5. **Medoid day index** (`periods`): day-of-year (1–365) of the medoid, stored alongside its weight in `decision_variables_short.csv`. The full `decision_variables.csv` lists all 365 days with weight zero except the eight medoids.
-6. **`ordering_variable.csv`**: 365 × 8 matrix of row-normalised inverse Euclidean distances from each calendar day to each medoid profile (output of the representative-day selection script; loaded but not used in optimisation).
+1. **Feature construction & normalisation**: for each clustered series (SOLAR, WIND, LOAD_E) RPF **min–max normalises** the full-year values to `[-1, 1]` and reshapes them into 365 daily vectors of 24 hourly values. Each series carries a configurable **clustering weight** (SOLAR = WIND = 2, LOAD_E = 1) so the algorithm prioritises VRES diversity (including low-renewable days).
+2. **Hierarchical clustering** (`representative_periods = 8`): RPF iteratively merges the two most similar day-clusters — dissimilarity is the **squared-Euclidean distance** between weighted, normalised daily feature vectors — until 8 clusters remain. Each cluster's **medoid** is the actual calendar day whose profile best represents that cluster. Clustering needs **no MILP solver**.
+3. **Weights**: for cluster `c`, `W[c] =` number of calendar days assigned to that cluster. Weights sum to **365** and are written to `decision_variables_short.csv` (`periods`, `weights`, `selected_periods`); the full `decision_variables.csv` lists all 365 days.
+4. **`ordering_variable.csv`**: 365 × 8 one-hot assignment matrix mapping each calendar day to its cluster's medoid (RPF native output; loaded by the model but **not** used in optimisation).
+5. **Model export**: the driver translates RPF's `resulting_profiles.csv` into `timeseries_<label>.csv` (renaming the series columns and appending the constant `LOAD_H = 0.8`, `LOAD_EP = 0.9` shapes), and copies the decision-variable and ordering files into `Input/output_<label>/`.
 
-Representative days are sorted by medoid calendar day before writing `timeseries_<label>.csv`, so row blocks 1–24, 25–48, … correspond to `jd = 1, 2, …, 8`.
+Representative days are written in **ascending medoid-calendar-day order**, so row blocks 1–24, 25–48, … correspond to `jd = 1, 2, …, 8` and align row-for-row with `decision_variables_short.csv` (whose `jd`-th weight becomes `W[jd, jy]`).
+
+**Regenerating the inputs.** RPF and its dependencies live in a self-contained sub-environment under `Input/rep_periods/` (a compat-patched copy of RPF is vendored there so it runs on current Julia). One-time setup then a full regeneration:
+
+```bash
+julia Input/rep_periods/setup_env.jl                                              # instantiate the sub-environment (once)
+julia --project=Input/rep_periods Input/rep_periods/generate_representative_days.jl   # regenerate all scenarios
+```
+
+Pass specific labels (e.g. `... generate_representative_days.jl 2021 2025`) to regenerate a subset. Raw ERA5 responses are cached under `Input/rep_periods/weather_cache/`, full-year clustering inputs under `Input/rep_periods/weather_full/`, and RPF's native per-scenario outputs (including optional duration-curve plots) under `Input/rep_periods/results/<label>/`. The previous inputs are backed up once to `Input/_legacy_inputs_backup/` before the first overwrite.
 
 #### Timeseries file layout and availability factors
 
@@ -2058,10 +2066,20 @@ Now/
 │   ├── ...
 │   ├── output_2021/
 │   │   ├── decision_variables_short.csv   # Representative days: periods, weights, selected_periods
-│   │   └── ordering_variable.csv          # Ordering matrix (for upstream representative-day selection)
+│   │   ├── decision_variables.csv         # All 365 days (weight 0 except medoids)
+│   │   └── ordering_variable.csv          # 365×8 one-hot day→medoid assignment matrix
 │   ├── output_2022/
 │   │   └── ...
-│   └── ...
+│   ├── weather_scenario_summary.json      # Per-scenario source year, roles, annual CFs, medoid days/weights
+│   └── rep_periods/            # Representative-day generation (RepresentativePeriodsFinder.jl)
+│       ├── config_template.yaml            # RPF clustering config (hierarchical, 8 rep days)
+│       ├── generate_representative_days.jl # Driver: ERA5 → CFs → RPF clustering → model inputs
+│       ├── setup_env.jl                    # Instantiates the RPF sub-environment
+│       ├── Project.toml / Manifest.toml    # Isolated env (keeps RPF's deps out of the model env)
+│       ├── RepresentativePeriodsFinder/    # Vendored, compat-patched RPF package
+│       ├── weather_cache/                  # Cached raw ERA5 API responses
+│       ├── weather_full/                   # Full-year (8760 h) clustering inputs
+│       └── results/<label>/                # RPF native outputs per scenario
 │
 ├── Source/
 │   ├── define_common_parameters.jl       # Sets, weights, market flags, ADMM placeholders
@@ -2371,3 +2389,5 @@ These source keys are referenced inline in `Data/data.yaml` (tag `[NL]`) and in 
 ### Weather and representative-day inputs (§9.7)
 
 - **`[ERA5-OM]`** — Open-Meteo Historical Weather API (ERA5 reanalysis). Hourly GHI, 100 m wind speed, and 2 m temperature for central NL (52.09°N, 5.12°E). [open-meteo.com/en/docs/historical-weather-api](https://open-meteo.com/en/docs/historical-weather-api)
+- **`[RPF]`** — RepresentativePeriodsFinder.jl (KU Leuven UCM), used with the hierarchical clustering method to select representative days. [gitlab.kuleuven.be/UCM/representativedaysfinder.jl](https://gitlab.kuleuven.be/UCM/representativedaysfinder.jl)
+- **`[PM-2018]`** — S. Pineda and J. M. Morales, "Chronological time-period clustering for optimal capacity expansion planning with storage," *IEEE Trans. Power Syst.*, vol. 33, no. 6, pp. 7162–7170, 2018. (Clustering algorithm implemented in RPF.)

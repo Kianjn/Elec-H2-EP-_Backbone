@@ -1,0 +1,56 @@
+# =============================================================================
+# RepresentativePeriodsFinder.jl configuration TEMPLATE (clustering method)
+# =============================================================================
+# This file is the single source of truth for HOW representative days are
+# selected. The driver `generate_representative_days.jl` loads this template,
+# then per scenario year overrides only two things:
+#   * time_series.default.source  -> the full-year CSV for that scenario
+#   * results.result_dir          -> results/<label>
+# and writes the concrete config it actually ran to results/<label>/config_used.yaml.
+#
+# We use the CLUSTERING method (hierarchical, medoid-based; Pineda & Morales 2018),
+# NOT the optimization method. Clustering needs no MILP solver.
+# -----------------------------------------------------------------------------
+
+# The three profiles we cluster on. Column names here MUST match the columns in
+# the full-year CSV produced by the driver and the *_Column names in data.yaml.
+time_series:
+  default:
+    source: "PLACEHOLDER.csv"     # overridden per scenario by the driver
+    csv_options:
+      delim: ","
+    sampling_time: "Hour(1)"      # hourly resolution; no timestamp column needed
+    weight: 1                     # default clustering weight per series
+
+  SOLAR:
+    value_column: "SOLAR"
+    weight: 2                     # VRES double-weighted so clustering keeps
+  WIND:                           # renewable diversity (incl. low-VRES days)
+    value_column: "WIND"
+    weight: 2
+  LOAD_E:
+    value_column: "LOAD_E"
+    weight: 1
+
+method:
+  options:
+    mandatory_periods: []         # e.g. [1] to force a specific calendar day
+    total_periods: 365            # calendar days in a year
+    representative_periods: 8      # nReprDays (must match data.yaml ADMM.nReprDays)
+    time_steps_per_period: 24      # hours per day
+    sampling_time: "Hour(1)"
+    # Dissimilarity metric used by hierarchical clustering. Squared Euclidean
+    # distance between (weighted, min-max normalized) daily feature vectors.
+    ordering_error:
+      ord_err_ssd:
+        function: "(x,y) -> sum((x .- y).^2)"
+        weight: 1.0
+
+  clustering:
+    type: "hierarchical"          # or "chronological"; NOT optimization
+    intermediate_periods: []
+
+results:
+  save_results: true
+  result_dir: "results/PLACEHOLDER"  # overridden per scenario by the driver
+  create_plots: false             # set true to also emit duration-curve plots

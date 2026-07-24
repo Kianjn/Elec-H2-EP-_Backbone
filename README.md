@@ -65,10 +65,11 @@ Verify Gurobi:
 julia --project=. -e "using Gurobi; Gurobi.Env(); println(\"Gurobi OK\")"
 ```
 
-Ensure input data exists under `Data/` and `Input/` (see [DOCUMENTATION.md §9.7](DOCUMENTATION.md#97-weather-and-representative-day-inputs)). To regenerate weather scenarios from ERA5:
+Ensure input data exists under `Data/` and `Input/` (see [DOCUMENTATION.md §9.7](DOCUMENTATION.md#97-weather-and-representative-day-inputs)). Representative days are selected with **RepresentativePeriodsFinder.jl** (hierarchical clustering) from ERA5 weather. To regenerate all scenario inputs:
 
 ```bash
-python Input/generate_weather_scenarios.py
+julia Input/rep_periods/setup_env.jl                                                # one-time: instantiate the RPF sub-environment
+julia --project=Input/rep_periods Input/rep_periods/generate_representative_days.jl  # ERA5 → clustering → timeseries_<label>.csv + output_<label>/
 ```
 
 ---

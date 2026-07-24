@@ -1,0 +1,16 @@
+# Docs
+docs/build
+test/Manifest.toml
+docs/src/examples/*
+
+# Main
+/Manifest.toml
+docs/Manifest.toml
+examples
+
+# Test and other
+results
+corr_time_series.csv
+corr.yaml
+dev/*
+TimeSeriesClustering.jl
