@@ -14,8 +14,8 @@
 General:
   nTimesteps: 24       # Hours per representative day (24 = hourly resolution; standard for power-system models)
   nReprDays: 8         # Number of representative days (8 for finer temporal resolution and H2 price analysis)
-  nYears: 1            # Number of years for social_planner.jl (kept at 1: base scenario only)
-  base_year: 2021      # [NL] Calendar year for timeseries + installed capacities (CBS data complete for 2021; ME uses 2021..2030)
+  nYears: 1            # Number of years for social_planner.jl when ADMM.nScenarioYears is absent
+  base_year: 2021      # [NL] Calibration year for installed capacities / costs (CBS 2021). Not a file label — scenario files are timeseries_1..n.
 
 # ---------------------------------------------------------------------------
 # ADMM: Alternating Direction Method of Multipliers global settings
@@ -23,7 +23,7 @@ General:
 ADMM:
   rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
   rho_cap_initial: 0.1  # Penalty for investment/capacity consensus; low initial to avoid over-constraining early iterations
-  nScenarioYears: 10    # Number of scenario years used by market_exposure*.jl (2021..2030)
+  nScenarioYears: 10    # Number of weather scenarios (labels 1..10 → Input/timeseries_<label>.csv; see DOCUMENTATION.md §9.7)
   max_iter: 2000         # Iteration budget
   epsilon: 0.1          # Base absolute tolerance used in Boyd-style stopping tests for market_exposure
   epsilon_contracts: 0.5 # [me_pap / me_top / me_sop] Looser than ME (0.1); see DOCUMENTATION.md §6.5
@@ -109,7 +109,7 @@ EP_market:
 # Power-sector agents
 # ---------------------------------------------------------------------------
 Power:
-  # NL 2021 aggregate VRES (CBS installed capacity, MWp/MW; base_year timeseries 2021).
+  # NL 2021 aggregate VRES (CBS installed capacity, MWp/MW; baseline scenario = label 1).
   # Variable Renewable Energy Source (solar — national aggregate)
   Gen_VRES_Solar:
     Type: "VRES"

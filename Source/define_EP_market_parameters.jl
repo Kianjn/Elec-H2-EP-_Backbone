@@ -33,8 +33,8 @@ function define_EP_market_parameters!(market::Dict, data::Dict, ts::Dict, repr_d
     n_ts = data["nTimesteps"]
     n_rd = data["nReprDays"]
     n_yr = data["nYears"]
-    base_year = get(data, "base_year", 2021)
-    _years    = isdefined(Main, :years) ? Main.years : Dict(1 => base_year)
+    # Scenario labels are 1..nYears (file keys). Fallback if Main.years missing.
+    _years    = isdefined(Main, :years) ? Main.years : Dict(1 => 1)
 
     # Construct the fixed inelastic demand profile D_EP[jh, jd, jy].
     # At each (jh, jd, jy), demand = Total_Demand × normalized timeseries value.

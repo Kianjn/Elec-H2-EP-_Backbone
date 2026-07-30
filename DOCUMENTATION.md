@@ -678,7 +678,7 @@ This subsection is the **main reference** for risk in the model: CVaR definition
 
 #### 4.10.1 Random loss and why we care about tails
 
-Weather scenarios $y \in JY$ (e.g. ten years 2021–2030 with distinct VRES profiles) create **uncertainty** in revenues and costs. For each risk-averse agent $i$, define **per-scenario loss** $\ell_{i,y}$ (€):
+Weather scenarios $y \in JY$ (e.g. ten scenarios labelled $1,\dots,10$ with distinct VRES profiles) create **uncertainty** in revenues and costs. For each risk-averse agent $i$, define **per-scenario loss** $\ell_{i,y}$ (€):
 
 $$
 \ell_{i,y} = \underbrace{\sum_{h,d} W_{d,y}\bigl(\mathrm{cost}_{i}(h,d,y) - \mathrm{rev}_{i}(h,d,y)\bigr)}_{\text{operational loss in year }y} + \underbrace{F_i^{\mathrm{cap}}\cdot \mathrm{cap}_i}_{\text{annualised CAPEX}}
@@ -1800,7 +1800,7 @@ Example block:
 
 ### 8.3 Scenario Labels (JY mapping)
 
-`years = Dict(1 => 2021, 2 => 2022, ...)` maps scenario index to a **scenario label** used to load CSV files (`timeseries_<label>.csv`, `output_<label>/…`). These labels are **not calendar dates**: scenario `2021` is the baseline weather scenario (and matches `base_year` for installed-capacity calibration), while `2022`–`2030` are nine additional weather scenarios with distinct VRES profiles. **Investment is decided once** before operations; scenarios differ only in availability factors, dispatch, and scenario-weighted expected profit / CVaR. See §7.5 and §9.7.
+`years = Dict(1 => 1, 2 => 2, …)` maps scenario index to a **scenario file label** used to load CSV files (`timeseries_<label>.csv`, `output_<label>/…`). Labels are **not calendar dates**: scenario `1` is the baseline weather scenario (NL capacity/cost calibration uses calendar 2021 via `General.base_year`), while `2`–`10` are nine additional weather scenarios with distinct VRES profiles. **Investment is decided once** before operations; scenarios differ only in availability factors, dispatch, and scenario-weighted expected profit / CVaR. See §7.5 and §9.7.
 
 ### 8.4 3D Arrays
 
@@ -1817,14 +1817,14 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 | `nTimesteps` | 24 | Hours per representative day (hourly resolution) |
 | `nReprDays` | 8 | Representative days (trade-off: speed vs. accuracy) |
 | `nYears` | 1 | Base-year horizon used by `social_planner.jl` |
-| `base_year` | 2021 | `[NL]` Scenario label for baseline timeseries + installed capacities; see §9.6–§9.7 |
+| `base_year` | 2021 | `[NL]` Calibration year for installed capacities / costs (CBS 2021); **not** a scenario file label — see §9.6–§9.7 |
 
 ### 9.2 ADMM
 
 | Parameter | Value | Description |
 |---|---|---|
 | `rho_initial` | 1.0 | Default penalty weight (neutral starting point) |
-| `nScenarioYears` | 10 | Scenario years used by `market_exposure*.jl` (e.g., 2021..2030) |
+| `nScenarioYears` | 10 | Weather scenarios for `market_exposure*.jl` (file labels `1`..`10`) |
 | `max_iter` | 2000 | Maximum ADMM iterations |
 | `epsilon` | 0.1 | Convergence tolerance for `market_exposure`; see §6.5 for accuracy/speed trade-off. |
 | `epsilon_contracts` | 0.5 | [me_pap / me_top / me_sop] Contracts tolerance; looser than ME `epsilon` (0.1) because the contract cases are more tightly coupled (§6.5). |
@@ -1928,7 +1928,7 @@ This model is calibrated to the **Netherlands, base year 2021**. Every input tha
 
 | Parameter (agent) | Value | Basis / derivation | Source |
 |---|---|---|---|
-| `base_year` | 2021 | Year with complete CBS capacity + generation data; ME horizon 2021–2030 | `[CBS-RE]`, `[CBS-EP]` |
+| `base_year` | 2021 | Calendar year of CBS capacity + cost calibration; scenario files use labels 1..10 | `[CBS-RE]`, `[CBS-EP]` |
 | Solar `Capacity` | 14,823 MW | CBS installed solar PV at end-2021 (14,823 MWp) | `[CBS-RE]` |
 | Wind `Capacity` | 7,700 MW | CBS installed wind (on+offshore) at end-2021 | `[CBS-RE]` |
 | Solar `FixedCost_per_MW` | 90,000 €/MW-yr | ≈0.75 M€/MW CAPEX+FOM, 25 yr, 8% WACC ⇒ LCOE ≈43 €/MWh | `[IRENA-2022]` |
@@ -1963,26 +1963,26 @@ These are physically reasonable but not pulled from a single NL statistic; flagg
 
 This section documents how the hourly input files are built, how they enter the model, and what each scenario year represents.
 
-#### Scenario labels vs calendar dates
+#### Scenario labels vs weather source years
 
-The model uses **10 scenario labels** `2021`–`2030` (`ADMM.nScenarioYears = 10`). These are **names for distinct weather scenarios**, not claims about calendar time:
+The model uses **10 scenario labels** `1`–`10` (`ADMM.nScenarioYears = 10`). These are **indices for distinct weather scenarios**, not calendar years:
 
-- **`2021`** is the **baseline / reference** weather scenario. It matches `General.base_year`; installed capacities in `data.yaml` are NL 2021 values; the weather profile is calibrated to NL-realistic annual VRES capacity factors (see below).
-- **`2022`–`2030`** are **nine additional weather scenarios** with different solar/wind hourly shapes and annual capacity factors. They enter the **same single operating year**: the optimiser chooses one investment level, then evaluates expected profit and CVaR over all scenarios with probability `P[jy] = 1/nScenarioYears`. They are **not** years in which the agent reinvests each period.
-- A label **does not have to equal the calendar year of the underlying weather**. For example, scenario `2021` is built from ERA5 reanalysis at a central NL location for calendar **2015**, then rescaled to CBS-like annual CFs; scenario `2022` uses calendar **2010** weather, and so on. The mapping is fixed in `Input/rep_periods/generate_representative_days.jl` and summarised in `Input/weather_scenario_summary.json`.
+- **`1`** is the **baseline / reference** weather scenario. Installed capacities and costs in `data.yaml` are NL **2021** values (`General.base_year`); the weather profile is calibrated to NL-realistic annual VRES capacity factors (see below).
+- **`2`–`10`** are **nine additional weather scenarios** with different solar/wind hourly shapes and annual capacity factors. They enter the **same single operating year**: the optimiser chooses one investment level, then evaluates expected profit and CVaR over all scenarios with probability `P[jy] = 1/nScenarioYears`. They are **not** years in which the agent reinvests each period.
+- A label is **not** the calendar year of the underlying weather. Scenario `1` is built from ERA5 reanalysis at a central NL location for calendar **2015**, then rescaled to CBS-like annual CFs; scenario `2` uses calendar **2010** weather, and so on. The mapping is fixed in `Input/rep_periods/generate_representative_days.jl` and summarised in `Input/weather_scenario_summary.json`.
 
 | Scenario label | Source weather year (ERA5) | Role |
 |---|---|---|
-| 2021 | 2015 | Baseline NL reference; solar CF → **18%**, wind CF → **28%** (CBS 2021 fleet averages) |
-| 2022 | 2010 | Low-wind / dunkelflaute-prone (~14% wind CF) |
-| 2023 | 2012 | Average mixed VRES |
-| 2024 | 2013 | High-solar summer emphasis |
-| 2025 | 2014 | High-wind year |
-| 2026 | 2016 | Windy winter |
-| 2027 | 2017 | Calm summer / lower wind |
-| 2028 | 2018 | Strong solar summer |
-| 2029 | 2019 | Cold winter (higher load, moderate VRES) |
-| 2030 | 2011 | Alternative tail scenario |
+| 1 | 2015 | Baseline NL reference; solar CF → **18%**, wind CF → **28%** (CBS 2021 fleet averages) |
+| 2 | 2010 | Low-wind / dunkelflaute-prone (~14% wind CF) |
+| 3 | 2012 | Average mixed VRES |
+| 4 | 2013 | High-solar summer emphasis |
+| 5 | 2014 | High-wind year |
+| 6 | 2016 | Windy winter |
+| 7 | 2017 | Calm summer / lower wind |
+| 8 | 2018 | Strong solar summer |
+| 9 | 2019 | Cold winter (higher load, moderate VRES) |
+| 10 | 2011 | Alternative tail scenario |
 
 Annual capacity factors for all scenarios are listed in `Input/weather_scenario_summary.json`.
 
@@ -1996,7 +1996,7 @@ Hourly weather is fetched from the **[Open-Meteo Historical API](https://open-me
 | `wind_speed_100m` (km/h) | **WIND** | Standard turbine power curve (cut-in 3 m/s, rated 12 m/s, cut-out 25 m/s), cubic between cut-in and rated |
 | `temperature_2m` (°C) | **LOAD_E** (indirect) | Drives mild heating sensitivity on a fixed NL diurnal/seasonal load shape |
 
-For the **baseline scenario only** (`2021`), hourly SOLAR and WIND profiles are **rescaled** (preserving hourly shape) so that the annual mean matches NL CBS 2021 fleet averages: **~18% solar CF, ~28% wind CF** `[CBS-RE]`. Other scenarios use unscaled CFs from their source weather year, giving a realistic spread (~12–18% solar, ~14–19% wind in the current mapping). Exact per-scenario annual CFs are written to `Input/weather_scenario_summary.json`.
+For the **baseline scenario only** (`1`), hourly SOLAR and WIND profiles are **rescaled** (preserving hourly shape) so that the annual mean matches NL CBS 2021 fleet averages: **~18% solar CF, ~28% wind CF** `[CBS-RE]`. Other scenarios use unscaled CFs from their source weather year, giving a realistic spread (~12–18% solar, ~14–19% wind in the current mapping). Exact per-scenario annual CFs are written to `Input/weather_scenario_summary.json`.
 
 **LOAD_H** and **LOAD_EP** are fixed normalised shapes (0.8 and 0.9) in all scenarios; absolute H₂ and EP demand is set in `data.yaml` via agent capacities and `Total_Demand`.
 
@@ -2019,7 +2019,7 @@ julia Input/rep_periods/setup_env.jl                                            
 julia --project=Input/rep_periods Input/rep_periods/generate_representative_days.jl   # regenerate all scenarios
 ```
 
-Pass specific labels (e.g. `... generate_representative_days.jl 2021 2025`) to regenerate a subset. Raw ERA5 responses are cached under `Input/rep_periods/weather_cache/`, full-year clustering inputs under `Input/rep_periods/weather_full/`, and RPF's native per-scenario outputs (including optional duration-curve plots) under `Input/rep_periods/results/<label>/`. The previous inputs are backed up once to `Input/_legacy_inputs_backup/` before the first overwrite.
+Pass specific labels (e.g. `... generate_representative_days.jl 1 5`) to regenerate a subset. Raw ERA5 responses are cached under `Input/rep_periods/weather_cache/`, full-year clustering inputs under `Input/rep_periods/weather_full/`, and RPF's native per-scenario outputs (including optional duration-curve plots) under `Input/rep_periods/results/<label>/`. The previous inputs are backed up once to `Input/_legacy_inputs_backup/` before the first overwrite.
 
 #### Timeseries file layout and availability factors
 
@@ -2061,14 +2061,14 @@ Now/
 │   └── data.yaml               # All configuration: agents, markets, ADMM settings
 │
 ├── Input/
-│   ├── timeseries_2021.csv     # Representative-day hourly profiles (SOLAR, LOAD_E, LOAD_H, LOAD_EP, WIND)
-│   ├── timeseries_2022.csv     # (one per year; columns are normalized 0–1 profiles)
+│   ├── timeseries_1.csv        # Representative-day hourly profiles (SOLAR, LOAD_E, LOAD_H, LOAD_EP, WIND)
+│   ├── timeseries_2.csv        # (one per scenario label 1..10; columns are normalized 0–1 profiles)
 │   ├── ...
-│   ├── output_2021/
+│   ├── output_1/
 │   │   ├── decision_variables_short.csv   # Representative days: periods, weights, selected_periods
 │   │   ├── decision_variables.csv         # All 365 days (weight 0 except medoids)
 │   │   └── ordering_variable.csv          # 365×8 one-hot day→medoid assignment matrix
-│   ├── output_2022/
+│   ├── output_2/
 │   │   └── ...
 │   ├── weather_scenario_summary.json      # Per-scenario source year, roles, annual CFs, medoid days/weights
 │   └── rep_periods/            # Representative-day generation (RepresentativePeriodsFinder.jl)

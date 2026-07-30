@@ -29,8 +29,8 @@ function define_power_parameters!(m::String, mod::Model, data::Dict, ts::Dict, r
     JD   = mod.ext[:sets][:JD]
     JH   = mod.ext[:sets][:JH]
 
-    base_year = get(data, "base_year", 2021)
-    _years    = isdefined(Main, :years) ? Main.years : Dict(1 => base_year)
+    # Scenario labels are 1..nYears (file keys). Fallback if Main.years missing.
+    _years    = isdefined(Main, :years) ? Main.years : Dict(1 => 1)
 
     agent_type = String(get(data, "Type", ""))
 

@@ -23,8 +23,8 @@ function define_elec_GC_demand_parameters!(m::String, mod::Model, data::Dict, ts
     n_yr = data["nYears"]
     JY   = mod.ext[:sets][:JY]
     JD   = mod.ext[:sets][:JD]
-    base_year = get(data, "base_year", 2021)
-    _years    = isdefined(Main, :years) ? Main.years : Dict(1 => base_year)
+    # Scenario labels are 1..nYears (file keys). Fallback if Main.years missing.
+    _years    = isdefined(Main, :years) ? Main.years : Dict(1 => 1)
 
     params[:PeakLoad]    = data["PeakLoad"]            # Peak GC demand (MW_GC); scales the normalized profile to absolute units
     params[:Load_Column] = String(data["Load_Column"])  # Timeseries column with the normalized GC demand shape (0–1)

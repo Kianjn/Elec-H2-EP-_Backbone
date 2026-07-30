@@ -1,8 +1,36 @@
 [
   {
+    "annual_solar_cf": 0.18,
+    "annual_wind_cf": 0.28,
+    "label": 1,
+    "medoid_days": [
+      60,
+      211,
+      271,
+      297,
+      309,
+      337,
+      345,
+      363
+    ],
+    "role": "Baseline NL reference weather (CBS-calibrated annual CF targets)",
+    "source_year": 2015,
+    "weights": [
+      43.0,
+      112.0,
+      64.0,
+      33.0,
+      66.0,
+      11.0,
+      26.0,
+      10.0
+    ],
+    "weights_sum": 365.0
+  },
+  {
     "annual_solar_cf": 0.1231,
     "annual_wind_cf": 0.1367,
-    "label": 2022,
+    "label": 2,
     "medoid_days": [
       142,
       260,
@@ -30,7 +58,7 @@
   {
     "annual_solar_cf": 0.1211,
     "annual_wind_cf": 0.1691,
-    "label": 2023,
+    "label": 3,
     "medoid_days": [
       3,
       12,
@@ -58,7 +86,7 @@
   {
     "annual_solar_cf": 0.1203,
     "annual_wind_cf": 0.1748,
-    "label": 2024,
+    "label": 4,
     "medoid_days": [
       31,
       53,
@@ -86,7 +114,7 @@
   {
     "annual_solar_cf": 0.1223,
     "annual_wind_cf": 0.184,
-    "label": 2025,
+    "label": 5,
     "medoid_days": [
       33,
       126,
@@ -114,7 +142,7 @@
   {
     "annual_solar_cf": 0.1245,
     "annual_wind_cf": 0.1609,
-    "label": 2026,
+    "label": 6,
     "medoid_days": [
       12,
       33,
@@ -142,7 +170,7 @@
   {
     "annual_solar_cf": 0.1201,
     "annual_wind_cf": 0.1809,
-    "label": 2027,
+    "label": 7,
     "medoid_days": [
       47,
       256,
@@ -170,7 +198,7 @@
   {
     "annual_solar_cf": 0.135,
     "annual_wind_cf": 0.1754,
-    "label": 2028,
+    "label": 8,
     "medoid_days": [
       19,
       25,
@@ -198,7 +226,7 @@
   {
     "annual_solar_cf": 0.129,
     "annual_wind_cf": 0.1932,
-    "label": 2029,
+    "label": 9,
     "medoid_days": [
       73,
       99,
@@ -226,7 +254,7 @@
   {
     "annual_solar_cf": 0.122,
     "annual_wind_cf": 0.1905,
-    "label": 2030,
+    "label": 10,
     "medoid_days": [
       204,
       223,

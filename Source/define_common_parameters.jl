@@ -56,16 +56,13 @@ function define_common_parameters!(m::String, mod::Model, data::Dict, ts::Dict, 
 
     # --- Representative-day weights ---
     # W[jd, jy] = how many real calendar days representative day jd stands for in
-    # year jy. This weight is used to scale per-representative-day objective values
-    # up to a full-year total (e.g. sum over jh,jd,jy of W[jd,jy] * cost[jh,jd,jy]).
+    # scenario jy. This weight scales per-representative-day objective values up
+    # to a full-year total (e.g. sum over jh,jd,jy of W[jd,jy] * cost[jh,jd,jy]).
     #
-    # We need the calendar year to index into repr_days, which is keyed by calendar
-    # year (e.g. 2021). The global `years` dict (defined in the main script) maps
-    # scenario index → calendar year. We access it via Main.years because this
-    # function runs inside a module/function scope that doesn't see the global directly.
-    base_year = get(data, "base_year", 2021)
-    _years = isdefined(Main, :years) ? Main.years : Dict(1 => base_year)
-    # Build the 2D weight matrix: for each (jd, jy), look up the calendar year
+    # Scenario labels are 1..nYears (file keys for timeseries_<label>.csv).
+    # Fallback Dict(1 => 1) is used only if Main.years is not defined.
+    _years = isdefined(Main, :years) ? Main.years : Dict(1 => 1)
+    # Build the 2D weight matrix: for each (jd, jy), look up the scenario label
     # from _years, then pull the weight of that representative day from repr_days.
     W = [repr_days[_years[jy]][!, :weights][jd] for jd in JD, jy in JY]
     mod.ext[:parameters][:W] = W

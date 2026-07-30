@@ -4,7 +4,7 @@
 # Builds the model's scenario-year time-series inputs using
 # RepresentativePeriodsFinder.jl (CLUSTERING method, hierarchical / medoid-based).
 #
-# Pipeline per scenario label Y (2021..2030):
+# Pipeline per scenario label Y (1..10):
 #   1. Fetch a full calendar year of hourly weather (Open-Meteo ERA5) for the
 #      source year mapped to Y, convert to solar/wind capacity factors and a
 #      synthetic NL electricity-load shape -> 8760-row full-year CSV.
@@ -22,7 +22,7 @@
 # Run (from repo root):
 #   julia --project=Input/rep_periods Input/rep_periods/generate_representative_days.jl
 # Optionally pass specific labels:
-#   julia --project=Input/rep_periods Input/rep_periods/generate_representative_days.jl 2021 2025
+#   julia --project=Input/rep_periods Input/rep_periods/generate_representative_days.jl 1 5
 # =============================================================================
 
 using Dates
@@ -50,19 +50,19 @@ const N_HOURS  = 24
 # Julia world-age error when the whole run is wrapped in a function like main()).
 ssd(x, y) = sum((x .- y) .^ 2)
 
-# Scenario label -> source ERA5 calendar year + metadata. Labels are names only;
-# they do NOT have to equal the calendar year of the underlying weather.
+# Scenario label (1..10) -> source ERA5 calendar year + metadata.
+# Labels are model indices only — they are NOT calendar years. See DOCUMENTATION.md §9.7.
 const SCENARIOS = [
-    (label = 2021, source_year = 2015, role = "Baseline NL reference weather (CBS-calibrated annual CF targets)", solar_cf_target = 0.18, wind_cf_target = 0.28),
-    (label = 2022, source_year = 2010, role = "Low-wind / moderate-solar year (dunkelflaute-prone)"),
-    (label = 2023, source_year = 2012, role = "Average mixed VRES year"),
-    (label = 2024, source_year = 2013, role = "High-solar / moderate-wind year"),
-    (label = 2025, source_year = 2014, role = "High-wind year"),
-    (label = 2026, source_year = 2016, role = "Windy winter, moderate solar"),
-    (label = 2027, source_year = 2017, role = "Calm summer, lower wind CF"),
-    (label = 2028, source_year = 2018, role = "Strong solar summer"),
-    (label = 2029, source_year = 2019, role = "Cold winter, elevated load + moderate VRES"),
-    (label = 2030, source_year = 2011, role = "Alternative tail scenario (low solar, variable wind)"),
+    (label = 1,  source_year = 2015, role = "Baseline NL reference weather (CBS-calibrated annual CF targets)", solar_cf_target = 0.18, wind_cf_target = 0.28),
+    (label = 2,  source_year = 2010, role = "Low-wind / moderate-solar year (dunkelflaute-prone)"),
+    (label = 3,  source_year = 2012, role = "Average mixed VRES year"),
+    (label = 4,  source_year = 2013, role = "High-solar / moderate-wind year"),
+    (label = 5,  source_year = 2014, role = "High-wind year"),
+    (label = 6,  source_year = 2016, role = "Windy winter, moderate solar"),
+    (label = 7,  source_year = 2017, role = "Calm summer, lower wind CF"),
+    (label = 8,  source_year = 2018, role = "Strong solar summer"),
+    (label = 9,  source_year = 2019, role = "Cold winter, elevated load + moderate VRES"),
+    (label = 10, source_year = 2011, role = "Alternative tail scenario (low solar, variable wind)"),
 ]
 
 # ------------------------------------------------------------------ weather ---

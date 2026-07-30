@@ -67,13 +67,12 @@ data = YAML.load_file(joinpath(home_dir, "Data", "data.yaml"))
 ts = Dict()
 repr_days = Dict()
 gen = data["General"]
-base_year = get(gen, "base_year", 2021)
 n_years = haskey(data["ADMM"], "nScenarioYears") ? data["ADMM"]["nScenarioYears"] :
           (haskey(gen, "nYears") ? gen["nYears"] : 1)
 run_general = merge(gen, Dict("nYears" => n_years))
 data_run = copy(data)
 data_run["General"] = run_general
-years = Dict(i => base_year + (i - 1) for i in 1:n_years)
+years = Dict(i => i for i in 1:n_years)
 
 for y in values(years)
     ts[y] = CSV.read(joinpath(home_dir, "Input", "timeseries_$(y).csv"), DataFrame)

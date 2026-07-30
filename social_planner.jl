@@ -173,7 +173,7 @@ include(joinpath(home_dir, "Source", "save_social_planner_results.jl"))
 # Electricity_GC_Demand, EP_Demand.
 data = YAML.load_file(joinpath(home_dir, "Data", "data.yaml"))
 
-# Time series: keyed by calendar year (e.g. 2021). Each value is a DataFrame
+# Time series: keyed by scenario label (1..nYears). Each value is a DataFrame
 # with columns such as SOLAR, LOAD_E, LOAD_H, LOAD_EP (normalized 0–1 profiles).
 # Named ts_dict here (vs. ts in market_exposure.jl) to distinguish the social-
 # planner script's local scope, but it holds identical data.
@@ -188,28 +188,20 @@ order_matrix = Dict()
 # periods (day index 1–365), weights (frequency), selected_periods.
 repr_days = Dict()
 
-# Determine modeled years for the social planner.
-# We intentionally align SP and ADMM scenario horizons by default so benchmark
-# comparisons are apples-to-apples in multi-scenario studies. SP uses:
-#   ADMM.nScenarioYears (if provided), else General.nYears.
-# For example:
-#   base_year = 2021, nYears = 1  -> {1 => 2021}
-#   base_year = 2021, nYears = 5  -> {1 => 2021, 2 => 2022, ..., 5 => 2025}
-# years Dict: maps scenario index (1, 2, ...) to calendar year (2021, 2022, ...).
-# WHY: timeseries and repr_days are keyed by calendar year, while the model
-# uses integer scenario indices (JY). This mapping bridges the two.
+# Determine modeled scenario years for the social planner.
+# Align SP and ADMM horizons by default so benchmarks are apples-to-apples.
+# SP uses ADMM.nScenarioYears if provided, else General.nYears.
+# Scenario labels are simply 1..nYears (not calendar years); see §9.7.
 run_general = merge(data["General"])
 run_general["nYears"] = get(data["ADMM"], "nScenarioYears", get(data["General"], "nYears", 1))
 gen = run_general
-base_year = haskey(gen, "base_year") ? gen["base_year"] : 2021
 n_years = haskey(gen, "nYears") ? gen["nYears"] : 1
-years = Dict(i => base_year + (i - 1) for i in 1:n_years)
+years = Dict(i => i for i in 1:n_years)
 
-# Full-year hourly time series and representative days for each modeled year.
-# Input files are expected to follow the pattern:
-#   Input/timeseries_<year>.csv
-#   Input/output_<year>/ordering_variable.csv
-#   Input/output_<year>/decision_variables_short.csv
+# Time series and representative days for each scenario.
+#   Input/timeseries_<label>.csv
+#   Input/output_<label>/ordering_variable.csv
+#   Input/output_<label>/decision_variables_short.csv
 for y in values(years)
     ts_dict[y] = CSV.read(joinpath(home_dir, "Input", "timeseries_$(y).csv"), DataFrame)
     order_matrix[y] = CSV.read(joinpath(home_dir, "Input", "output_$(y)", "ordering_variable.csv"), delim=",", DataFrame)

@@ -24,8 +24,8 @@ function define_merged_agent!(merged_id::String, mod::Model, merged_type::String
     mod.ext[:sets][:JD] = JD
     mod.ext[:sets][:JH] = JH
 
-    base_year = get(gen, "base_year", 2021)
-    _years = isdefined(Main, :years) ? Main.years : Dict(1 => base_year)
+    # Scenario labels are 1..nYears (file keys). Fallback if Main.years missing.
+    _years = isdefined(Main, :years) ? Main.years : Dict(1 => 1)
     W = [repr_days[_years[jy]][!, :weights][jd] for jd in JD, jy in JY]
     params = mod.ext[:parameters]
     params[:W] = W

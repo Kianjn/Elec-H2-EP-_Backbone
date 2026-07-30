@@ -127,7 +127,7 @@ General:
   base_year: 2021
 
 ADMM:
-  nScenarioYears: 10    # weather scenarios for market_exposure.jl and me_*.jl
+  nScenarioYears: 10    # weather scenarios 1..10 (see DOCUMENTATION.md §9.7)
   max_iter: 2000        # iteration budget
   epsilon: 0.1          # convergence tolerance (Boyd-scaled; see §6.5)
   gamma: 1.0            # 1 = risk-neutral; 0.5 = risk-averse (see §4.10)
