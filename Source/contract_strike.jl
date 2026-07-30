@@ -39,25 +39,52 @@ function _strike_field(K_scalar::Real, shp::Tuple)
     fill(Float64(K_scalar), shp...)
 end
 
-"""Read NG / grey-chain proxy prices (€/MWh) from data.yaml agent blocks."""
+"""
+Read NG / grey-chain proxy prices (EUR/MWh) used by the `NG` contract benchmarks.
+
+A contract strike is a single scalar, but the gas price now varies across the
+scenario grid (§9.8). The benchmark therefore uses the EXPECTED gas level — the
+mean of `Scenarios.gas_price_multipliers` — so the reference price sits at the
+centre of the uncertainty set rather than at one arbitrary corner of it.
+
+Both scalars are derived from the `Fuel` block via the same formulas the agents
+themselves use, so the benchmark cannot drift away from the costs it references.
+Legacy hard-coded `FinalMarginalCost` / `MarginalCost` entries are still honoured
+when the derived inputs are absent.
+"""
 function _ng_benchmark_scalars(data::Dict)
     power = get(data, "Power", Dict())
     off = get(data, "Hydrogen_Offtaker", Dict())
+    fuel = get(data, "Fuel", Dict())
+
+    mults = Float64.(get(get(data, "Scenarios", Dict()), "gas_price_multipliers", [1.0]))
+    gas_mult = isempty(mults) ? 1.0 : sum(mults) / length(mults)
+
     conv_mc = 100.0
     for (_, blk) in power
-        if String(get(blk, "Type", "")) == "Conventional"
-            conv_mc = Float64(get(blk, "FinalMarginalCost", get(blk, "MarginalCost", conv_mc)))
-            break
+        String(get(blk, "Type", "")) == "Conventional" || continue
+        peak = get(blk, "PeakTechnology", nothing)
+        conv_mc = if peak !== nothing && !isempty(fuel)
+            thermal_srmc(peak, fuel, gas_mult)   # OCGT tail: the price-setting unit
+        else
+            Float64(get(blk, "FinalMarginalCost", get(blk, "MarginalCost", conv_mc)))
         end
+        break
     end
+
     grey_ep = 180.0
     grey_alpha = 1.0
     for (_, blk) in off
-        if String(get(blk, "Type", "")) == "GreyOfftaker"
-            grey_ep = Float64(get(blk, "MarginalCost", grey_ep))
-            grey_alpha = Float64(get(blk, "Alpha", 1.0))
-            break
+        String(get(blk, "Type", "")) == "GreyOfftaker" || continue
+        grey_alpha = Float64(get(blk, "Alpha", 1.0))
+        grey_ep = if haskey(blk, "GasIntensity") && !isempty(fuel)
+            Float64(blk["GasIntensity"]) * Float64(get(fuel, "GasPrice", 0.0)) * gas_mult +
+            Float64(get(blk, "CO2Intensity", 0.0)) * Float64(get(fuel, "CO2Price", 0.0)) +
+            Float64(get(blk, "VariableOM", 0.0))
+        else
+            Float64(get(blk, "MarginalCost", grey_ep))
         end
+        break
     end
     grey_alpha = max(grey_alpha, 1e-9)
     return (

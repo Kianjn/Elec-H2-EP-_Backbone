@@ -34,6 +34,7 @@ const CASE_RESULTS_DIR = joinpath(home_dir, RESULTS_SUBDIR)
 # SOURCE FILES
 # ------------------------------------------------------------------------------
 
+include(joinpath(home_dir, "Source", "define_scenarios.jl"))
 include(joinpath(home_dir, "Source", "define_common_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_power_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_H2_parameters.jl"))
@@ -86,15 +87,20 @@ ts = Dict()
 order_matrix = Dict()
 repr_days = Dict()
 
-gen = data["General"]
-n_years = haskey(data["ADMM"], "nScenarioYears") ? data["ADMM"]["nScenarioYears"] :
-          (haskey(gen, "nYears") ? gen["nYears"] : 1)
-run_general = merge(gen, Dict("nYears" => n_years))
+gen  = data["General"]
+scen = build_scenario_grid(data)
+n_years = scen.n_years
+years   = scen.years
+run_general = merge(gen, Dict(
+    "nYears"             => n_years,
+    "Fuel"               => get(data, "Fuel", Dict{String,Any}()),
+    "GasPriceMultiplier" => scen.gas_multiplier,
+))
 data_run = copy(data)
 data_run["General"] = run_general
-years = Dict(i => i for i in 1:n_years)
+describe_scenario_grid(scen)
 
-for y in values(years)
+for y in unique(values(years))
     ts[y] = CSV.read(joinpath(home_dir, "Input", "timeseries_$(y).csv"), DataFrame)
     order_matrix[y] = CSV.read(joinpath(home_dir, "Input", "output_$(y)", "ordering_variable.csv"), delim=",", DataFrame)
     repr_days[y] = CSV.read(joinpath(home_dir, "Input", "output_$(y)", "decision_variables_short.csv"), delim=",", DataFrame)

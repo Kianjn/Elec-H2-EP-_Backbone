@@ -580,36 +580,22 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
     end
 
     # --------------------------------------------------------------------------
-    # Agent_Quantities_Final.csv — PER-AGENT NET QUANTITIES AT FINAL ITERATION
-    # --------------------------------------------------------------------------
-    # Builds a compact summary showing each agent's total energy traded in
-    # every market at the last ADMM iteration.
-    #
-    # Net position sign convention (consistent with the rest of the model):
-    #   +  = supply (selling into the market)
-    #   −  = demand (buying from the market)
-    #
-    # _total_last helper: takes the history dict for a given market, selects
-    # the 3D array from the *last* ADMM iteration (arr_dict[id][end]), and
-    # sums over all (jh, jd, jy) entries to collapse it into a single scalar.
-    # This scalar is the total energy traded by that agent across the full
-    # modeled year (all hours × representative days × scenario years).
-
-    # --------------------------------------------------------------------------
     # Offtaker_GC_Diagnostics.csv — GREEN-CERTIFICATE COMPLIANCE PER OFFTAKER
     # --------------------------------------------------------------------------
-    # For each offtaker agent, exports total end-product (EP) output, total H₂
-    # consumed, total H₂ green certificates (GCs) consumed, the resulting GC
-    # share, the regulatory mandate (γ_GC), and the slack (share − mandate).
+    # For each offtaker agent, exports total end-product (EP) output, the H₂
+    # feedstock the mandate is measured against, total H₂ GCs purchased, the
+    # resulting GC share, the regulatory mandate (γ_GC), and the slack.
+    #
+    # The mandate is defined on H₂ feedstock, not on EP (see build_offtaker_agent.jl):
+    #   GreenOfftaker : H₂_basis = h2_in                 (bought on the H₂ market)
+    #   GreyOfftaker  : H₂_basis = ep / gamma_NH3         (inferred SMR feedstock)
+    # so
+    #   gc_share  = H₂_GCs / H₂_basis
+    #   gc_slack  = gc_share − γ_GC          (> 0 ⇒ compliant)
     #
     # Sign convention: offtakers *buy* H₂ and H₂ GCs, so their net positions
-    # in those markets are negative. We negate h2_net and h2gc_net below to
-    # obtain the positive quantity consumed, which is more intuitive for
-    # compliance reporting.
-    #
-    # gc_share = H₂ GCs consumed / EP produced — fraction of output backed by
-    #            green certificates.
-    # gc_slack = gc_share − γ_GC mandate. Positive → compliant; negative → short.
+    # in those markets are negative. We negate them below to report positive
+    # consumed quantities.
 
     if haskey(agents, :offtaker)
         off_ids    = agents[:offtaker]
@@ -632,22 +618,27 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
             h2gc_list = results["H2_GC"][id]
 
             ep_sum   = isempty(ep_list)   ? 0.0 : sum(ep_list[end])
-            h2_net   = isempty(h2_list)   ? 0.0 : sum(h2_list[end])      # < 0 for offtakers (they buy H₂)
-            h2gc_net = isempty(h2gc_list) ? 0.0 : sum(h2gc_list[end])    # < 0 for offtakers (they buy H₂ GCs)
+            h2_net   = isempty(h2_list)   ? 0.0 : sum(h2_list[end])      # < 0 for buyers
+            h2gc_net = isempty(h2gc_list) ? 0.0 : sum(h2gc_list[end])    # < 0 for buyers
 
-            # Negate to convert negative net positions into positive consumed
-            # quantities, which are easier to interpret in a compliance context.
-            h2_in_sum  = -h2_net       # total H₂ consumed (positive)
-            h2_gc_sum  = -h2gc_net     # total H₂ GCs consumed (positive)
-            # gc_share: fraction of EP output backed by green H₂ certificates
-            share      = (ep_sum > 0 && h2_gc_sum > 0) ? h2_gc_sum / ep_sum : 0.0
-            # slack > 0 means the offtaker exceeds its green mandate
-            slack      = share - γ
+            h2_bought = -h2_net
+            h2_gc_sum = -h2gc_net
+
+            # H₂ basis the mandate is defined on (matches build_offtaker_agent.jl).
+            h2_basis = if t == "GreyOfftaker"
+                γ_nh3 = get(m.ext[:parameters], :gamma_NH3, 0.75)
+                γ_nh3 > 0 ? ep_sum / γ_nh3 : 0.0
+            else
+                h2_bought                                          # GreenOfftaker
+            end
+
+            share = (h2_basis > 0 && h2_gc_sum > 0) ? h2_gc_sum / h2_basis : 0.0
+            slack = share - γ
 
             push!(off_agent,  String(id))
             push!(off_type,   t)
             push!(ep_total,   ep_sum)
-            push!(h2_in_tot,  h2_in_sum)
+            push!(h2_in_tot,  h2_basis)   # H₂-equivalent the mandate is measured on
             push!(h2_gc_tot,  h2_gc_sum)
             push!(gc_share,   share)
             push!(gc_mandate, γ)

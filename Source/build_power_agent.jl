@@ -158,9 +158,11 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
     elseif agent_type == "Conventional"
         cap = mod.ext[:parameters][:Capacity]        # installed capacity (MW)
         MC  = mod.ext[:parameters][:MarginalCost]    # fallback marginal cost (€/MWh)
+        # Stage base costs and slopes are 3 x nYears: gas-fired stages are more
+        # expensive in the high-gas scenarios, so they are indexed by [s, jy].
         stage_cap = get(mod.ext[:parameters], :ConvStageCap, [cap, 0.0, 0.0])
-        stage_base = get(mod.ext[:parameters], :ConvStageBaseCost, [MC, MC, MC])
-        stage_slope = get(mod.ext[:parameters], :ConvStageSlope, [0.0, 0.0, 0.0])
+        stage_base = get(mod.ext[:parameters], :ConvStageBaseCost, fill(MC, 3, length(JY)))
+        stage_slope = get(mod.ext[:parameters], :ConvStageSlope, zeros(3, length(JY)))
 
         # Generation variable g ≥ 0 for conventional (thermal) plant.
         g = mod.ext[:variables][:g] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "gen")
@@ -181,11 +183,11 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
             g_stage[s, jh, jd, jy] <= stage_cap[s])
 
         # Objective — same structure as VRES but without GC market terms:
-        #   min  Σ W·( Σ_s (a_s·g_s + 0.5·b_s·g_s²) − λ_elec·g )  ← stagewise convex variable cost minus elec revenue
+        #   min  Σ W·( Σ_s (a_s,jy·g_s + 0.5·b_s,jy·g_s²) − λ_elec·g )  ← stagewise convex variable cost minus elec revenue
         #      + Σ (ρ_elec/2)·W·(g − ḡ)²   ← ADMM penalty toward consensus
         mod.ext[:objective] = @objective(mod, Min,
             sum(W[jd, jy] * (
-                sum(stage_base[s] * g_stage[s, jh, jd, jy] + 0.5 * stage_slope[s] * g_stage[s, jh, jd, jy]^2 for s in 1:3)
+                sum(stage_base[s, jy] * g_stage[s, jh, jd, jy] + 0.5 * stage_slope[s, jy] * g_stage[s, jh, jd, jy]^2 for s in 1:3)
                 - λ_elec[jh, jd, jy] * g[jh, jd, jy]
             ) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
@@ -310,8 +312,8 @@ function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
         cap = _p(mod, :Capacity)
         C = _p(mod, :MarginalCost)
         stage_cap = get(mod.ext[:parameters], :ConvStageCap, [cap, 0.0, 0.0])
-        stage_base = get(mod.ext[:parameters], :ConvStageBaseCost, [C, C, C])
-        stage_slope = get(mod.ext[:parameters], :ConvStageSlope, [0.0, 0.0, 0.0])
+        stage_base = get(mod.ext[:parameters], :ConvStageBaseCost, fill(C, 3, length(JY)))
+        stage_slope = get(mod.ext[:parameters], :ConvStageSlope, zeros(3, length(JY)))
 
         q_E = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="q_E_$(id)")
         q_stage = @variable(planner, [s in 1:3, jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="q_E_stage_$(id)")
@@ -325,7 +327,7 @@ function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
         for jy in JY
             welfare_per_year[jy] = @expression(planner,
                 -sum(W_dict[jy][jd] * (
-                    sum(stage_base[s] * q_stage[s, jh, jd, jy] + 0.5 * stage_slope[s] * q_stage[s, jh, jd, jy]^2 for s in 1:3)
+                    sum(stage_base[s, jy] * q_stage[s, jh, jd, jy] + 0.5 * stage_slope[s, jy] * q_stage[s, jh, jd, jy]^2 for s in 1:3)
                 ) for jh in JH, jd in JD)
             )
         end

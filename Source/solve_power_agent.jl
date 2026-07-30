@@ -128,7 +128,7 @@ function solve_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
             stage_slope = mod.ext[:parameters][:ConvStageSlope]
             mod.ext[:objective] = @objective(mod, Min,
                 sum(W[jd, jy] * (
-                    sum(stage_base[s] * g_stage[s, jh, jd, jy] + 0.5 * stage_slope[s] * g_stage[s, jh, jd, jy]^2 for s in 1:3)
+                    sum(stage_base[s, jy] * g_stage[s, jh, jd, jy] + 0.5 * stage_slope[s, jy] * g_stage[s, jh, jd, jy]^2 for s in 1:3)
                     - λ_elec[jh, jd, jy] * g[jh, jd, jy]
                 ) for jh in JH, jd in JD, jy in JY)
                 + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY))

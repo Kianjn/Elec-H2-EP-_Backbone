@@ -71,14 +71,14 @@ function _agent_welfare_per_year(m::Model, agents::Dict; JH, JD, JY, W)
 
     elseif atype == "Conventional"
         stage_cap = get(p, :ConvStageCap, [0.0, 0.0, 0.0])
-        stage_base = get(p, :ConvStageBaseCost, [0.0, 0.0, 0.0])
-        stage_slope = get(p, :ConvStageSlope, [0.0, 0.0, 0.0])
+        stage_base = get(p, :ConvStageBaseCost, zeros(3, length(JY)))
+        stage_slope = get(p, :ConvStageSlope, zeros(3, length(JY)))
         if haskey(vars, :g_stage)
             for jy in JY
                 cost = 0.0
                 for jh in JH, jd in JD, s in 1:3
                     gs = value(vars[:g_stage][s, jh, jd, jy])
-                    cost += Wd[jy][jd] * (stage_base[s] * gs + 0.5 * stage_slope[s] * gs^2)
+                    cost += Wd[jy][jd] * (stage_base[s, jy] * gs + 0.5 * stage_slope[s, jy] * gs^2)
                 end
                 wy[jy] = -cost
             end
@@ -118,10 +118,10 @@ function _agent_welfare_per_year(m::Model, agents::Dict; JH, JD, JY, W)
         end
 
     elseif atype == "GreyOfftaker"
-        C_proc = get(p, :MarginalCost, 0.0)
+        C_proc = get(p, :MarginalCostByYear, fill(get(p, :MarginalCost, 0.0), length(JY)))
         ep = vars[:ep]
         for jy in JY
-            wy[jy] = -sum(Wd[jy][jd] * C_proc * value(ep[jh, jd, jy]) for jh in JH, jd in JD)
+            wy[jy] = -sum(Wd[jy][jd] * C_proc[jy] * value(ep[jh, jd, jy]) for jh in JH, jd in JD)
         end
 
     elseif atype == "EPImporter"
@@ -201,10 +201,17 @@ function load_sp_social_cvar_benchmark(project_root::String)
     path = joinpath(project_root, "social_planner_results", "Risk_Metrics.csv")
     isfile(path) || return nothing
     df = CSV.read(path, DataFrame)
-    for i in 1:nrow(df)
-        String(df.Metric[i]) == "social_CVaR" || continue
-        parsed = _parse_metric_value(df.Value[i])
-        return parsed  # first exact match (may be nothing if non-numeric)
+    # Prefer the ex-post recomputed CVaR. The stored `social_CVaR` is the planner's
+    # cvar_social variable, which carries zero objective weight at gamma = 1 and is
+    # therefore left arbitrarily loose; comparing an ADMM ex-post CVaR against it
+    # would report a large spurious gap. Fall back to it only if the recomputed row
+    # is missing (older result files).
+    for key in ("social_CVaR_recomputed", "social_CVaR")
+        for i in 1:nrow(df)
+            String(df.Metric[i]) == key || continue
+            parsed = _parse_metric_value(df.Value[i])
+            parsed === nothing || return parsed
+        end
     end
     return nothing
 end
@@ -345,11 +352,17 @@ end
 
 function print_risk_metrics_summary!(metrics::NamedTuple; title::String = "Risk metrics")
     # Internal CVaR is on loss L = -welfare; report tail welfare = -CVaR(L) (higher is better).
-    tail_welfare = -metrics.social_CVaR
+    # Always report the EX-POST empirical CVaR of the realised welfare vector rather
+    # than the planner's cvar_social variable. At gamma = 1 the objective puts zero
+    # weight on that variable, so the solver leaves it anywhere above its true value
+    # and the printed tail would otherwise come out below the worst scenario, which
+    # is impossible. At gamma < 1 the two agree because the objective drives it down.
+    tail_welfare = -metrics.social_CVaR_recomputed
     min_sw = minimum(metrics.social_welfare_per_year)
     spread = maximum(metrics.social_welfare_per_year) - min_sw
     tail_pct = round(100 * (1 - metrics.beta); digits=0)
     risk_neutral = metrics.gamma >= 1.0 - 1e-12
+    n_scen = length(metrics.social_welfare_per_year)
 
     println()
     println("-" ^ 72)
@@ -376,6 +389,16 @@ function print_risk_metrics_summary!(metrics::NamedTuple; title::String = "Risk 
     if risk_neutral
         println("  (gamma = 1: risk-neutral; tail lines are ex-post at the stated beta.)")
     end
-    println("  (Placeholder scenario years — if welfare is similar across years, risk shifts stay small.)")
+    # With n equiprobable scenarios a tail of (1-beta) narrower than 1/n collapses
+    # onto the single worst scenario, so beta loses all resolution. Flag it, because
+    # a risk-aversion sweep over such betas would show no variation at all.
+    if (1 - metrics.beta) < 1 / n_scen - 1e-9
+        @printf("  (NOTE: beta = %.2f implies a %.1f%% tail, narrower than one of the %d\n",
+                metrics.beta, 100 * (1 - metrics.beta), n_scen)
+        @printf("   equiprobable scenarios (%.1f%%), so CVaR collapses to the worst scenario.\n",
+                100 / n_scen)
+        @printf("   For a tail spanning k scenarios use beta = 1 - k/%d, e.g. %.3f for k=3.)\n",
+                n_scen, 1 - 3 / n_scen)
+    end
     return nothing
 end

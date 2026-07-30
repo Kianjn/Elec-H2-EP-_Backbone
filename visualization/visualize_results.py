@@ -97,42 +97,42 @@ plt.show()
 # %%
 # 2. Quantity differences (Social Planner vs ADMM)
 sp_agents = pd.read_csv(SP_DIR / 'Agent_Summary.csv')
-admm_agents = pd.read_csv(ADMM_DIR / 'Agent_Quantities_Final.csv')
-merged_qty = sp_agents.merge(admm_agents, left_on='Agent', right_on='AgentID', how='outer')
-merged_qty['Agent'] = merged_qty['Agent'].fillna(merged_qty['AgentID'])
+admm_agents = pd.read_csv(ADMM_DIR / 'Agent_Summary.csv')
+merged_qty = sp_agents.merge(admm_agents, on='AgentID', how='outer', suffixes=('_sp', '_admm'))
 
-def admm_primary(row):
-    if pd.isna(row.get('EP_net_sum')) and pd.isna(row.get('elec_net_sum')) and pd.isna(row.get('H2_net_sum')):
-        return np.nan
-    g = str(row.get('Group', ''))
-    if 'offtaker' in g or 'Offtaker' in str(row.get('Type', '')):
-        return row.get('EP_net_sum', np.nan) or 0
-    if 'power' in g or 'Power' in str(row.get('Type', '')):
-        return row.get('elec_net_sum', np.nan) or 0
-    if 'H2' in str(row.get('Group', '')) or 'H2Prod' in str(row.get('Type', '')):
-        return row.get('H2_net_sum', np.nan) or 0
-    return row.get('EP_net_sum', row.get('elec_net_sum', np.nan)) or 0
+# Each agent is judged on the market it primarily trades in, so the bars compare
+# like with like: generators and the consumer on electricity, the electrolyzer on
+# hydrogen, offtakers on end product.
+def primary_market(row):
+    group = str(row.get('Group_sp') or row.get('Group_admm') or '')
+    if group == 'offtaker':
+        return 'EP_net_sum'
+    if group == 'H2':
+        return 'H2_net_sum'
+    if group == 'elec_GC_demand':
+        return 'elec_GC_net_sum'
+    return 'elec_net_sum'
 
-merged_qty['ADMM_primary'] = merged_qty.apply(admm_primary, axis=1)
-merged_qty['Total_Quantity'] = pd.to_numeric(merged_qty['Total_Quantity'], errors='coerce')
-merged_qty['diff'] = merged_qty['Total_Quantity'] - merged_qty['ADMM_primary']
-valid = merged_qty.dropna(subset=['Total_Quantity', 'ADMM_primary'])
+merged_qty['Market'] = merged_qty.apply(primary_market, axis=1)
+merged_qty['SP'] = merged_qty.apply(lambda r: r.get(f"{r['Market']}_sp", np.nan), axis=1)
+merged_qty['ADMM'] = merged_qty.apply(lambda r: r.get(f"{r['Market']}_admm", np.nan), axis=1)
+merged_qty['diff'] = merged_qty['SP'] - merged_qty['ADMM']
+valid = merged_qty.dropna(subset=['SP', 'ADMM'])
 
 fig, ax = plt.subplots(figsize=(11, 6))
 x = np.arange(len(valid))
 w = 0.38
-bars1 = ax.bar(x - w/2, valid['Total_Quantity'], w, label='Social Planner', color=COLORS['Social Planner'], alpha=0.9, edgecolor='white', linewidth=1.2)
-bars2 = ax.bar(x + w/2, valid['ADMM_primary'], w, label='ADMM', color=COLORS['ADMM'], alpha=0.9, edgecolor='white', linewidth=1.2)
+ax.bar(x - w/2, valid['SP'], w, label='Social Planner', color=COLORS['Social Planner'], alpha=0.9, edgecolor='white', linewidth=1.2)
+ax.bar(x + w/2, valid['ADMM'], w, label='ADMM', color=COLORS['ADMM'], alpha=0.9, edgecolor='white', linewidth=1.2)
 ax.set_xticks(x)
-ax.set_xticklabels(valid['Agent'], rotation=45, ha='right')
-ax.set_ylabel('Quantity')
+ax.set_xticklabels(valid['AgentID'], rotation=45, ha='right')
+ax.set_ylabel('Net position in primary market (MWh)')
 ax.set_title('Agent quantities: Social Planner vs ADMM')
 ax.legend(loc='upper right', frameon=True)
-# Add diff annotation
-for i, (spv, adv) in enumerate(zip(valid['Total_Quantity'], valid['ADMM_primary'])):
-    d = spv - adv
-    if abs(d) > 0.01 * max(valid['Total_Quantity'].abs().max(), valid['ADMM_primary'].abs().max()):
-        ax.annotate(f'{d:+.0f}', xy=(i, max(spv, adv)), ha='center', va='bottom', fontsize=8, color='#374151')
+scale = max(valid['SP'].abs().max(), valid['ADMM'].abs().max())
+for i, (spv, adv) in enumerate(zip(valid['SP'], valid['ADMM'])):
+    if abs(spv - adv) > 0.01 * scale:
+        ax.annotate(f'{spv - adv:+.0f}', xy=(i, max(spv, adv)), ha='center', va='bottom', fontsize=8, color='#374151')
 plt.tight_layout()
 save_fig(fig, '02_quantity_comparison')
 plt.show()

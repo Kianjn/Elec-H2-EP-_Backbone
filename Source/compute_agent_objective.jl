@@ -62,8 +62,8 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
         MC = get(params, :MarginalCost, 0.0)
         has_stages = haskey(params, :ConvStageCap) && haskey(params, :ConvStageBaseCost) && haskey(params, :ConvStageSlope)
         stage_cap = has_stages ? params[:ConvStageCap] : [0.0, 0.0, 0.0]
-        stage_base = has_stages ? params[:ConvStageBaseCost] : [MC, MC, MC]
-        stage_slope = has_stages ? params[:ConvStageSlope] : [0.0, 0.0, 0.0]
+        stage_base = has_stages ? params[:ConvStageBaseCost] : fill(MC, 3, length(JY))
+        stage_slope = has_stages ? params[:ConvStageSlope] : zeros(3, length(JY))
         for jh in JH, jd in JD, jy in JY
             if has_stages
                 g_tot = g[jh, jd, jy]
@@ -71,7 +71,7 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
                 cost = 0.0
                 for s in 1:3
                     gs = min(max(rem, 0.0), stage_cap[s])
-                    cost += stage_base[s] * gs + 0.5 * stage_slope[s] * gs^2
+                    cost += stage_base[s, jy] * gs + 0.5 * stage_slope[s, jy] * gs^2
                     rem -= gs
                 end
                 obj += W[jd, jy] * (cost - λ_elec[jh, jd, jy] * g_tot)
@@ -138,9 +138,9 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
         q_h2gc = quantities[:q_h2gc]
         λ_H2_GC = prices[:λ_H2_GC]
         λ_EP = prices[:λ_EP]
-        MC = get(params, :MarginalCost, 0.0)
+        MC = get(params, :MarginalCostByYear, fill(get(params, :MarginalCost, 0.0), length(JY)))
         for jh in JH, jd in JD, jy in JY
-            obj += W[jd, jy] * (MC * ep[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy])
+            obj += W[jd, jy] * (MC[jy] * ep[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy])
         end
 
     elseif agent_type == :offtaker_import
@@ -268,8 +268,8 @@ function compute_agent_objective_contributions(agent_type::Symbol, quantities::D
         MC = get(params, :MarginalCost, 0.0)
         has_stages = haskey(params, :ConvStageCap) && haskey(params, :ConvStageBaseCost) && haskey(params, :ConvStageSlope)
         stage_cap = has_stages ? params[:ConvStageCap] : [0.0, 0.0, 0.0]
-        stage_base = has_stages ? params[:ConvStageBaseCost] : [MC, MC, MC]
-        stage_slope = has_stages ? params[:ConvStageSlope] : [0.0, 0.0, 0.0]
+        stage_base = has_stages ? params[:ConvStageBaseCost] : fill(MC, 3, length(JY_vec))
+        stage_slope = has_stages ? params[:ConvStageSlope] : zeros(3, length(JY_vec))
         for (iy, jy) in enumerate(JY_vec), (id, jd) in enumerate(JD_vec), (ih, jh) in enumerate(JH_vec)
             if has_stages
                 g_tot = g[jh, jd, jy]
@@ -277,7 +277,7 @@ function compute_agent_objective_contributions(agent_type::Symbol, quantities::D
                 cost = 0.0
                 for s in 1:3
                     gs = min(max(rem, 0.0), stage_cap[s])
-                    cost += stage_base[s] * gs + 0.5 * stage_slope[s] * gs^2
+                    cost += stage_base[s, jy] * gs + 0.5 * stage_slope[s, jy] * gs^2
                     rem -= gs
                 end
                 contrib[ih, id, iy] = cost - λ_elec[jh, jd, jy] * g_tot
@@ -336,9 +336,9 @@ function compute_agent_objective_contributions(agent_type::Symbol, quantities::D
         q_h2gc = quantities[:q_h2gc]
         λ_H2_GC = prices_dict[:λ_H2_GC]
         λ_EP = prices_dict[:λ_EP]
-        MC = get(params, :MarginalCost, 0.0)
+        MC = get(params, :MarginalCostByYear, fill(get(params, :MarginalCost, 0.0), length(JY_vec)))
         for (iy, jy) in enumerate(JY_vec), (id, jd) in enumerate(JD_vec), (ih, jh) in enumerate(JH_vec)
-            contrib[ih, id, iy] = MC * ep[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]
+            contrib[ih, id, iy] = MC[jy] * ep[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]
         end
 
     elseif agent_type == :offtaker_import

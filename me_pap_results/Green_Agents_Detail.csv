@@ -1,0 +1,4 @@
+AgentID,Type,electricity_price_EUR_per_MWh,energy_from_pool_MWh,energy_from_ppa_Gen_VRES_Solar_MWh,energy_from_ppa_Gen_VRES_Wind_MWh,energy_from_ppa_MWh,ppa_capacity_MW,ppa_price_EUR_per_MWh,total_capacity_MW
+Gen_VRES_Solar,VRES,105.59588242202024,7.847436025474483e6,0.0,0.0,0.0,0.0,113.02674804133342,23576.59161212764
+Gen_VRES_Wind,VRES,105.59588242202024,1.691559859384847e7,0.0,0.0,0.0,0.0,113.02674804133342,16360.830575593624
+Prod_H2_Green,Electrolyzer,105.59588242202024,4.742244087985082e6,0.0,0.0,0.0,0.0,0.0,1989.2203486251474

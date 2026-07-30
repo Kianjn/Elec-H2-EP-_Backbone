@@ -77,7 +77,7 @@ periods,weights,selected_periods
 76,0.0,false
 77,0.0,false
 78,0.0,false
-79,0.0,false
+79,1.0,true
 80,0.0,false
 81,0.0,false
 82,0.0,false
@@ -99,7 +99,7 @@ periods,weights,selected_periods
 98,0.0,false
 99,0.0,false
 100,0.0,false
-101,0.0,false
+101,8.896225432009942,true
 102,0.0,false
 103,0.0,false
 104,0.0,false
@@ -121,7 +121,7 @@ periods,weights,selected_periods
 120,0.0,false
 121,0.0,false
 122,0.0,false
-123,0.0,false
+123,1.0,true
 124,0.0,false
 125,0.0,false
 126,0.0,false
@@ -134,13 +134,13 @@ periods,weights,selected_periods
 133,0.0,false
 134,0.0,false
 135,0.0,false
-136,0.0,false
+136,91.40342263161324,true
 137,0.0,false
 138,0.0,false
 139,0.0,false
 140,0.0,false
 141,0.0,false
-142,50.0,true
+142,0.0,false
 143,0.0,false
 144,0.0,false
 145,0.0,false
@@ -241,7 +241,7 @@ periods,weights,selected_periods
 240,0.0,false
 241,0.0,false
 242,0.0,false
-243,0.0,false
+243,109.78978295665661,true
 244,0.0,false
 245,0.0,false
 246,0.0,false
@@ -258,7 +258,7 @@ periods,weights,selected_periods
 257,0.0,false
 258,0.0,false
 259,0.0,false
-260,132.0,true
+260,0.0,false
 261,0.0,false
 262,0.0,false
 263,0.0,false
@@ -279,7 +279,7 @@ periods,weights,selected_periods
 278,0.0,false
 279,0.0,false
 280,0.0,false
-281,0.0,false
+281,13.345059389537482,true
 282,0.0,false
 283,0.0,false
 284,0.0,false
@@ -293,9 +293,9 @@ periods,weights,selected_periods
 292,0.0,false
 293,0.0,false
 294,0.0,false
-295,49.0,true
-296,8.0,true
-297,7.0,true
+295,0.0,false
+296,0.0,false
+297,0.0,false
 298,0.0,false
 299,0.0,false
 300,0.0,false
@@ -310,7 +310,7 @@ periods,weights,selected_periods
 309,0.0,false
 310,0.0,false
 311,0.0,false
-312,17.0,true
+312,0.0,false
 313,0.0,false
 314,0.0,false
 315,0.0,false
@@ -325,11 +325,11 @@ periods,weights,selected_periods
 324,0.0,false
 325,0.0,false
 326,0.0,false
-327,0.0,false
+327,81.71062759901974,true
 328,0.0,false
 329,0.0,false
 330,0.0,false
-331,89.0,true
+331,0.0,false
 332,0.0,false
 333,0.0,false
 334,0.0,false
@@ -356,7 +356,7 @@ periods,weights,selected_periods
 355,0.0,false
 356,0.0,false
 357,0.0,false
-358,13.0,true
+358,57.85488199208203,true
 359,0.0,false
 360,0.0,false
 361,0.0,false

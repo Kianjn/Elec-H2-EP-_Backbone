@@ -1,7 +1,7 @@
 periods,weights,selected_periods
 1,0.0,false
 2,0.0,false
-3,0.0,false
+3,20.0,true
 4,0.0,false
 5,0.0,false
 6,0.0,false
@@ -10,7 +10,7 @@ periods,weights,selected_periods
 9,0.0,false
 10,0.0,false
 11,0.0,false
-12,0.0,false
+12,14.0,true
 13,0.0,false
 14,0.0,false
 15,0.0,false
@@ -19,7 +19,7 @@ periods,weights,selected_periods
 18,0.0,false
 19,0.0,false
 20,0.0,false
-21,0.0,false
+21,81.0,true
 22,0.0,false
 23,0.0,false
 24,0.0,false
@@ -29,7 +29,7 @@ periods,weights,selected_periods
 28,0.0,false
 29,0.0,false
 30,0.0,false
-31,9.0,true
+31,0.0,false
 32,0.0,false
 33,0.0,false
 34,0.0,false
@@ -51,7 +51,7 @@ periods,weights,selected_periods
 50,0.0,false
 51,0.0,false
 52,0.0,false
-53,42.0,true
+53,0.0,false
 54,0.0,false
 55,0.0,false
 56,0.0,false
@@ -90,7 +90,7 @@ periods,weights,selected_periods
 89,0.0,false
 90,0.0,false
 91,0.0,false
-92,0.0,false
+92,113.0,true
 93,0.0,false
 94,0.0,false
 95,0.0,false
@@ -217,7 +217,7 @@ periods,weights,selected_periods
 216,0.0,false
 217,0.0,false
 218,0.0,false
-219,0.0,false
+219,26.0,true
 220,0.0,false
 221,0.0,false
 222,0.0,false
@@ -268,16 +268,16 @@ periods,weights,selected_periods
 267,0.0,false
 268,0.0,false
 269,0.0,false
-270,213.0,true
+270,0.0,false
 271,0.0,false
 272,0.0,false
-273,43.0,true
+273,0.0,false
 274,0.0,false
 275,0.0,false
 276,0.0,false
 277,0.0,false
 278,0.0,false
-279,0.0,false
+279,24.0,true
 280,0.0,false
 281,0.0,false
 282,0.0,false
@@ -302,7 +302,7 @@ periods,weights,selected_periods
 301,0.0,false
 302,0.0,false
 303,0.0,false
-304,12.0,true
+304,0.0,false
 305,0.0,false
 306,0.0,false
 307,0.0,false
@@ -328,7 +328,7 @@ periods,weights,selected_periods
 327,0.0,false
 328,0.0,false
 329,0.0,false
-330,0.0,false
+330,66.0,true
 331,0.0,false
 332,0.0,false
 333,0.0,false
@@ -341,7 +341,7 @@ periods,weights,selected_periods
 340,0.0,false
 341,0.0,false
 342,0.0,false
-343,15.0,true
+343,0.0,false
 344,0.0,false
 345,0.0,false
 346,0.0,false
@@ -352,14 +352,14 @@ periods,weights,selected_periods
 351,0.0,false
 352,0.0,false
 353,0.0,false
-354,21.0,true
+354,0.0,false
 355,0.0,false
 356,0.0,false
 357,0.0,false
 358,0.0,false
 359,0.0,false
-360,0.0,false
-361,10.0,true
+360,21.0,true
+361,0.0,false
 362,0.0,false
 363,0.0,false
 364,0.0,false

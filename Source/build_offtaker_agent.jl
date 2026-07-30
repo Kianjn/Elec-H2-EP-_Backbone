@@ -178,7 +178,10 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
     # ══════════════════════════════════════════════════════════════════════
     elseif agent_type == "GreyOfftaker"
         cap_ep = mod.ext[:parameters][:Capacity]        # max EP output (MW_EP)
-        MC     = mod.ext[:parameters][:MarginalCost]    # marginal cost (EUR/MWh_EP)
+        # Grey ammonia is SMR-based, so its marginal cost moves with the scenario
+        # gas price: MC[jy] in EUR/MWh_EP (see define_offtaker_parameters.jl).
+        MC     = get(mod.ext[:parameters], :MarginalCostByYear,
+                     fill(mod.ext[:parameters][:MarginalCost], length(JY)))
 
         ep     = mod.ext[:variables][:ep]    = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "ep")
         q_h2gc = mod.ext[:variables][:q_h2gc] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "h2_GC")
@@ -210,7 +213,7 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         #   revenue = EP sales (lambda_EP * ep)
         #   penalties use net positions: -gc (H2-GC, purchase), +ep (EP, sale)
         mod.ext[:objective] = @objective(mod, Min,
-            sum(W[jd, jy] * (MC * ep[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
+            sum(W[jd, jy] * (MC[jy] * ep[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         )
@@ -305,7 +308,7 @@ function add_offtaker_agent_to_planner!(planner::Model, id::String, mod::Model,
     elseif agent_type == "GreyOfftaker"
         EP_sell_bar = p[:Capacity]
         gamma_NH3 = p[:gamma_NH3]
-        C_proc = p[:MarginalCost]
+        C_proc = get(p, :MarginalCostByYear, fill(p[:MarginalCost], length(JY)))
 
         ep_sell = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="ep_sell_$(id)")
         gc_h_buy_G = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_h_buy_G_$(id)")
@@ -323,7 +326,7 @@ function add_offtaker_agent_to_planner!(planner::Model, id::String, mod::Model,
         welfare_per_year = Dict{Int, Any}()
         for jy in JY
             welfare_per_year[jy] = @expression(planner,
-                -sum(W_dict[jy][jd] * (C_proc * ep_sell[jh, jd, jy]) for jh in JH, jd in JD)
+                -sum(W_dict[jy][jd] * (C_proc[jy] * ep_sell[jh, jd, jy]) for jh in JH, jd in JD)
             )
         end
         var_dict[:offtaker_ep_sell][id] = ep_sell

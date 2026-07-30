@@ -1,0 +1,4 @@
+Agent,Type,CVaR_private,alpha_private
+Gen_VRES_Solar,VRES,2.343943518748896e9,0.0
+Gen_VRES_Wind,VRES,2.306536104534522e9,0.0
+GreenH2_Coalition,GreenH2Coalition,3.88768366180154e8,0.0

@@ -10,9 +10,12 @@
 
 Julia model of a multi-agent energy system where independent firms trade across **five coupled spot markets**, with optional **endogenous investment** (VRES, electrolyzer, green offtaker) and **CVaR risk aversion**. A centralised social planner solves the same technology stack as a welfare benchmark.
 
+Investment is committed **once**, before operations, against **15 equiprobable scenarios**: 5 diverse weather years (which drive VRES availability *and*, through a degree-day model, electricity demand) crossed with 3 natural-gas price levels (base, +10%, +20%). Every risk-aware agent optimises over the full set. See [DOCUMENTATION.md §9.8](DOCUMENTATION.md#98-gas-prices-and-the-15-scenario-grid).
+
 | | |
 |---|---|
 | **Theory & maths** | [DOCUMENTATION.md](DOCUMENTATION.md) — equilibrium (§4), formulation (§5), ADMM (§6), calibration (§9) |
+| **Scenarios** | [DOCUMENTATION.md §9.7–§9.8](DOCUMENTATION.md#97-weather-scenarios-representative-days-and-availability-factors) — weather years, demand coupling, gas price grid |
 | **Bilateral contracts** | [DOCUMENTATION.md §2](DOCUMENTATION.md#contract-pools-me-pap--me-top--me-sop) — shared capacity $C$, settlement $K$, PaP/ToP/SoP, risk at $\gamma<1$ |
 | **Configuration** | [Data/data.yaml](Data/data.yaml) |
 | **Outputs** | [DOCUMENTATION.md §12](DOCUMENTATION.md#12-output-files) |
@@ -65,7 +68,7 @@ Verify Gurobi:
 julia --project=. -e "using Gurobi; Gurobi.Env(); println(\"Gurobi OK\")"
 ```
 
-Ensure input data exists under `Data/` and `Input/` (see [DOCUMENTATION.md §9.7](DOCUMENTATION.md#97-weather-and-representative-day-inputs)). Representative days are selected with **RepresentativePeriodsFinder.jl** (hierarchical clustering) from ERA5 weather. To regenerate all scenario inputs:
+Ensure input data exists under `Data/` and `Input/` (see [DOCUMENTATION.md §9.7](DOCUMENTATION.md#97-weather-scenarios-representative-days-and-availability-factors)). The five weather years are built from ERA5 reanalysis under one common NL calibration, with electricity demand coupled to temperature via a heating/cooling degree-day model, then reduced to 8 representative days with **RepresentativePeriodsFinder.jl** (hierarchical clustering). To regenerate all weather inputs:
 
 ```bash
 julia Input/rep_periods/setup_env.jl                                                # one-time: instantiate the RPF sub-environment
@@ -126,13 +129,27 @@ General:
   nReprDays: 8
   base_year: 2021
 
+# The uncertainty set: 5 weather years × 3 gas price levels = 15 equiprobable
+# scenarios, all of which every risk-aware agent optimises over (see §9.8).
+Scenarios:
+  weather_years: [1, 2, 3, 4, 5]
+  gas_price_multipliers: [1.00, 1.10, 1.20]
+
+# Single source of truth for fuel- and carbon-linked costs. Conventional stage
+# costs and grey ammonia marginal cost are both DERIVED from these, so one gas
+# price moves power and ammonia together.
+Fuel:
+  GasPrice: 47.15       # €/MWh_th — TTF 2021 annual average
+  CO2Price: 52.64       # €/tCO₂ — EU-ETS 2021 annual average
+
 ADMM:
-  nScenarioYears: 10    # weather scenarios 1..10 (see DOCUMENTATION.md §9.7)
   max_iter: 2000        # iteration budget
   epsilon: 0.1          # convergence tolerance (Boyd-scaled; see §6.5)
   gamma: 1.0            # 1 = risk-neutral; 0.5 = risk-averse (see §4.10)
-  beta: 0.95            # CVaR tail level; higher = more risk-averse when gamma<1
+  beta: 0.95            # CVaR tail level; inactive while gamma = 1
 ```
+
+**Before running risk-averse cases, change `beta`.** The shipped default of `0.95` is harmless at `gamma = 1` (the CVaR term drops out), but it asks for a 5% tail — narrower than one of the 15 equiprobable scenarios at 6.7% — so CVaR would collapse onto the single worst scenario and `beta` would stop discriminating. The tail must be at least one scenario wide: use `beta = 1 - k/15` for a tail of `k` scenarios. The standard sweep `0.2, 0.4, 0.6, 0.8` lands exactly on 12, 9, 6, and 3 scenarios. Every run prints a warning if `beta` is too fine for the scenario count.
 
 Add agents by adding blocks under `Power:`, `Hydrogen:`, etc. — no code changes required for supported types. Full parameter reference: [DOCUMENTATION.md §9](DOCUMENTATION.md#9-configuration-reference-datayaml).
 

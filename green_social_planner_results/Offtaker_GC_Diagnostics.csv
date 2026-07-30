@@ -1,0 +1,3 @@
+AgentID,Type,EP_total,H2_in_total,H2_GC_total,GC_share,GC_mandate,GC_slack
+Offtaker_Grey,GreyOfftaker,2.7351179258150784e6,-0.0,1.8178158743344815e6,0.6646206575509038,0.42,0.24462065755090384
+Offtaker_Import,EPImporter,0.0,-0.0,-0.0,0.0,0.42,-0.42

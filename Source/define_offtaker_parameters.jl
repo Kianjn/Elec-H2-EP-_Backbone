@@ -35,5 +35,41 @@ function define_offtaker_parameters!(m::String, mod::Model, data::Dict, ts::Dict
     # offtakers are subject to this constraint. Defaults to 0.42 if not overridden.
     params[:gamma_GC] = get(data, "gamma_GC", 0.42)
 
+    # --- Grey ammonia: gas-price-dependent marginal cost, one value per scenario ---
+    # Grey ammonia is SMR-based, so its variable cost is dominated by natural gas
+    # and tracks the same gas price that drives the conventional generator:
+    #
+    #   MC[jy] = GasIntensity × gas_price × gas_multiplier[jy]
+    #            + CO2Intensity × CO2_price
+    #            + VariableOM
+    #
+    # GasIntensity ≈ 1.72 MWh_th per MWh_EP (32 GJ_LHV/t NH₃ ÷ 5.167 MWh/t) is
+    # numerically the same as a 58%-efficient CCGT's 1/0.58, which is why grey
+    # ammonia and gas-fired power move together under a gas shock.
+    #
+    # Stored as :MarginalCostByYear. The scalar :MarginalCost is kept as the
+    # base-scenario value so legacy/reporting paths that expect a scalar still
+    # read something sensible; every optimisation path uses the vector.
+    n_yr = Int(get(data, "nYears", 1))
+    if String(get(data, "Type", "")) == "GreyOfftaker"
+        gas_mult = scenario_gas_multipliers(data, n_yr)
+        fuel = get(data, "Fuel", Dict{String,Any}())
+
+        if haskey(data, "GasIntensity")
+            gas_int = Float64(data["GasIntensity"])
+            co2_int = Float64(get(data, "CO2Intensity", 0.0))
+            vom     = Float64(get(data, "VariableOM", 0.0))
+            gas_p   = Float64(get(fuel, "GasPrice", 0.0))
+            co2_p   = Float64(get(fuel, "CO2Price", 0.0))
+            mc = [gas_int * gas_p * gas_mult[jy] + co2_int * co2_p + vom for jy in 1:n_yr]
+        else
+            # Legacy: a flat, gas-invariant marginal cost from data.yaml.
+            mc = fill(Float64(get(data, "MarginalCost", 0.0)), n_yr)
+        end
+
+        params[:MarginalCostByYear] = mc
+        params[:MarginalCost] = mc[1]
+    end
+
     return mod
 end

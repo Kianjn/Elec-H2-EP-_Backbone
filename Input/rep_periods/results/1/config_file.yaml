@@ -14,9 +14,9 @@ method:
     type: "hierarchical"
 results:
   save_results: true
-  result_dir: "c:\\Users\\kjafarinejad\\Models\\Project01\\Now\\Input\\rep_periods\\results\\2021"
+  result_dir: "C:\\Users\\kjafarinejad\\Models\\Project01\\Now\\Input\\rep_periods\\results\\1"
   create_plots: false
-base_dir: "c:\\Users\\kjafarinejad\\Models\\Project01\\Now\\Input\\rep_periods"
+base_dir: "C:\\Users\\kjafarinejad\\Models\\Project01\\Now\\Input\\rep_periods"
 time_series:
   SOLAR:
     weight: 2
@@ -26,7 +26,7 @@ time_series:
     value_column: "LOAD_E"
   default:
     weight: 1
-    source: "c:\\Users\\kjafarinejad\\Models\\Project01\\Now\\Input\\rep_periods\\weather_full\\timeseries_full_2021.csv"
+    source: "C:\\Users\\kjafarinejad\\Models\\Project01\\Now\\Input\\rep_periods\\weather_full\\timeseries_full_1.csv"
     sampling_time: "Hour(1)"
     csv_options:
       delim: ","

@@ -114,9 +114,10 @@ function solve_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         # but must purchase H2 GCs for regulatory compliance.
         ep     = mod.ext[:variables][:ep]
         q_h2gc = mod.ext[:variables][:q_h2gc]
-        MC     = mod.ext[:parameters][:MarginalCost]
+        MC     = get(mod.ext[:parameters], :MarginalCostByYear,
+                     fill(mod.ext[:parameters][:MarginalCost], length(JY)))
         mod.ext[:objective] = @objective(mod, Min,
-            sum(W[jd, jy] * (MC * ep[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
+            sum(W[jd, jy] * (MC[jy] * ep[jh, jd, jy] + λ_H2_GC[jh, jd, jy] * q_h2gc[jh, jd, jy] - λ_EP[jh, jd, jy] * ep[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
             + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY))
     else

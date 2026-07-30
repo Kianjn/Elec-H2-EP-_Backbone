@@ -68,17 +68,28 @@ function define_power_parameters!(m::String, mod::Model, data::Dict, ts::Dict, r
         #   Stage s has capacity cap_s and marginal cost MC_s(x) = base_s + slope_s * x
         #   for x in [0, cap_s], with continuity between stage endpoints.
         #
-        # Primary inputs (recommended, absolute values):
+        # The stage costs are SCENARIO-DEPENDENT because the gas price varies across
+        # scenarios, so base costs and slopes are 3 x nYears matrices and the stage-3
+        # endpoint is an nYears vector. Capacities do not depend on the gas price and
+        # stay a plain length-3 vector.
+        #
+        # Primary inputs (recommended): each stage names a technology whose SRMC is
+        # derived from the Fuel block via efficiency and emission factor, so a gas
+        # scenario moves the gas stages only.
         #   - StageCapacityShares : length-3 capacity split (normalized internally)
-        #   - StageBaseCosts      : length-3 starting MC values (€/MWh), e.g. coal/biomass/NG
-        #   - FinalMarginalCost   : MC at end of stage 3 (€/MWh)
+        #   - StageTechnologies   : length-3 list of {name, fuel, efficiency, vom}
+        #   - PeakTechnology      : technology setting the stage-3 endpoint (e.g. OCGT)
         #
         # Slopes are derived internally to enforce continuous stage transitions:
-        #   end(MC_1) = base_2, end(MC_2) = base_3, end(MC_3) = FinalMarginalCost.
+        #   end(MC_1) = base_2, end(MC_2) = base_3, end(MC_3) = endpoint.
         #
-        # Backward compatibility:
-        #   - If StageBaseCosts are missing, old multiplier keys are accepted.
-        #   - If FinalMarginalCost is missing, it is inferred from legacy slope keys when available.
+        # Backward compatibility (gas-invariant, replicated across scenarios):
+        #   - StageBaseCosts / StageBaseCostMultipliers for the three base costs.
+        #   - FinalMarginalCost, or an endpoint inferred from StageSlopeMultipliers.
+        n_yr = Int(data["nYears"])
+        gas_mult = scenario_gas_multipliers(data, n_yr)
+        fuel = get(data, "Fuel", Dict{String,Any}())
+
         shares_raw = Float64.(get(data, "StageCapacityShares", [1 / 3, 1 / 3, 1 / 3]))
         if length(shares_raw) != 3
             error("Conventional generator requires 3 entries for StageCapacityShares")
@@ -87,42 +98,65 @@ function define_power_parameters!(m::String, mod::Model, data::Dict, ts::Dict, r
         shares ./= sum(shares)
         caps = params[:Capacity] .* shares
 
-        base_costs = if haskey(data, "StageBaseCosts")
-            Float64.(data["StageBaseCosts"])
-        elseif haskey(data, "StageBaseCostMultipliers")
-            Float64.(data["StageBaseCostMultipliers"]) .* params[:MarginalCost]
-        else
-            # Defaults: coal, biomass, natural-gas-like starting marginal costs.
-            [35.0, 55.0, 85.0]
-        end
+        base_costs = zeros(3, n_yr)   # base_costs[s, jy]
+        final_mc   = zeros(n_yr)      # endpoint of stage 3 in scenario jy
 
-        final_mc = if haskey(data, "FinalMarginalCost")
-            Float64(data["FinalMarginalCost"])
-        elseif haskey(data, "StageSlopeMultipliers")
-            # Infer an endpoint from legacy slope multipliers.
-            slope_mult = Float64.(data["StageSlopeMultipliers"])
-            if length(slope_mult) != 3
-                error("Conventional generator requires 3 entries for StageSlopeMultipliers")
+        if haskey(data, "StageTechnologies")
+            techs = data["StageTechnologies"]
+            if length(techs) != 3
+                error("Conventional generator requires 3 entries for StageTechnologies")
             end
-            slope_legacy = slope_mult .* (params[:MarginalCost] / max(params[:Capacity], 1e-9))
-            base_costs[3] + slope_legacy[3] * caps[3]
+            peak = get(data, "PeakTechnology", nothing)
+            for jy in 1:n_yr
+                for s in 1:3
+                    base_costs[s, jy] = thermal_srmc(techs[s], fuel, gas_mult[jy])
+                end
+                final_mc[jy] = peak === nothing ? base_costs[3, jy] :
+                                                  thermal_srmc(peak, fuel, gas_mult[jy])
+            end
+            params[:ConvStageTechNames] = [String(get(t, "name", "stage$(i)"))
+                                           for (i, t) in enumerate(techs)]
         else
-            # Default endpoint (NG-like high-load marginal cost).
-            140.0
+            legacy_base = if haskey(data, "StageBaseCosts")
+                Float64.(data["StageBaseCosts"])
+            elseif haskey(data, "StageBaseCostMultipliers")
+                Float64.(data["StageBaseCostMultipliers"]) .* params[:MarginalCost]
+            else
+                [35.0, 55.0, 85.0]
+            end
+            if length(legacy_base) != 3
+                error("Conventional generator requires 3 entries for StageBaseCosts")
+            end
+
+            legacy_final = if haskey(data, "FinalMarginalCost")
+                Float64(data["FinalMarginalCost"])
+            elseif haskey(data, "StageSlopeMultipliers")
+                slope_mult = Float64.(data["StageSlopeMultipliers"])
+                if length(slope_mult) != 3
+                    error("Conventional generator requires 3 entries for StageSlopeMultipliers")
+                end
+                slope_legacy = slope_mult .* (params[:MarginalCost] / max(params[:Capacity], 1e-9))
+                legacy_base[3] + slope_legacy[3] * caps[3]
+            else
+                140.0
+            end
+
+            base_costs .= repeat(legacy_base, 1, n_yr)
+            final_mc   .= legacy_final
         end
 
-        if length(base_costs) != 3
-            error("Conventional generator requires 3 entries for StageBaseCosts")
+        # Convexity check and slope derivation, per scenario.
+        slopes = zeros(3, n_yr)
+        for jy in 1:n_yr
+            b1, b2, b3 = base_costs[1, jy], base_costs[2, jy], base_costs[3, jy]
+            if !(b1 <= b2 <= b3 <= final_mc[jy] + 1e-9)
+                error("Conventional stage MC endpoints must be nondecreasing in scenario $jy: " *
+                      "got $(round.((b1, b2, b3, final_mc[jy]), digits = 2))")
+            end
+            slopes[1, jy] = (b2 - b1) / max(caps[1], 1e-9)
+            slopes[2, jy] = (b3 - b2) / max(caps[2], 1e-9)
+            slopes[3, jy] = (final_mc[jy] - b3) / max(caps[3], 1e-9)
         end
-        if !(base_costs[1] <= base_costs[2] <= base_costs[3] <= final_mc + 1e-9)
-            error("Conventional stage MC endpoints must be nondecreasing: base1 <= base2 <= base3 <= FinalMarginalCost")
-        end
-
-        slopes = [
-            (base_costs[2] - base_costs[1]) / max(caps[1], 1e-9),
-            (base_costs[3] - base_costs[2]) / max(caps[2], 1e-9),
-            (final_mc      - base_costs[3]) / max(caps[3], 1e-9),
-        ]
 
         params[:ConvStageCap] = caps
         params[:ConvStageBaseCost] = base_costs

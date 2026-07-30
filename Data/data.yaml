@@ -14,8 +14,48 @@
 General:
   nTimesteps: 24       # Hours per representative day (24 = hourly resolution; standard for power-system models)
   nReprDays: 8         # Number of representative days (8 for finer temporal resolution and H2 price analysis)
-  nYears: 1            # Number of years for social_planner.jl when ADMM.nScenarioYears is absent
+  nYears: 1            # Fallback scenario count when the Scenarios block below is absent
   base_year: 2021      # [NL] Calibration year for installed capacities / costs (CBS 2021). Not a file label — scenario files are timeseries_1..n.
+
+# ---------------------------------------------------------------------------
+# Scenarios: the uncertainty grid every risk-aware agent optimises over
+# ---------------------------------------------------------------------------
+# The scenario set is the full cross product of a weather year and a gas-price
+# level, so nYears = length(weather_years) × length(gas_price_multipliers) = 15.
+# Scenario jy is ordered gas-fastest:
+#   jy = (weather_index − 1) × 3 + gas_index
+# so jy = 1,2,3 are weather year 1 at 1.0/1.1/1.2 × gas, jy = 4,5,6 are weather
+# year 2, and so on. All 15 carry equal probability 1/15 (independent uniform
+# priors over weather and gas). See DOCUMENTATION.md §9.7.
+#
+# weather_years are file labels: label L reads Input/timeseries_<L>.csv and
+# Input/output_<L>/. The five labels were chosen by a max-min diversity search
+# over ten candidate ERA5 years under one common NL calibration; see
+# Input/rep_periods/generate_representative_days.jl.
+Scenarios:
+  weather_years: [1, 2, 3, 4, 5]
+  gas_price_multipliers: [1.00, 1.10, 1.20]
+
+# ---------------------------------------------------------------------------
+# Fuel: the single source of truth for every fuel- and carbon-linked cost
+# ---------------------------------------------------------------------------
+# Nothing downstream hardcodes a marginal cost for a fuel-burning technology.
+# The conventional generator's three stage costs and the grey offtaker's ammonia
+# cost are both DERIVED from these prices via explicit efficiencies and emission
+# factors, so a gas-price scenario propagates to power and ammonia consistently.
+#
+# Why this matters: ammonia SMR consumes ~32 GJ_LHV of gas per tonne NH₃
+# (≈1.72 MWh_th per MWh_EP at 5.167 MWh/t [LHV]), and a 58%-efficient CCGT
+# consumes 1/0.58 = 1.72 MWh_th per MWh_e. Grey ammonia and gas-fired power have
+# essentially identical gas exposure per MWh, so they must move together.
+Fuel:
+  GasPrice:  47.15     # [NL] €/MWh_th — TTF 2021 annual average [TTF-2021]
+  CoalPrice: 12.40     # €/MWh_th — API2 2021 average ≈121 €/t ÷ 8.14 MWh_th/t [API2-2021]
+  BiomassPrice: 30.00  # €/MWh_th — NW-Europe industrial wood pellet 2021 [PELLET-2021]
+  CO2Price:  52.64     # [NL] €/tCO₂ — EU-ETS EUA 2021 annual average [ETS-2021]
+  GasEmissionFactor:     0.2016  # tCO₂/MWh_th — natural gas (56.1 kg/GJ) [IPCC-EF]
+  CoalEmissionFactor:    0.3406  # tCO₂/MWh_th — hard coal (94.6 kg/GJ) [IPCC-EF]
+  BiomassEmissionFactor: 0.0     # tCO₂/MWh_th — ETS zero-rated
 
 # ---------------------------------------------------------------------------
 # ADMM: Alternating Direction Method of Multipliers global settings
@@ -23,7 +63,7 @@ General:
 ADMM:
   rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
   rho_cap_initial: 0.1  # Penalty for investment/capacity consensus; low initial to avoid over-constraining early iterations
-  nScenarioYears: 10    # Number of weather scenarios (labels 1..10 → Input/timeseries_<label>.csv; see DOCUMENTATION.md §9.7)
+  nScenarioYears: 15    # Fallback only — the Scenarios block above is authoritative and yields 5 weather × 3 gas = 15
   max_iter: 2000         # Iteration budget
   epsilon: 0.1          # Base absolute tolerance used in Boyd-style stopping tests for market_exposure
   epsilon_contracts: 0.5 # [me_pap / me_top / me_sop] Looser than ME (0.1); see DOCUMENTATION.md §6.5
@@ -34,7 +74,12 @@ ADMM:
     expand_step: 2.0   # MW added per unit mean energy imbalance when cap binds
     bind_tol: 1.0e-6   # Treat q_peak ≈ C as "cap binding"
   gamma: 1.0             # Risk weight (γ=1 ⇒ risk-neutral; γ=0.5 ⇒ risk-averse Hoschle-style). SP + ADMM read this block.
-  beta: 0.95             # CVaR confidence β (Rockafellar–Uryasev); higher β = more risk-averse at γ<1. Sweep 0.2,0.4,0.6,0.8 at γ=0.5 (§4.10.4). Inactive when γ=1.
+  # CVaR confidence β (Rockafellar–Uryasev); higher β = more risk-averse at γ<1.
+  # INACTIVE while γ=1, which is why 0.95 is harmless here. Before running γ<1,
+  # change it: the tail (1−β) must span at least one of the 15 equiprobable
+  # scenarios (6.7%), so β ≤ 0.933. The sweep 0.2/0.4/0.6/0.8 gives tails of
+  # exactly 12/9/6/3 scenarios (§4.10.4). Runs warn if β is too fine.
+  beta: 0.95
 
 # ---------------------------------------------------------------------------
 # SocialPlanner: solver configuration for social_planner.jl only
@@ -81,13 +126,13 @@ PartialPlanners:
 #                   gentler convergence (e.g. GC markets with smaller volumes).
 # ---------------------------------------------------------------------------
 elec_market:
-  initial_price: 90.0   # €/MWh — Warm-start near NL 2021 wholesale with realistic VRES/gas costs
+  initial_price: 100.0  # €/MWh — Warm-start near the NL 2021 day-ahead average (102.96) and the derived CCGT SRMC (101.1) [NL-DA-2021]
   rho_initial: 1.0      # Penalty weight for electricity; 1.0 matches the global default (largest, most liquid market)
 elec_GC_market:
   initial_price: 3.0    # €/MWh_GC — Warm-start near realistic GoO clearing (abundant VRES ⇒ low premium)
   rho_initial: 0.3      # Lower penalty: GC market has smaller volumes & price ranges; gentler convergence avoids oscillation
 H2_market:
-  initial_price: 120.0  # €/MWh_H2 (~4 €/kg) — Warm-start near realistic green H2 with realistic power prices
+  initial_price: 155.0  # €/MWh_H2 (~5.2 €/kg) — Warm-start at electrolysis cost: 1.5 MWh_e/MWh_H2 × ~101 €/MWh + 3 €/MWh_H2 O&M
   rho_initial: 0.5      # Moderate penalty: H2 market is tightly coupled to electricity through the electrolyzer
 H2_GC_market:
   initial_price: 25.0    # €/MWh_GC — Warm-start near green-H2 certificate value under the 42% mandate
@@ -100,8 +145,10 @@ EP_market:
   # [NL] Ammonia end product. NL nitrogen-fertiliser ammonia capacity ≈ 3 Mt NH₃/yr:
   #   Yara Sluiskil ≈ 1.8 Mt + OCI Nitrogen Geleen ≈ 1.2 Mt [PBL-2019].
   #   3 Mt/yr × 5.167 MWh/t [LHV] ≈ 15.5 TWh_EP/yr.
-  #   Price seed ~1000 €/t ÷ 5.167 ≈ 194 €/MWh_EP — realistic 2021 high-gas NH₃ cost [H2EU-2023].
-  initial_price: 194.0      # [NL] €/MWh_EP — warm-start near 2021 NH₃ (~1000 €/t) [H2EU-2023]
+  #   Price seed = grey MC (103.4) + the H₂-GC mandate pass-through
+  #   (gamma_GC/gamma_NH3 × λ_H2_GC ≈ 0.56 × 25) ≈ 117 €/MWh_EP ≈ 605 €/t NH₃,
+  #   consistent with the 2021 cfr NW Europe average of ≈471 €/t [IHS-NH3-2021].
+  initial_price: 118.0      # [NL] €/MWh_EP — warm-start at grey marginal cost plus GC mandate cost
   rho_initial: 3.0          # Larger penalty: EP market is stiff (few participants, large price swings) and needs stronger coupling
   Demand_Column: "LOAD_EP"  # Column in the timeseries CSV that holds the normalized EP demand profile (inelastic)
   Total_Demand: 1970.0      # [NL] Scales D_EP; annual EP ≈ Total_Demand × Σ W[jd]×LOAD_EP ≈ 15.5 TWh/y (≈3 Mt NH₃/y) [PBL-2019]
@@ -134,13 +181,25 @@ Power:
   Gen_Conv_01:
     Type: "Conventional"
     Capacity: 16000.0        # [NL] MW — NL dispatchable fossil fleet ~16 GW (mostly gas) [CBS-EP; TNO-2026]
-    MarginalCost: 100.0      # Legacy fallback used only if StageBaseCosts/FinalMarginalCost are omitted
-    # [NL] 3-stage merit order: small coal/biomass residual + dominant CCGT/OCGT gas (NL fossil stack).
-    # 2021 SRMC: TTF gas ~46 €/MWh-avg ÷ η≈0.5 + EU-ETS CO2 (~0.35 t/MWh × ~55 €/t) ⇒ CCGT ≈110 €/MWh.
-    # Refs: TTF 2021 average ~46 €/MWh [TTF-2021]; EU-ETS 2021 average ~53–55 €/tCO2 [ETS-2021].
+    MarginalCost: 100.0      # Legacy fallback used only if StageTechnologies and StageBaseCosts are both omitted
     StageCapacityShares: [0.08, 0.12, 0.80]  # [NL] Coal-like / biomass-like / gas (NL fossil generation ≈80% gas) [CBS-EP]
-    StageBaseCosts: [70.0, 80.0, 95.0]       # [NL] €/MWh — 2021 SRMC floors (coal+CO2 / biomass / CCGT gas+CO2) [TTF-2021; ETS-2021]
-    FinalMarginalCost: 160.0                 # [NL] €/MWh — Peaking OCGT / high-load gas tail [TTF-2021; ETS-2021]
+    # [NL] 3-stage merit order: small coal/biomass residual + dominant CCGT, with an
+    # OCGT peaking tail. Each stage's short-run marginal cost is DERIVED from the
+    # Fuel block rather than hardcoded:
+    #     SRMC = fuel_price/η + (emission_factor/η) × CO₂_price + vom
+    # At the 2021 base prices (gas 47.15, CO₂ 52.64) this yields
+    #     coal 75.2  <  biomass 81.9  <  CCGT 101.1  <  OCGT 155.0  €/MWh,
+    # and the CCGT figure sits right on the NL 2021 day-ahead average of
+    # 102.96 €/MWh [NL-DA-2021], which is the intended validation: CCGT was the
+    # marginal unit in most hours of 2021.
+    # The +10%/+20% gas scenarios lift only the two gas stages (CCGT to 111.1 and
+    # 121.0; OCGT to 170.2 and 185.4), leaving coal and biomass untouched.
+    StageTechnologies:
+      - {name: "Coal",    fuel: "Coal",    efficiency: 0.42, vom: 3.0}  # [NL] Hard-coal steam unit, net LHV η≈42% [IEA-WEO]
+      - {name: "Biomass", fuel: "Biomass", efficiency: 0.38, vom: 3.0}  # [NL] Co-fired/dedicated biomass, η≈38%; ETS zero-rated
+      - {name: "CCGT",    fuel: "Gas",     efficiency: 0.58, vom: 1.5}  # [NL] Modern NL CCGT fleet, net LHV η≈58% [IEA-WEO]
+    PeakTechnology:
+      {name: "OCGT", fuel: "Gas", efficiency: 0.38, vom: 3.0}           # [NL] Peaking OCGT, η≈38%; sets the stage-3 endpoint
 
   # Electricity consumer with elastic (quadratic) demand — NL national load
   # Quadratic utility: U(d) = A_E·d − ½·B_E·d²  →  inverse demand p(d) = A_E − B_E·d
@@ -187,11 +246,21 @@ Hydrogen_Offtaker:
   Offtaker_Grey:
     Type: "GreyOfftaker"
     Capacity: 1570.0          # [NL] MW_EP — domestic conventional route ≈80% of NL ammonia nameplate (incl. former import share) [PBL-2019]
-    # [NL] Grey ammonia variable cost ≈ 930 €/t = 180 €/MWh_EP, calibrated to 2021 NL conditions:
-    # SMR natural gas (~33 GJ/t at elevated 2021 TTF) + EU-ETS CO2 (~1.8 t CO2/t NH3). Hydrogen
-    # Europe Clean Ammonia Report (2023) [H2EU-2023]: grey LCOA ~534–891 €/t for gas 40–80 €/MWh + CO2 75 €/t;
-    # 2021 Q4 gas spikes push toward the high end [TTF-2021; ETS-2021]. Grey is the marginal EP supplier.
-    MarginalCost: 180.0       # [NL] €/MWh_EP (≈930 €/t) — realistic 2021 grey NH₃ variable cost [H2EU-2023]
+    # [NL] Grey ammonia variable cost is DERIVED from the Fuel block, not hardcoded:
+    #     MC = GasIntensity × gas_price + CO2Intensity × CO₂_price + VariableOM
+    # At the 2021 base prices this gives 1.720×47.15 + 0.348×52.64 + 4.0
+    #   = 81.1 (gas) + 18.3 (CO₂) + 4.0 (O&M) = 103.4 €/MWh_EP ≈ 534 €/t NH₃.
+    # Validation: ammonia cfr NW Europe averaged $557/t in 2021 (≈471 €/t) [IHS-NH3-2021],
+    # i.e. European producers sat at or slightly below cash cost — which is exactly
+    # what happened, with Yara and BASF curtailing output in Q4 2021.
+    # Cross-check: this formula reproduces the Argus published "ammonia cost of
+    # production (TTF)" of $877.90/t at TTF $23.69/MMBtu (23 Sep 2021) to within 3%
+    # [ARGUS-2021].
+    # Grey is the marginal EP supplier, so its MC effectively sets the ammonia price.
+    # The +10%/+20% gas scenarios lift it to 111.5 and 119.6 €/MWh_EP.
+    GasIntensity: 1.720       # [NL] MWh_th NG per MWh_EP — 32 GJ_LHV/t NH₃ ÷ 5.167 MWh/t [FE-BAT; DECHEMA-2030]
+    CO2Intensity: 0.348       # [NL] tCO₂ per MWh_EP — 1.8 tCO₂/t NH₃ (process + fuel) ÷ 5.167 MWh/t [FE-BAT]
+    VariableOM: 4.0           # €/MWh_EP (≈21 €/t) — catalysts, chemicals, variable maintenance; engineering estimate
     gamma_NH3: 0.75           # [NL] EP→H2 ratio (MWh_EP/MWh_H2); implied H2 use = EP/gamma_NH3 for the 42% mandate [H2EU-2023]
 
   # EP importer — disabled for now (domestic supply only)

@@ -36,7 +36,7 @@ method:
   options:
     mandatory_periods: []         # e.g. [1] to force a specific calendar day
     total_periods: 365            # calendar days in a year
-    representative_periods: 8      # nReprDays (must match data.yaml ADMM.nReprDays)
+    representative_periods: 8      # must match General.nReprDays in Data/data.yaml
     time_steps_per_period: 24      # hours per day
     sampling_time: "Hour(1)"
     # Dissimilarity metric used by hierarchical clustering. Squared Euclidean

@@ -101,6 +101,7 @@ const home_dir = @__DIR__
 
 # Parameter definition: attach to each agent model sets, weights, ADMM arrays,
 # and market participation flags; fill agent-specific parameters and timeseries.
+include(joinpath(home_dir, "Source", "define_scenarios.jl"))
 include(joinpath(home_dir, "Source", "define_common_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_power_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_H2_parameters.jl"))
@@ -161,26 +162,30 @@ order_matrix = Dict() #Can I remove it?
 # periods (day index 1–365), weights (frequency), selected_periods.
 repr_days = Dict()
 
-# Determine modeled scenario years. By default use data["General"]["nYears"],
-# but allow ADMM-specific expansion via data["ADMM"]["nScenarioYears"] so the
-# social planner can remain on the base scenario only.
-# Scenario labels are simply 1..nYears (not calendar years). Each label maps to
-# Input/timeseries_<label>.csv and Input/output_<label>/; see DOCUMENTATION.md
-# §9.7 for which ERA5 weather year each label represents.
-gen = data["General"]
-n_years  = haskey(data["ADMM"], "nScenarioYears") ? data["ADMM"]["nScenarioYears"] :
-           (haskey(gen, "nYears") ? gen["nYears"] : 1)
-run_general = merge(gen, Dict("nYears" => n_years))
+# Build the scenario grid: every combination of a weather year and a gas-price
+# level. years[jy] gives the weather-year FILE LABEL for scenario jy (several jy
+# share a label because they differ only in gas price), and the gas multiplier
+# rides along in run_general so the cost-defining files can derive fuel-linked
+# marginal costs per scenario. See DOCUMENTATION.md §9.7-9.8.
+gen  = data["General"]
+scen = build_scenario_grid(data)
+n_years = scen.n_years
+years   = scen.years
+run_general = merge(gen, Dict(
+    "nYears"             => n_years,
+    "Fuel"               => get(data, "Fuel", Dict{String,Any}()),
+    "GasPriceMultiplier" => scen.gas_multiplier,
+))
 data_run = copy(data)
 data_run["General"] = run_general
-years = Dict(i => i for i in 1:n_years)
+describe_scenario_grid(scen)
 
-# Time series and representative days for each scenario.
+# Time series and representative days, loaded once per distinct weather label.
 # Input files follow:
 #   Input/timeseries_<label>.csv
 #   Input/output_<label>/ordering_variable.csv
 #   Input/output_<label>/decision_variables_short.csv
-for y in values(years)
+for y in unique(values(years))
     ts[y] = CSV.read(joinpath(home_dir, "Input", "timeseries_$(y).csv"), DataFrame)
     order_matrix[y] = CSV.read(joinpath(home_dir, "Input", "output_$(y)", "ordering_variable.csv"), delim=",", DataFrame)
     repr_days[y] = CSV.read(joinpath(home_dir, "Input", "output_$(y)", "decision_variables_short.csv"), delim=",", DataFrame)

@@ -29,6 +29,7 @@ const home_dir = @__DIR__
 const PLANNER_KEY = "GreenH2"
 const results_dir = joinpath(home_dir, "green_h2_social_planner_results")
 
+include(joinpath(home_dir, "Source", "define_scenarios.jl"))
 include(joinpath(home_dir, "Source", "define_common_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_power_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_H2_parameters.jl"))
@@ -66,15 +67,20 @@ include(joinpath(home_dir, "Source", "save_results.jl"))
 data = YAML.load_file(joinpath(home_dir, "Data", "data.yaml"))
 ts = Dict()
 repr_days = Dict()
-gen = data["General"]
-n_years = haskey(data["ADMM"], "nScenarioYears") ? data["ADMM"]["nScenarioYears"] :
-          (haskey(gen, "nYears") ? gen["nYears"] : 1)
-run_general = merge(gen, Dict("nYears" => n_years))
+gen  = data["General"]
+scen = build_scenario_grid(data)
+n_years = scen.n_years
+years   = scen.years
+run_general = merge(gen, Dict(
+    "nYears"             => n_years,
+    "Fuel"               => get(data, "Fuel", Dict{String,Any}()),
+    "GasPriceMultiplier" => scen.gas_multiplier,
+))
 data_run = copy(data)
 data_run["General"] = run_general
-years = Dict(i => i for i in 1:n_years)
+describe_scenario_grid(scen)
 
-for y in values(years)
+for y in unique(values(years))
     ts[y] = CSV.read(joinpath(home_dir, "Input", "timeseries_$(y).csv"), DataFrame)
     repr_days[y] = CSV.read(joinpath(home_dir, "Input", "output_$(y)", "decision_variables_short.csv"), delim=",", DataFrame)
 end

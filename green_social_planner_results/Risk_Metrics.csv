@@ -1,0 +1,12 @@
+Metric,Value,Unit
+case,green_social_planner,-
+gamma,1.0,-
+beta,0.95,-
+expected_social_welfare,4.798946926635289e10,EUR
+social_CVaR,-4.710043351289465e10,EUR
+alpha_social,-4.710043351289465e10,EUR
+social_CVaR_recomputed,-4.710043351289465e10,EUR
+sum_private_CVaR,2.575905092495693e9,EUR
+risk_adjusted_objective,NaN,EUR
+social_CVaR_gap_vs_SP,-5.445234191487312e9,EUR
+SP_social_CVaR_benchmark,-4.165519932140734e10,EUR

@@ -35,10 +35,14 @@
 #
 # RESULTS:
 #   Written to "social_planner_results/":
-#     - Market_Prices.csv                 — Equilibrium prices from dual variables of balance
-#                                           constraints (electricity and hydrogen).
-#     - Agent_Summary.csv                 — Per-agent total quantity and welfare contribution.
-#     - Capacity_Investments_Planner.csv  — Per-agent total capacity installed during the run.
+#     - Market_Prices.csv                 — Equilibrium prices from dual variables of the five
+#                                           market-balance constraints, scaled per §7.2.
+#     - Agent_Summary.csv                 — Per-agent net positions, capacity and objective.
+#     - SP_Capacities.csv                 — Per-agent installed capacity (AgentID, jy, cap).
+#     - SP_Primal_Quantities.csv          — Full primal allocation per (jy, jd, jh).
+#     - Agent_Objectives_Per_Timestep.csv — Objective contribution per agent per timestep.
+#     - Risk_Metrics.csv,                 — Written by compute_social_risk_metrics.jl.
+#       Social_Welfare_Per_Year.csv
 #
 # FLOW:
 #   1. Environment and packages
@@ -125,6 +129,7 @@ const home_dir = @__DIR__
 
 # Parameter definition: attach to each agent model sets, weights, ADMM arrays,
 # and market participation flags; fill agent-specific parameters and timeseries.
+include(joinpath(home_dir, "Source", "define_scenarios.jl"))
 include(joinpath(home_dir, "Source", "define_common_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_power_parameters.jl"))
 include(joinpath(home_dir, "Source", "define_H2_parameters.jl"))
@@ -188,21 +193,25 @@ order_matrix = Dict()
 # periods (day index 1–365), weights (frequency), selected_periods.
 repr_days = Dict()
 
-# Determine modeled scenario years for the social planner.
-# Align SP and ADMM horizons by default so benchmarks are apples-to-apples.
-# SP uses ADMM.nScenarioYears if provided, else General.nYears.
-# Scenario labels are simply 1..nYears (not calendar years); see §9.7.
-run_general = merge(data["General"])
-run_general["nYears"] = get(data["ADMM"], "nScenarioYears", get(data["General"], "nYears", 1))
+# Build the scenario grid (weather years x gas-price levels). The planner uses
+# the same grid as ADMM so the two benchmarks stay apples-to-apples.
+# See DOCUMENTATION.md §9.7-9.8.
+scen = build_scenario_grid(data)
+n_years = scen.n_years
+years   = scen.years
+run_general = merge(data["General"], Dict(
+    "nYears"             => n_years,
+    "Fuel"               => get(data, "Fuel", Dict{String,Any}()),
+    "GasPriceMultiplier" => scen.gas_multiplier,
+))
 gen = run_general
-n_years = haskey(gen, "nYears") ? gen["nYears"] : 1
-years = Dict(i => i for i in 1:n_years)
+describe_scenario_grid(scen)
 
-# Time series and representative days for each scenario.
+# Time series and representative days, loaded once per distinct weather label.
 #   Input/timeseries_<label>.csv
 #   Input/output_<label>/ordering_variable.csv
 #   Input/output_<label>/decision_variables_short.csv
-for y in values(years)
+for y in unique(values(years))
     ts_dict[y] = CSV.read(joinpath(home_dir, "Input", "timeseries_$(y).csv"), DataFrame)
     order_matrix[y] = CSV.read(joinpath(home_dir, "Input", "output_$(y)", "ordering_variable.csv"), delim=",", DataFrame)
     repr_days[y] = CSV.read(joinpath(home_dir, "Input", "output_$(y)", "decision_variables_short.csv"), delim=",", DataFrame)

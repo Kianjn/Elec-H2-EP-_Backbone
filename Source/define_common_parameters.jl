@@ -41,9 +41,9 @@ function define_common_parameters!(m::String, mod::Model, data::Dict, ts::Dict, 
     mod.ext[:expressions] = Dict{Symbol,Any}()
 
     # --- Dimensions from config ---
-    n_years     = data["nYears"]      # Number of scenarios (e.g. 1).
-    n_repr_days = data["nReprDays"]   # Number of representative days (e.g. 3 or 8).
-    n_timesteps = data["nTimesteps"]  # Hours per representative day (e.g. 24).
+    n_years     = data["nYears"]      # Scenarios = weather years x gas levels (15 by default).
+    n_repr_days = data["nReprDays"]   # Number of representative days (8).
+    n_timesteps = data["nTimesteps"]  # Hours per representative day (24).
 
     # --- Index sets ---
     JY = 1:n_years
@@ -59,7 +59,10 @@ function define_common_parameters!(m::String, mod::Model, data::Dict, ts::Dict, 
     # scenario jy. This weight scales per-representative-day objective values up
     # to a full-year total (e.g. sum over jh,jd,jy of W[jd,jy] * cost[jh,jd,jy]).
     #
-    # Scenario labels are 1..nYears (file keys for timeseries_<label>.csv).
+    # Main.years maps the flat scenario index jy to a WEATHER FILE LABEL (the key
+    # for timeseries_<label>.csv). It is NOT the identity: with the default 5x3
+    # grid, jy = 1..15 maps onto labels 1..5, so three consecutive jy share one
+    # label and differ only in gas price (see define_scenarios.jl).
     # Fallback Dict(1 => 1) is used only if Main.years is not defined.
     _years = isdefined(Main, :years) ? Main.years : Dict(1 => 1)
     # Build the 2D weight matrix: for each (jd, jy), look up the scenario label
