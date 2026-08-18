@@ -29,6 +29,49 @@
 #
 # ==============================================================================
 
+# Pair α, u, CVaR with current sw_aux starts so
+#   u[y] ≥ −sw_aux[y] − α,   CVaR ≥ α + (1/(1−β)) E[u]
+# hold at x⁰. Uses the discrete Rockafellar–Uryasev minimizer over candidate α.
+# Call after any primal copy (RN warm-start) — RN CVaR auxiliaries are not tight
+# and can violate the target-β linking constraint.
+function seed_social_cvar_starts!(sw_aux, u_social, alpha_social, cvar_social, JY, P, beta_conf;
+                                  sw_fallback::Float64 = -1.0e11)
+    n = length(JY)
+    sw = Vector{Float64}(undef, n)
+    for (i, jy) in enumerate(JY)
+        s = start_value(sw_aux[jy])
+        sw[i] = (s === nothing || !isfinite(Float64(s))) ? sw_fallback : Float64(s)
+        set_start_value(sw_aux[jy], sw[i])
+    end
+    loss = -sw
+    one_m_b = max(1e-6, 1.0 - Float64(beta_conf))
+    best_cvar = Inf
+    best_alpha = loss[1]
+    best_u = zeros(n)
+    for a in unique(loss)
+        u = max.(loss .- a, 0.0)
+        c = a + sum(Float64(P[JY[i]]) * u[i] for i in 1:n) / one_m_b
+        if c < best_cvar
+            best_cvar = c
+            best_alpha = a
+            best_u = u
+        end
+    end
+    set_start_value(alpha_social, best_alpha)
+    set_start_value(cvar_social, best_cvar)
+    for (i, jy) in enumerate(JY)
+        set_start_value(u_social[jy], best_u[i])
+    end
+    return nothing
+end
+
+function seed_social_cvar_starts!(planner_state::Dict)
+    seed_social_cvar_starts!(
+        planner_state[:sw_aux], planner_state[:u_social],
+        planner_state[:alpha_social], planner_state[:cvar_social],
+        planner_state[:JY], planner_state[:P], planner_state[:beta])
+end
+
 # data: full data.yaml dict; gamma and beta are read from data["ADMM"] so that
 #       changing them there updates both social planner and ADMM simultaneously.
 # env: optional Gurobi environment for license reuse (used only when the
@@ -306,14 +349,15 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
         - (1 - gamma) * cvar_social
     )
 
-    # Feasible CVaR/epigraph starts for IPOPT (sw_aux <= social_welfare at x⁰).
-    # Default JuMP starts (sw_aux = 0) can violate epigraph when welfare is negative.
+    # Cold start: sw_aux well below seed-CAPEX welfare (~−5e9 € if d=g=0) so the
+    # epigraph sw_aux ≤ social_welfare holds. Then pair α, u, CVaR so the
+    # Rockafellar–Uryasev shortfall is feasible. The old seeds (sw_aux = α = −1e15,
+    # u = 0, CVaR = 0) made u ≥ −sw_aux − α infeasible (RHS = 2e15) and IPOPT
+    # died in restoration once γ<1 put CVaR in the objective.
     for jy in JY
-        set_start_value(sw_aux[jy], -1.0e15)
-        set_start_value(u_social[jy], 0.0)
+        set_start_value(sw_aux[jy], -1.0e11)
     end
-    set_start_value(alpha_social, -1.0e15)
-    set_start_value(cvar_social, 0.0)
+    seed_social_cvar_starts!(sw_aux, u_social, alpha_social, cvar_social, JY, P, beta_conf)
 
     # ── Return planner model and state dictionary ─────────────────────────
     # planner_state carries all information that save_social_planner_results!
@@ -351,6 +395,7 @@ function build_social_planner!(mdict::Dict, agents::Dict, elec_market::Dict, H2_
         :W => W,
         :gamma => gamma,
         :beta => beta_conf,
+        :P => P,
         :demand_var_keys => [:power_d_E, :elec_GC_demand_d_GC_E, :EP_demand_d_EP],
         :sw_aux => sw_aux,
         :social_welfare_epigraph => social_welfare_epigraph,

@@ -7,8 +7,9 @@
 #   mod.ext[:parameters] and mod.ext[:timeseries] with type-specific data from
 #   data.yaml and with 3D arrays built from the full-year time series (using
 #   representative day indices). Supports: VRES (capacity + profile), Conventional
-#   (capacity + constant availability + 3-stage thermal stack), Consumer (peak load + load profile +
-#   quadratic utility parameters A_E, B_E).
+#   (capacity + constant availability; either a single flat thermal plant via
+#   `Technology`, or a legacy 3-stage stack via `StageTechnologies`), Consumer
+#   (peak load + load profile + quadratic utility parameters A_E, B_E).
 #
 # ARGUMENTS:
 #   m, mod, data, ts, repr_days — Same convention as define_common_parameters!;
@@ -59,37 +60,26 @@ function define_power_parameters!(m::String, mod::Model, data::Dict, ts::Dict, r
         end
 
     elseif agent_type == "Conventional"
-        # --- Dispatchable thermal generator (coal + biomass + NG stack) ---
+        # --- Dispatchable thermal generator (flat single plant or legacy 3-stage stack) ---
         params[:Capacity] = data["Capacity"]  # Installed capacity (MW)
-        # Keep MarginalCost only as optional legacy fallback if stage inputs are absent.
-        params[:MarginalCost] = get(data, "MarginalCost", 60.0)
+        params[:MarginalCost] = get(data, "MarginalCost", 60.0)  # legacy scalar fallback
 
-        # Three-stage convex marginal-cost curve (single aggregated conventional agent):
-        #   Stage s has capacity cap_s and marginal cost MC_s(x) = base_s + slope_s * x
-        #   for x in [0, cap_s], with continuity between stage endpoints.
-        #
-        # The stage costs are SCENARIO-DEPENDENT because the gas price varies across
-        # scenarios, so base costs and slopes are 3 x nYears matrices and the stage-3
-        # endpoint is an nYears vector. Capacities do not depend on the gas price and
-        # stay a plain length-3 vector.
-        #
-        # Primary inputs (recommended): each stage names a technology whose SRMC is
-        # derived from the Fuel block via efficiency and emission factor, so a gas
-        # scenario moves the gas stages only.
-        #   - StageCapacityShares : length-3 capacity split (normalized internally)
-        #   - StageTechnologies   : length-3 list of {name, fuel, efficiency, vom}
-        #   - PeakTechnology      : technology setting the stage-3 endpoint (e.g. OCGT)
-        #
-        # Slopes are derived internally to enforce continuous stage transitions:
-        #   end(MC_1) = base_2, end(MC_2) = base_3, end(MC_3) = endpoint.
-        #
-        # Backward compatibility (gas-invariant, replicated across scenarios):
-        #   - StageBaseCosts / StageBaseCostMultipliers for the three base costs.
-        #   - FinalMarginalCost, or an endpoint inferred from StageSlopeMultipliers.
         n_yr = Int(data["nYears"])
         gas_mult = scenario_gas_multipliers(data, n_yr)
         fuel = get(data, "Fuel", Dict{String,Any}())
 
+        # Flat plant: one technology, constant SRMC per scenario (merit order via market).
+        if haskey(data, "Technology")
+            tech = data["Technology"]
+            mc = [thermal_srmc(tech, fuel, gas_mult[jy]) for jy in 1:n_yr]
+            params[:MarginalCostByYear] = mc
+            # Scalar fallback: first scenario at 1.0× gas (jy with multiplier 1.0 if present).
+            jy_base = findfirst(isapprox.(gas_mult, 1.0; atol = 1e-9))
+            params[:MarginalCost] = jy_base === nothing ? mc[1] : mc[jy_base]
+            params[:ConvTechName] = String(get(tech, "name", "thermal"))
+
+        else
+        # Legacy three-stage convex marginal-cost curve (single aggregated conventional agent):
         shares_raw = Float64.(get(data, "StageCapacityShares", [1 / 3, 1 / 3, 1 / 3]))
         if length(shares_raw) != 3
             error("Conventional generator requires 3 entries for StageCapacityShares")
@@ -98,8 +88,8 @@ function define_power_parameters!(m::String, mod::Model, data::Dict, ts::Dict, r
         shares ./= sum(shares)
         caps = params[:Capacity] .* shares
 
-        base_costs = zeros(3, n_yr)   # base_costs[s, jy]
-        final_mc   = zeros(n_yr)      # endpoint of stage 3 in scenario jy
+        base_costs = zeros(3, n_yr)
+        final_mc   = zeros(n_yr)
 
         if haskey(data, "StageTechnologies")
             techs = data["StageTechnologies"]
@@ -162,9 +152,9 @@ function define_power_parameters!(m::String, mod::Model, data::Dict, ts::Dict, r
         params[:ConvStageBaseCost] = base_costs
         params[:ConvStageSlope] = max.(slopes, 0.0)
         params[:ConvFinalMarginalCost] = final_mc
+        end  # legacy staged stack
 
         # Constant AF = 1.0 at every hour: dispatchable thermal generation.
-        # No timeseries profile is needed; the optimizer decides dispatch level.
         times[:AF] = ones(n_ts, n_rd, n_yr)
 
     elseif agent_type == "Consumer"

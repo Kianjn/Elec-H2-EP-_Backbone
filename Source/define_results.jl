@@ -2,7 +2,7 @@
 # define_results.jl — Initialize result and ADMM state structures
 # ==============================================================================
 
-if !isdefined(@__MODULE__, :_cap_z_push!)
+if !isdefined(@__MODULE__, :repeat_last_agent_quantities!)
     include(joinpath(@__DIR__, "cap_admm_helpers.jl"))
 end
 
@@ -408,18 +408,23 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     end
 
     # Absolute and relative tolerances for the ADMM stopping rule:
-    #   ε_abs: base absolute tolerance (MW-scale), taken from epsilon if no
-    #          dedicated epsilon_abs is given in data.yaml.
+    #   ε_abs: per-slot flow-market absolute tolerance (MW), from epsilon_abs
+    #          if present, otherwise epsilon / epsilon_contracts.
+    #   ε_cap: scalar MW tolerance for capacity splits (not √n scaled).
     #   ε_rel: relative tolerance (dimensionless), optional; defaults to 0.
     # Combined per Boyd et al. as:
-    #   ε_pri = ε_abs * sqrt(n) + ε_rel * Scale_primal
-    #   ε_dual = ε_abs * sqrt(n) + ε_rel * Scale_dual
+    #   ε_pri_flow = ε_abs * sqrt(n) + ε_rel * Scale_primal
+    #   ε_pri_cap  = ε_cap + ε_rel * Scale_primal_m
     # where n is the number of time slots and Scale_* are the entries of
-    # ResidualScale above.
+    # ResidualScale above. See DOCUMENTATION.md §6.5.
     eps_abs = get(admm_data, "epsilon_abs", get(admm_data, "epsilon", 1.0))
     eps_rel = get(admm_data, "epsilon_rel", 0.0)
+    # Capacity is a scalar MW split, not a flow tensor: use a dedicated MW
+    # tolerance (default 1.0) rather than reusing the per-slot flow ε_abs.
+    eps_cap = get(admm_data, "epsilon_cap", 5.0)
     ADMM["EpsilonAbs"] = eps_abs
     ADMM["EpsilonRel"] = eps_rel
+    ADMM["EpsilonCap"] = eps_cap
 
     # Legacy per-market convergence tolerances (kept for diagnostics; the
     # actual stopping rule uses EpsilonAbs/EpsilonRel and ResidualScale).

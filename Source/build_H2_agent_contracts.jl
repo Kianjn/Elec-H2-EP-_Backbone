@@ -9,16 +9,16 @@
 #   - HPA sell-side (delivering hydrogen bundled with H2_GC equivalent
 #     to green offtaker side).
 #
-#   PER-VRES PPAs (pay-as-produced, bundled elec+elec_GC):
+#   PER-VRES PPAs (pay-as-produced CfD, bundled elec+elec_GC):
 #   - The electrolyzer receives g_ppa_from[vres_id] (MWh) from each VRES.
-#   - Payment: K_ppa[vres_id] × g_ppa_from[vres_id] per VRES (bundled strike).
-#   - Total electricity input: e_in_pool + sum(g_ppa_from).
-#   - PPA electricity comes with embedded GC — real-world package.
+#   - Payment: (K − λ_elec − λ_elec_GC) × g_ppa_from per VRES.
+#   - Total physical electricity input remains e_in_pool.
+#   - g_ppa_from is a hedge quantity and does not alter physical conversion.
 #
-# HPA (pay-as-produced, bundled H2 + H2_GC equivalent):
-#   - GreenProducer supplies h2_hpa at strike K_hpa.
-#   - h2_hpa <= hpa_cap at each hour; if producer is not running, delivery is 0.
-#   - Contracted output is removed from pool H2 and pool H2_GC.
+# HPA (pay-as-produced CfD, bundled H2 + H2_GC):
+#   - GreenProducer supplies hedge h2_hpa; payoff (K − λ_H2 − λ_H2_GC) · q
+#     plus SoP/ToP volume adjustments.
+#   - h2_hpa <= hpa_cap at each hour; it is a hedge quantity (not physical carve-out).
 #
 # ARGUMENTS:
 #   m — Agent ID.
@@ -39,7 +39,7 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
     η  = mod.ext[:parameters][:η_elec_H2]
     cap_H2_initial = mod.ext[:parameters][:Capacity_H2_Output]
     op_cost  = mod.ext[:parameters][:OperationalCost]
-    F_cap    = get(mod.ext[:parameters], :FixedCost_per_MW_Electrolyzer, 0.0)
+    F_cap    = electrolyzer_h2_annuity(mod.ext[:parameters])
     gamma    = get(mod.ext[:parameters], :γ, 1.0)
     beta_conf = get(mod.ext[:parameters], :β, 0.95)
     P        = mod.ext[:parameters][:P]
@@ -102,7 +102,7 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
     mod.ext[:expressions][:g_net_elec] = @expression(mod, -e_in_pool)
 
     mod.ext[:expressions][:g_net_elec_GC] = @expression(mod, -q_elec_gc)
-    mod.ext[:expressions][:g_net_H2]      = @expression(mod, h2_out - h2_hpa)
+    mod.ext[:expressions][:g_net_H2]      = @expression(mod, h2_out)
     mod.ext[:expressions][:g_net_H2_GC]   = @expression(mod, q_h2gc)
 
     # PPA market: electrolyzer demands g_ppa_from[v] per VRES (for result extraction).
@@ -110,49 +110,48 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
     mod.ext[:expressions][:g_net_hpa] = @expression(mod, h2_hpa)
 
     # ── Physical constraints ────────────────────────────────────────────────
-    # Conversion: h2_out = η × (e_in_pool + sum(g_ppa_from))
-    g_ppa_total = sum(g_ppa_from[v] for v in ppa_vres)
+    # Physical conversion remains in the pool only (contracts hedge cashflows).
     mod.ext[:constraints][:h2_from_elec] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
-        h2_out[jh, jd, jy] == η * (e_in_pool[jh, jd, jy] + sum(g_ppa_from[v][jh, jd, jy] for v in ppa_vres)))
+        h2_out[jh, jd, jy] == η * e_in_pool[jh, jd, jy])
 
-    # Pool H2-GC cannot include hydrogen already bundled in HPA.
+    # Pool H2-GC is backed by physical hydrogen output.
     mod.ext[:constraints][:gc_phys_limit] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
-        q_h2gc[jh, jd, jy] <= h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
+        q_h2gc[jh, jd, jy] <= h2_out[jh, jd, jy])
 
     mod.ext[:constraints][:cap_h2] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
         h2_out[jh, jd, jy] <= cap_H2_y)
-    # HPA delivery is physical hydrogen and cannot exceed instantaneous production.
+    # Hedge volume bounded by production and contract cap.
     mod.ext[:constraints][:hpa_prod_link] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
         h2_hpa[jh, jd, jy] <= h2_out[jh, jd, jy])
     mod.ext[:constraints][:hpa_cap_limit] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
         h2_hpa[jh, jd, jy] <= hpa_cap)
-    # Contract capacity is a shared scalar (fixed before each solve); see contract_capacity.jl.
     mod.ext[:constraints][:hpa_cap_plant] = @constraint(mod, hpa_cap <= cap_H2_y)
 
-    # PPA delivery cannot exceed PPA capacity (per VRES).
+    # PPA hedge volume bounds per VRES.
     for v in ppa_vres
         mod.ext[:constraints][Symbol("ppa_cap_limit_", v)] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
             g_ppa_from[v][jh, jd, jy] <= ppa_cap[v])
+        mod.ext[:constraints][Symbol("ppa_phys_bound_", v)] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
+            g_ppa_from[v][jh, jd, jy] <= e_in_pool[jh, jd, jy])
         # Per-VRES contract capacity bounded by electrolyzer electricity input (MW_elec).
         mod.ext[:constraints][Symbol("ppa_cap_electro_limit_", v)] = @constraint(mod, ppa_cap[v] <= cap_H2_y / η)
     end
 
-    mod.ext[:parameters][:hpa_volume_mode] = String(get(mod.ext[:parameters], :hpa_volume_mode, "pap"))
+    raw_mode = lowercase(String(get(mod.ext[:parameters], :hpa_volume_mode, "sop")))
+    mode = raw_mode == "pap" ? "sop" : raw_mode
+    mode in ("sop", "top") || error("Unsupported hpa_volume_mode=$(raw_mode). Use sop or top.")
+    mod.ext[:parameters][:hpa_volume_mode] = mode
     add_hpa_volume_variables!(mod; role=:producer)
 
-    # Annual green-backing: elec GCs from pool + PPA electricity (bundled with GC) >= (1/η) × (pool H2_GC + HPA H2 with embedded H2_GC)
+    # Annual green-backing based on physical pool production only.
     mod.ext[:constraints][:gc_backing_yearly] = @constraint(mod, [jy in JY],
-        sum(W[jd, jy] * q_elec_gc[jh, jd, jy] for jh in JH, jd in JD) +
-        sum(W[jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres, jh in JH, jd in JD) >=
-        (1 / η) * (
-            sum(W[jd, jy] * q_h2gc[jh, jd, jy] for jh in JH, jd in JD) +
-            sum(W[jd, jy] * h2_hpa[jh, jd, jy] for jh in JH, jd in JD)
-        )
+        sum(W[jd, jy] * q_elec_gc[jh, jd, jy] for jh in JH, jd in JD) >=
+        (1 / η) * sum(W[jd, jy] * q_h2gc[jh, jd, jy] for jh in JH, jd in JD)
     )
 
     # ── Risk variables (CVaR) ──────────────────────────────────────────────
-    alpha_H2 = mod.ext[:variables][:alpha_H2] = @variable(mod, lower_bound=0, base_name="alpha_H2_$(m)")
-    cvar_H2  = mod.ext[:variables][:CVaR_H2]  = @variable(mod, lower_bound=0, base_name="CVaR_H2_$(m)")
+    alpha_H2 = mod.ext[:variables][:alpha_H2] = @variable(mod, base_name="alpha_H2_$(m)")
+    cvar_H2  = mod.ext[:variables][:CVaR_H2]  = @variable(mod, base_name="CVaR_H2_$(m)")
     u_H2     = mod.ext[:variables][:u_H2]     = @variable(mod, [jy in JY], lower_bound=0, base_name="u_H2_$(m)")
 
     # Per-year loss: pool cost + PPA cost + op cost − H2/H2_GC pool revenue − HPA bundled revenue
@@ -164,7 +163,7 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
                 λ_elec[jh, jd, jy]       * e_in_pool[jh, jd, jy]
                 + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
                 + op_cost * h2_out[jh, jd, jy]
-                - λ_H2[jh, jd, jy]       * (h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
+                - λ_H2[jh, jd, jy]       * h2_out[jh, jd, jy]
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
             ) for jh in JH, jd in JD)
             + sum_ppa_buyer_cost_jy(mod, ppa_vres, jy, W, JH, JD)
@@ -194,14 +193,14 @@ function build_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
             λ_elec[jh, jd, jy]       * e_in_pool[jh, jd, jy]
             + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
             + op_cost * h2_out[jh, jd, jy]
-            - λ_H2[jh, jd, jy]       * (h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
+            - λ_H2[jh, jd, jy]       * h2_out[jh, jd, jy]
             - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
         ) for jh in JH, jd in JD, jy in JY)
         + sum_ppa_buyer_cost(mod, ppa_vres, W, JH, JD, JY)
         - sum_hpa_seller_revenue(mod, W, JH, JD, JY)
         + sum(ρ_elec/2 * W[jd, jy] * ((-e_in_pool[jh, jd, jy])      - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-        + sum(ρ_H2/2 * W[jd, jy] * ((h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy]) - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+        + sum(ρ_H2/2 * W[jd, jy] * (h2_out[jh, jd, jy] - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2_GC/2 * W[jd, jy] * (q_h2gc[jh, jd, jy]      - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + obj_ppa
         + obj_hpa

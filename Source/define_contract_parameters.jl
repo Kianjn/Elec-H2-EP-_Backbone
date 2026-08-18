@@ -34,7 +34,10 @@ function define_contract_parameters!(m::String, mod::Model, data::Dict, agents::
     mod.ext[:parameters][:in_hpa_market] = in_hpa
 
     if agent_type in ("GreenProducer", "GreenOfftaker")
-        mod.ext[:parameters][:hpa_volume_mode] = String(get(agents, :hpa_volume_mode, "pap"))
+        raw_mode = lowercase(String(get(agents, :hpa_volume_mode, "sop")))
+        mode = raw_mode == "pap" ? "sop" : raw_mode
+        mode in ("sop", "top") || error("Unsupported hpa_volume_mode=$(raw_mode). Use sop or top.")
+        mod.ext[:parameters][:hpa_volume_mode] = mode
     end
 
     if in_ppa

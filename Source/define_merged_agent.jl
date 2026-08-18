@@ -61,21 +61,15 @@ function define_merged_agent!(merged_id::String, mod::Model, merged_type::String
 
     h2_data = member_data[:electrolyzer]
     off_data = member_data[:green_offtaker]
-    params[:Capacity_Electrolyzer] = h2_data["Capacity_Electrolyzer"]
-    params[:Capacity_H2_Output] = h2_data["Capacity_H2_Output"]
-    params[:SpecificConsumption] = h2_data["SpecificConsumption"]
+    derive_electrolyzer_capacities!(params, h2_data)
     params[:OperationalCost] = get(h2_data, "OperationalCost", 0.0)
-    params[:FixedCost_per_MW_Electrolyzer] = get(h2_data, "FixedCost_per_MW_Electrolyzer", 0.0)
-    params[:η_elec_H2] = 1.0 / params[:SpecificConsumption]
 
     for (k, v) in off_data
         k == "Type" && continue
         params[Symbol(k)] = v
     end
     params[:gamma_GC] = get(off_data, "gamma_GC", 0.42)
-    params[:Capacity_H2_In] = get(off_data, "Capacity_H2_In", params[:Capacity_H2_Output])
-    params[:Capacity_EP_Out] = off_data["Capacity_EP_Out"]
-    params[:Alpha] = get(off_data, "Alpha", 1.0)
+    derive_green_offtaker_capacities!(params, off_data)
     params[:ProcessingCost] = get(off_data, "ProcessingCost", 0.0)
     params[:FixedCost_per_MW_EP_Out] = get(off_data, "FixedCost_per_MW_EP_Out", 0.0)
     params[:Type] = merged_type

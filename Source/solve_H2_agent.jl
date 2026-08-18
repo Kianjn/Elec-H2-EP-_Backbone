@@ -48,7 +48,7 @@ function solve_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
 
     # ── Risk parameters and CVaR auxiliary variables ──────────────────────
     gamma     = get(mod.ext[:parameters], :γ, 1.0)    # risk weight (1 = risk-neutral)
-    F_cap     = get(mod.ext[:parameters], :FixedCost_per_MW_Electrolyzer, 0.0)
+    F_cap     = electrolyzer_h2_annuity(mod.ext[:parameters])
     alpha_H2  = mod.ext[:variables][:alpha_H2]         # VaR proxy
     cvar_H2   = mod.ext[:variables][:CVaR_H2]          # CVaR of loss
     u_H2      = mod.ext[:variables][:u_H2]             # shortfall per scenario year

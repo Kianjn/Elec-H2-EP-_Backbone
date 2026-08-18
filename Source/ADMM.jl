@@ -2,7 +2,7 @@
 # ADMM.jl — Main ADMM coordination loop
 # ==============================================================================
 
-if !isdefined(@__MODULE__, :_cap_z_push!)
+if !isdefined(@__MODULE__, :repeat_last_agent_quantities!)
     include(joinpath(@__DIR__, "cap_admm_helpers.jl"))
 end
 
@@ -130,12 +130,18 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
     guard_min_iter = max_iter + 1
 
     function _market_eps(key::String, n_slots::Int)
-        eps_abs = ADMM_state["EpsilonAbs"]
         eps_rel = ADMM_state["EpsilonRel"]
-        # Capacity consensus is low-dimensional (yearly scalar/vector), not a
-        # full (hour,day,year) flow tensor. Using flow-slot scaling here would
-        # make cap tolerance too loose and can declare convergence prematurely.
-        sqrt_n = (key == "cap") ? 1.0 : sqrt(max(1, n_slots))
+        # Capacity consensus is a scalar MW split, not a (hour,day,year) flow
+        # tensor. Using flow ε_abs·√n_slots here would either (a) make cap far
+        # too loose if √n_slots is applied, or (b) make cap far too tight if
+        # the per-slot flow ε_abs is reused unscaled. Dedicated ε_cap (MW).
+        if key == "cap"
+            eps_abs = Float64(get(ADMM_state, "EpsilonCap", ADMM_state["EpsilonAbs"]))
+            sqrt_n = 1.0
+        else
+            eps_abs = ADMM_state["EpsilonAbs"]
+            sqrt_n = sqrt(max(1, n_slots))
+        end
         sp = max(ADMM_state["ResidualScale"]["Primal"][key], 1.0)
         sd = max(ADMM_state["ResidualScale"]["Dual"][key], 1.0)
         eps_pr = eps_abs * sqrt_n + eps_rel * sp
@@ -479,13 +485,7 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         for m in cap_agents
             rp_m = cap_state_merit["Primal"][m][end]
             rd_m = cap_state_merit["Dual"][m][end]
-            eps_abs_local = ADMM_state["EpsilonAbs"]
-            eps_rel_local = ADMM_state["EpsilonRel"]
-            sqrt_y_local = sqrt(max(1, n_yr))
-            sp_m = max(cap_state_merit["ResidualScale_Primal"][m], 1.0)
-            sd_m = max(cap_state_merit["ResidualScale_Dual"][m], 1.0)
-            eps_pr_m = eps_abs_local * sqrt_y_local + eps_rel_local * sp_m
-            eps_du_m = eps_abs_local * sqrt_y_local + eps_rel_local * sd_m
+            eps_pr_m, eps_du_m = _cap_boyd_eps(ADMM_state, m)
             mm = max(rp_m / max(eps_pr_m, 1e-9), isfinite(rd_m) ? rd_m / max(eps_du_m, 1e-9) : 1e12)
             if isfinite(mm) && mm < cap_best_merit[m]
                 cap_best_merit[m] = mm
@@ -665,16 +665,10 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
             end
         end
         cap_state_guard = ADMM_state["Capacity"]
-        eps_abs_guard = ADMM_state["EpsilonAbs"]
-        eps_rel_guard = ADMM_state["EpsilonRel"]
-        sqrt_y_guard = sqrt(max(1, n_yr))
         for m in cap_agents
             rp_m = cap_state_guard["Primal"][m][end]
             rd_m = cap_state_guard["Dual"][m][end]
-            sp_m = max(cap_state_guard["ResidualScale_Primal"][m], 1.0)
-            sd_m = max(cap_state_guard["ResidualScale_Dual"][m], 1.0)
-            eps_pr_m = eps_abs_guard * sqrt_y_guard + eps_rel_guard * sp_m
-            eps_du_m = eps_abs_guard * sqrt_y_guard + eps_rel_guard * sd_m
+            eps_pr_m, eps_du_m = _cap_boyd_eps(ADMM_state, m)
             mm = max(rp_m / max(eps_pr_m, 1e-9), isfinite(rd_m) ? rd_m / max(eps_du_m, 1e-9) : 1e12)
             b = cap_best_merit[m]
             if b < Inf && iter >= guard_min_iter && isfinite(mm) && mm > guard_trigger * b
@@ -768,15 +762,11 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
         # whose split is still far from feasible.
         function within_tol_cap()
             isempty(cap_agents) && return true
-            sqrt_y = 1.0  # single scalar capacity decision (not nYears expansion path)
             cap_state = ADMM_state["Capacity"]
             for m in cap_agents
                 rp_m = cap_state["Primal"][m][end]
                 rd_m = cap_state["Dual"][m][end]
-                sp_m = max(cap_state["ResidualScale_Primal"][m], 1.0)
-                sd_m = max(cap_state["ResidualScale_Dual"][m], 1.0)
-                eps_pr_m = eps_abs * sqrt_y + eps_rel * sp_m
-                eps_du_m = eps_abs * sqrt_y + eps_rel * sd_m
+                eps_pr_m, eps_du_m = _cap_boyd_eps(ADMM_state, m)
                 if !(isfinite(rp_m) && isfinite(rd_m) &&
                      rp_m <= eps_pr_m && rd_m <= eps_du_m)
                     return false

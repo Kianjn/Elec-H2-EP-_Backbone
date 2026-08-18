@@ -206,6 +206,7 @@ run_general = merge(data["General"], Dict(
 ))
 gen = run_general
 describe_scenario_grid(scen)
+describe_risk_parameters(data, n_years)
 
 # Time series and representative days, loaded once per distinct weather label.
 #   Input/timeseries_<label>.csv
@@ -414,21 +415,45 @@ else
         set_optimizer_attribute(planner, "max_iter", Int(something(max_iter, get(sp_cfg, "ipopt_max_iter", 5000))))
         set_optimizer_attribute(planner, "print_level", Int(something(print_level, get(sp_cfg, "ipopt_print_level", 0))))
         set_optimizer_attribute(planner, "nlp_scaling_method", "gradient-based")
-        if haskey(sp_cfg, "ipopt_mu_strategy")
-            set_optimizer_attribute(planner, "mu_strategy", String(sp_cfg["ipopt_mu_strategy"]))
-        end
+        # Adaptive barrier is more robust on the CVaR QCP than monotone mu.
+        mu_strategy = String(get(sp_cfg, "ipopt_mu_strategy", "adaptive"))
+        set_optimizer_attribute(planner, "mu_strategy", mu_strategy)
         return nothing
     end
 
+    function _is_social_cvar_aux(nm::AbstractString)
+        startswith(nm, "alpha_social") || startswith(nm, "CVaR_social") || startswith(nm, "u_social")
+    end
+
     function _copy_primal_start!(dst::Model, src::Model)
+        ncopy = 0
         for v in all_variables(dst)
-            name = var_name(v)
-            (name === nothing || isempty(name)) && continue
-            vs = variable_by_name(src, name)
+            nm = name(v)
+            (isempty(nm) || _is_social_cvar_aux(nm)) && continue
+            vs = variable_by_name(src, nm)
             vs === nothing && continue
-            set_start_value(v, value(vs))
+            val = value(vs)
+            isfinite(val) || continue
+            set_start_value(v, val)
+            ncopy += 1
         end
-        return nothing
+        return ncopy
+    end
+
+    function _adopt_current_as_start!(planner::Model)
+        has_values(planner) || return false
+        nset = 0
+        for v in all_variables(planner)
+            try
+                val = value(v)
+                if isfinite(val)
+                    set_start_value(v, val)
+                    nset += 1
+                end
+            catch
+            end
+        end
+        return nset > 0
     end
 
     function _solve_ipopt_planner!(planner::Model, sp_cfg::Dict; label::String="", tol=nothing, max_iter=nothing)
@@ -446,12 +471,15 @@ else
     admm_cfg = get(data, "ADMM", Dict{String, Any}())
     gamma_sp = Float64(get(admm_cfg, "gamma", 1.0))
     beta_sp = Float64(get(admm_cfg, "beta", 0.95))
-    use_rn_warmstart = get(sp_cfg, "risk_warmstart", false) && gamma_sp < 1.0 - 1e-12
+    # Default ON for γ<1: the RN primal is feasible for the RA problem (same
+    # constraints) and is the start IPOPT actually needs. Override with
+    # SocialPlanner.risk_warmstart: false if you want a single pass.
+    use_rn_warmstart = Bool(get(sp_cfg, "risk_warmstart", true)) && gamma_sp < 1.0 - 1e-12
 
     if use_rn_warmstart
-        # Easier auxiliary problem: γ=1 (CVaR inactive in objective) and high β so CVaR
-        # constraints are mild; only the primal (dispatch/capacity) is copied to the target run.
-        beta_warm = Float64(get(sp_cfg, "risk_warmstart_beta", 0.95))
+        # Auxiliary problem: γ=1 so CVaR is idle. β defaults to the target run
+        # (dispatch does not depend on β at γ=1).
+        beta_warm = Float64(get(sp_cfg, "risk_warmstart_beta", beta_sp))
         @info "Social planner: warm-start solve before risk-adjusted run" gamma_warm=1.0 beta_warm=beta_warm target_gamma=gamma_sp target_beta=beta_sp
         data_rn = deepcopy(data)
         admm_rn = Dict{String, Any}(String(k) => v for (k, v) in pairs(admm_cfg))
@@ -463,8 +491,9 @@ else
                                               data_rn; env = sp_env, optimizer_factory = optimizer_factory)
         rn_status, rn_duals = _solve_ipopt_planner!(planner_rn, sp_cfg; label=" (warm-start)")
         if _ipopt_success(rn_status, rn_duals)
-            _copy_primal_start!(planner, planner_rn)
-            @info "Copied primal warm-start from auxiliary solve" status=rn_status
+            ncopy = _copy_primal_start!(planner, planner_rn)
+            seed_social_cvar_starts!(planner_state)
+            @info "Copied primal warm-start from auxiliary solve" status=rn_status n_vars=ncopy
         else
             @warn "Warm-start solve did not yield usable primals ($rn_status); using CVaR variable seeds only."
         end
@@ -475,7 +504,9 @@ else
     if !_ipopt_success(qcp_status, duals_ok)
         retry_tol = Float64(get(sp_cfg, "ipopt_retry_tol", 1e-5))
         retry_iter = Int(get(sp_cfg, "ipopt_retry_max_iter", 8000))
-        @warn "IPOPT failed with status $qcp_status; retrying with tol=$retry_tol and max_iter=$retry_iter"
+        adopted = _adopt_current_as_start!(planner)
+        adopted && seed_social_cvar_starts!(planner_state)
+        @warn "IPOPT failed with status $qcp_status; retrying with tol=$retry_tol and max_iter=$retry_iter" adopted_iterate=adopted
         qcp_status, duals_ok = _solve_ipopt_planner!(planner, sp_cfg; tol=retry_tol, max_iter=retry_iter, label=" (retry)")
     end
     if !_ipopt_success(qcp_status, duals_ok)

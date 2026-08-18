@@ -127,7 +127,7 @@ Edit **`Data/data.yaml`**:
 General:
   nTimesteps: 24
   nReprDays: 8
-  base_year: 2021
+  base_year: 2025
 
 # The uncertainty set: 5 weather years × 3 gas price levels = 15 equiprobable
 # scenarios, all of which every risk-aware agent optimises over (see §9.8).
@@ -135,16 +135,16 @@ Scenarios:
   weather_years: [1, 2, 3, 4, 5]
   gas_price_multipliers: [1.00, 1.10, 1.20]
 
-# Single source of truth for fuel- and carbon-linked costs. Conventional stage
-# costs and grey ammonia marginal cost are both DERIVED from these, so one gas
+# Single source of truth for fuel- and carbon-linked costs. Conventional plant
+# SRMCs and grey ammonia marginal cost are both DERIVED from these, so one gas
 # price moves power and ammonia together.
 Fuel:
-  GasPrice: 47.15       # €/MWh_th — TTF 2021 annual average
-  CO2Price: 52.64       # €/tCO₂ — EU-ETS 2021 annual average
+  GasPrice:  34.40       # €/MWh_th — TTF 2024 annual average
+  CO2Price:  64.79       # €/tCO₂ — EU-ETS 2024 annual average
 
 ADMM:
   max_iter: 2000        # iteration budget
-  epsilon: 0.1          # convergence tolerance (Boyd-scaled; see §6.5)
+  epsilon: 0.2          # ME flow-market Boyd ε_abs (MW/slot; see §6.5)
   gamma: 1.0            # 1 = risk-neutral; 0.5 = risk-averse (see §4.10)
   beta: 0.95            # CVaR tail level; inactive while gamma = 1
 ```
@@ -160,7 +160,7 @@ Add agents by adding blocks under `Power:`, `Hydrogen:`, etc. — no code change
 | Issue | What to try |
 |-------|-------------|
 | Gurobi license error | Set `GUROBI_HOME`; run `grbgetkey` |
-| ADMM does not converge | Run SP first; lower `epsilon` or raise `max_iter`; see [§6.5](DOCUMENTATION.md#65-convergence-tolerances-boyd-style) |
+| ADMM does not converge | Run SP first; raise `epsilon` / `epsilon_cap` only with the §6.5 justification, or raise `max_iter`; see [§6.5](DOCUMENTATION.md#65-convergence-tolerances-boyd-style) |
 | SP non-optimal | Check `data.yaml` for infeasible capacities or demands |
 
 More detail: [DOCUMENTATION.md](DOCUMENTATION.md) and `ADMM_Convergence.csv` / `ADMM_Diagnostics.csv`.

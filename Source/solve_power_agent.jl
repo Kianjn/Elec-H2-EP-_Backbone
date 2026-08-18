@@ -120,6 +120,7 @@ function solve_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
         #      + rho_elec/2 * sum W * (g - g_bar_elec)^2  [ADMM elec penalty]
         g  = mod.ext[:variables][:g]
         MC = mod.ext[:parameters][:MarginalCost]
+        MC_y = get(mod.ext[:parameters], :MarginalCostByYear, nothing)
         if haskey(mod.ext[:variables], :g_stage) &&
            haskey(mod.ext[:parameters], :ConvStageBaseCost) &&
            haskey(mod.ext[:parameters], :ConvStageSlope)
@@ -133,8 +134,11 @@ function solve_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
                 ) for jh in JH, jd in JD, jy in JY)
                 + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY))
         else
+        if MC_y === nothing
+            MC_y = fill(MC, length(JY))
+        end
         mod.ext[:objective] = @objective(mod, Min,
-            sum(W[jd, jy] * (MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
+            sum(W[jd, jy] * (MC_y[jy] * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY))
         end
     elseif agent_type == "Consumer"

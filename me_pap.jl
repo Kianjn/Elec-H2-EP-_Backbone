@@ -1,12 +1,12 @@
 # ==============================================================================
-# ME PaP — Market exposure with pay-as-produced HPAs
+# ME PaP (legacy alias) — Market exposure mapped to SoP HPAs
 # ==============================================================================
-# HOW TO RUN:  julia me_pap.jl
+# HOW TO RUN (fresh process — do not `include` this file in a Revise/REPL session):
+#   julia --project=. me_pap.jl
 # OUTPUT:      me_pap_results/
 # PPAs: always pay-as-produced. Settlement strike K is a scalar €/MWh (uniform
-# over hours) derived from bilateral λ_ppa; updated each ADMM iteration until
-# convergence, then snapshotted for reporting.
-# HPAs: pay-as-produced volume (K × delivered H₂).
+# over hours) = W-mean of bundled electricity + elec-GC spot (not λ_ppa).
+# HPAs: legacy pap label is mapped to SoP volume logic in code.
 # ==============================================================================
 
 using Pkg
@@ -25,7 +25,7 @@ using Statistics
 
 const GUROBI_ENV = Gurobi.Env()
 const home_dir = @__DIR__
-const HPA_VOLUME_MODE = "pap"
+const HPA_VOLUME_MODE = "sop"  # legacy alias: pap maps to sop in current contract design
 const CASE_LABEL = "me_pap"
 const RESULTS_SUBDIR = "me_pap_results"
 const CASE_RESULTS_DIR = joinpath(home_dir, RESULTS_SUBDIR)
@@ -99,6 +99,7 @@ run_general = merge(gen, Dict(
 data_run = copy(data)
 data_run["General"] = run_general
 describe_scenario_grid(scen)
+describe_risk_parameters(data, n_years)
 
 for y in unique(values(years))
     ts[y] = CSV.read(joinpath(home_dir, "Input", "timeseries_$(y).csv"), DataFrame)
@@ -130,7 +131,7 @@ agents[:hpa_volume_mode] = HPA_VOLUME_MODE
 
 mdict = Dict(i => Model(Gurobi.Optimizer) for i in agents[:all])
 for m in values(mdict)
-    set_silent(m)
+    configure_gurobi_agent!(m)
 end
 
 # ------------------------------------------------------------------------------
@@ -259,8 +260,8 @@ n_cap_warmstart > 0 && push!(parts, "capacity seeds for $n_cap_warmstart agents"
 @info CASE_LABEL hpa_volume=HPA_VOLUME_MODE
 !isempty(parts) && @info "ADMM warm-start: $(join(parts, ", "))"
 
-ADMM_contracts!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market,
-    EP_market, ppa_market, hpa_market, mdict, agents, data_run, TO)
+Base.invokelatest(ADMM_contracts!, results, ADMM, elec_market, H2_market, elec_GC_market,
+    H2_GC_market, EP_market, ppa_market, hpa_market, mdict, agents, data_run, TO)
 ADMM["walltime"] = TimerOutputs.tottime(TO) * 10^-9 / 60
 
 # ------------------------------------------------------------------------------

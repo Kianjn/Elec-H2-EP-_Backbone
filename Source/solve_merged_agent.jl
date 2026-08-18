@@ -77,7 +77,7 @@ function solve_merged_agent!(m::String, mod::Model)
     γ = get(p, :γ, 1.0)
     β = get(p, :β, 0.95)
     P = p[:P]
-    F_h2 = get(p, :FixedCost_per_MW_Electrolyzer, 0.0)
+    F_h2 = electrolyzer_h2_annuity(p)
     F_ep = get(p, :FixedCost_per_MW_EP_Out, 0.0)
     op_cost = p[:OperationalCost]
     proc_cost = get(p, :ProcessingCost, 0.0)

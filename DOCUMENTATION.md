@@ -4,7 +4,7 @@
 
 0. [Notation and Units](#0-notation-and-units)
 1. [Overview](#1-overview)
-2. [Markets](#2-markets) — incl. [Contract pools](#contract-pools-me-pap--me-top--me-sop), [Price: λ vs K](#price-clearing-λ-versus-settlement-k), [Risk allocation](#risk-allocation--who-bears-what), [Shared capacity $C$](#how-contract-capacity-is-determined), [ADMM iteration flow](#one-admm-iteration-contracts-case)
+2. [Markets](#2-markets) — incl. [Contract pools](#contract-pools-me-top--me-sop-me-pap-legacy-alias), [Price: λ vs K](#price-clearing-λ-versus-settlement-k), [Settlement equations](#ppa--always-pay-as-produced), [Shared capacity $C$](#how-contract-capacity-is-determined), [Risk allocation](#risk-allocation--who-bears-what)
 3. [Agents](#3-agents)
 4. [Equilibrium Theory](#4-equilibrium-theory-mcp-structure-competition-and-objectives) — MCP, competition, objectives, risk institutions; [CVaR, γ, β](#410-risk-aversion-cvar-γ-and-β)
 5. [Mathematical Formulation](#5-mathematical-formulation)
@@ -80,6 +80,17 @@ All monetary values are in **EUR** (e.g. €/MWh, €/t, €/MW-year).
 
 Full definitions, Hoschle-style calibration workflow, and equilibrium effects: **§4.10**. Social planner CVaR structure: **§7.4**. Reporting: **§7.6**.
 
+### 0.6 Contracts (ME+C only)
+
+- $q_{h,d,y}$: bilateral **hedge** MW (PPA or HPA); not a physical reroute of pool sales.
+- $C$: **shared** contract capacity (MW), one scalar per link, fixed in both subproblems.
+- $K$: settlement **strike** (€/MWh), one scalar every hour (W-mean of bundled spot).
+- $\lambda^{\mathrm{contract}}$: ADMM dual matching $q^{\mathrm{sell}}=q^{\mathrm{buy}}$; **not** $K$.
+- $q^{\mathrm{pay}}$: HPA CfD notional ($q$ under SoP; $C$ under 100% hourly ToP).
+- $s=\max(0,C-q)$: SoP seller shortfall (LP: $s\ge C-q$, $s\le C$).
+
+Equations and justifications: **§2 Contract pools**.
+
 ---
 
 ## 1. Overview
@@ -92,7 +103,7 @@ The project includes **seven entry points** in five economic categories. Each ha
 |---|---|---|
 | **`social_planner.jl`** | Social planner (SP) | **Complete risk trading** — centralised risk-averse welfare maximisation with a single social CVaR on aggregate welfare. |
 | **`market_exposure.jl`** | Market exposure (ME) | **Incomplete risk trading** — decentralised equilibrium via ADMM; risk-averse agents hedge **private** tail losses with per-agent CVaR, without an explicit risk market. |
-| **`me_pap.jl`** / **`me_top.jl`** / **`me_sop.jl`** | Market exposure with bilateral contracts | Same **incomplete risk trading** as ME, plus **PPA** (always PaP) and **HPA** (volume mode set by entry point). See §2 *Contract pools*. |
+| **`me_pap.jl`** / **`me_top.jl`** / **`me_sop.jl`** | Market exposure with bilateral contracts | Same **incomplete risk trading** as ME, plus **PPA** (always PaP CfD) and **HPA** (ToP or SoP; `me_pap` aliases SoP). See §2 *Contract pools*. |
 | **`green_h2_social_planner.jl`** | Green H₂ partial planner (GH2-SP) | **Partial complete risk trading** — electrolyzer + green offtaker merged; one coalition CVaR; ADMM + external spot markets unchanged. |
 | **`green_social_planner.jl`** | Green partial planner (G-SP) | **Partial complete risk trading** — solar + wind + electrolyzer + green offtaker merged; one coalition CVaR; ADMM + external spot markets unchanged. |
 
@@ -103,7 +114,7 @@ The project includes **seven entry points** in five economic categories. Each ha
 Entry-point details:
 
 - **`market_exposure.jl`** — Distributed ADMM; five markets: electricity, elec GC, H₂, H₂ GC, end product.
-- **`me_pap.jl`**, **`me_top.jl`**, **`me_sop.jl`** — Same risk architecture as ME, with bilateral **PPA** (always PaP) and **HPA** (PaP / take-or-pay / send-or-pay by entry point). See §2 *Contract pools*.
+- **`me_top.jl`**, **`me_sop.jl`** (legacy **`me_pap.jl`** = SoP alias) — Same risk architecture as ME, with bilateral **PPA** (always PaP CfD) and **HPA** (ToP or SoP). See §2 *Contract pools*.
 - **`social_planner.jl`** — Single centralised model; commodity prices are dual variables of market-clearing constraints, scaled to €/MWh per §7.2 (`W` and effective scenario weight $\mu_y$).
 - **`green_h2_social_planner.jl`** — ADMM with **Prod_H2_Green + Offtaker_Green** as one agent (`GreenH2_Coalition`); internal H₂/H₂-GC flows are not traded on spot markets; **one coalition CVaR** (complete risk sharing inside the coalition). See §4.11.
 - **`green_social_planner.jl`** — ADMM with **Gen_VRES_Solar + Gen_VRES_Wind + Prod_H2_Green + Offtaker_Green** merged (`Green_Coalition`); same institution as GH2-SP extended upstream to VRES. See §4.11.
@@ -124,137 +135,178 @@ The model contains five interconnected markets:
 | **Hydrogen GC** | `H2_GC` | H₂ green certificates (from certified electricity) | MWh_H2 | Electrolyzer | Green offtaker, grey offtaker |
 | **End Product** | `EP` | Ammonia / downstream product | MWh_EP | Green offtaker, grey offtaker, EP importer | Fixed demand `D_EP` |
 
-### Contract pools (me_pap / me_top / me_sop)
+### Contract pools (me_top / me_sop; me_pap legacy alias)
 
-In **`me_pap.jl`**, **`me_top.jl`**, and **`me_sop.jl`**, two additional bilateral pools are cleared:
+Entry points **`me_top.jl`** and **`me_sop.jl`** (and legacy **`me_pap.jl`**) keep the five spot markets of `market_exposure.jl` and add two **bilateral hedge pools**. They share `ADMM_contracts.jl`, `contract_capacity.jl`, `contract_strike.jl`, and `contract_settlement.jl`. The only economic switch is HPA **volume mode**.
 
-| Script | Label | HPA volume | Results folder |
-|--------|-------|------------|----------------|
-| `me_pap.jl` | **ME PaP** | Pay-as-produced | `me_pap_results/` |
+| Script | Label | HPA volume in code | Results folder |
+|--------|-------|--------------------|----------------|
 | `me_top.jl` | **ME ToP** | Take-or-pay | `me_top_results/` |
 | `me_sop.jl` | **ME SoP** | Send-or-pay | `me_sop_results/` |
+| `me_pap.jl` | **ME PaP (legacy alias)** | Mapped to SoP (`HPA_VOLUME_MODE = "sop"`) | `me_pap_results/` |
 
-All three share the same agent roster and spot markets as `market_exposure.jl`, plus bilateral **PPA** and **HPA** pools cleared by ADMM (`ADMM_contracts.jl`).
+**PPA is always pay-as-produced** and identical in all three scripts. There is **no** distinct HPA pay-as-produced entry point: a pure HPA-PaP would be the energy CfD on $q$ with no ToP notional and no SoP penalty; `me_pap.jl` does **not** implement that (it aliases SoP so old run scripts keep working). Compare **ToP vs SoP** with `me_top.jl` vs `me_sop.jl`. The PaP algebra is still the nested energy leg of both HPA modes, and is the **entire** PPA.
 
-**PPAs are identical across all three entry points:** volume is always **pay-as-produced (PaP)**; price is a **scalar strike** $K^{\mathrm{PPA}}$ (€/MWh, uniform over all hours) derived from **negotiated** bilateral clearing at convergence.
-
-**HPAs differ by entry point** (volume only). Price structure and benchmark are configured in `data.yaml` → `PPAs` / `HPAs` (see [Price: λ versus K](#price-clearing-λ-versus-settlement-k) and [HPA price structure](#hpa-price-structure-datyaml--hpas)).
-
-| Market | Key | Description | Unit | Supply Side | Demand Side |
+| Market | Key | What is traded | Unit | Seller | Buyer |
 |---|---|---|---|---|---|
-| **PPA** | `ppa` | Bilateral VRES–GreenProducer electricity flow (bundled with `elec_GC`) | MWh | VRES (`g_ppa`) | GreenProducer (`g_ppa_from`) |
-| **HPA** | `hpa` | Bilateral GreenProducer–GreenOfftaker hydrogen flow (bundled with `H2_GC` equivalent) | MWh_H2 | GreenProducer (`h2_hpa`) | GreenOfftaker (`h2_hpa_from`) |
+| **PPA** | `ppa` | Hedge quantity (financial; pool power unchanged) | MWh | VRES `g_ppa` | GreenProducer `g_ppa_from` |
+| **HPA** | `hpa` | Hedge quantity (financial; pool H₂ unchanged) | MWh_H2 | GreenProducer `h2_hpa` | GreenOfftaker `h2_hpa_from` |
 
-- **Contract capacity** $C$: scalar MW ceiling on contract flow at each hour; **one shared value per bilateral link** (PPA per VRES, HPA per green producer), updated **outside** agent subproblems — see [How contract capacity is determined](#how-contract-capacity-is-determined).
-- **Contract energy** $q$: delivered MWh at each timestep (`g_ppa`, `h2_hpa`), cleared by bilateral $\lambda^{\mathrm{contract}}$; settled at strike $K$ (scalar €/MWh at convergence).
-- **PPA volume**: always pay-as-produced. **HPA volume**: pay-as-produced (`me_pap`), take-or-pay (`me_top`), or send-or-pay (`me_sop`).
+Three objects, never interchangeable:
 
-Each pool uses the same ADMM structure as spot markets for **energy**: bilateral imbalance must go to zero. **Capacity** $C$ is **not** chosen independently by buyer and seller; it follows the shared-capacity update in `Source/contract_capacity.jl`. ADMM details: §6.7.
+| Object | Role | In cash / CVaR? |
+|--------|------|-----------------|
+| $q_{h,d,y}$ | Hedge MW at each slot, matched by ADMM | Enters settlement |
+| $C$ | Scalar MW ceiling, **one shared value** per link | Enters ToP/SoP volume terms; PPA/PaP only as $q \le C$ |
+| $K$ | Scalar strike €/MWh, same every hour | Enters the CfD (and SoP penalty) |
+| $\lambda^{\mathrm{contract}}$ | ADMM dual on $q^{\mathrm{sell}}-q^{\mathrm{buy}}$ | **Algorithmic only** — not the strike |
+
+Spot sales remain at pool $\lambda$. The hedge does **not** carve MW out of $g^{\mathrm{EOM}}$ or $h^{\mathrm{out}}$. ADMM details: §6.7.
 
 #### Overview: real contracts vs this implementation
 
-In real bilateral PPAs/HPAs, two firms sign **one package** before operations:
+A real PPA/HPA is one package signed before operations: strike $K$, capacity $C$, and a volume rule (who pays when $q \neq C$). At **ADMM convergence** the model has the same three terms: one shared $C$ per link, one scalar $K$ every hour, and ToP or SoP on the HPA (PPA always PaP).
 
-| Term | Meaning in practice |
-|------|---------------------|
-| **Price** $K$ | Strike or index rule (€/MWh) — fixed for the contract life |
-| **Capacity** $C$ | Committed MW — same number for both parties |
-| **Volume rule** | PaP, ToP, or SoP — who pays when $q \neq C$ |
+There is **no** explicit individual-rationality constraint (“sign only if both beat autarky”). Uptake is **emergent**: hedge cash flows that improve private CVaR ($\gamma < 1$) can keep $C,q>0$; at $\gamma=1$ they typically collapse. That is the incomplete-risk-trading analogue of “no trade when agents are risk-neutral.”
 
-The model mirrors that structure:
+Hard physical rerouting (must-deliver slices taken out of the pool) is **not** modelled. That would change operational feasibility even at $\gamma=1$ and confound the hedge-motive test.
 
-- **One shared $C$** per link (`ADMM["SharedCap"]`), not two opposing optimiser variables.
-- **Scalar $K$** at convergence (uniform every hour), from negotiated clearing or an exogenous benchmark.
-- **Private CVaR** when $\gamma < 1$ — contracts can hedge **tail** cash flows, but there is **no** separate financial risk market (same incomplete risk trading as `market_exposure.jl`).
+#### Why financial CfDs (not $K\cdot q$ on top of spot)
 
-**What is not modelled explicitly:** a formal “sign only if both better off than no contract” (individual-rationality) constraint. Mutual acceptance is **emergent**: if dispatch at converged $(K,C)$ routes volume through the contract (especially when $\gamma < 1$), $C$ rises with utilisation; if the pool dominates (typical at $\gamma = 1$), $C \to 0$.
+Two representations appear in the literature:
+
+1. **Financial/hedging contracts** (typical in ADMM market-clearing). Reciprocity is $q^{\mathrm{sell}}=q^{\mathrm{buy}}$; cash is a settlement on that $q$. Risk-neutral agents then have little reason to keep $C>0$.
+2. **Physical-delivery contracts** (planning / games). The contract constrains dispatch, so $C>0$ can appear without risk aversion.
+
+This thesis uses (1), so $\gamma=1$ is a **sanity benchmark** (expect $C\approx 0$) and $\gamma<1$ isolates **tail-risk transfer**. References: Tushar et al., IEEE TPWRS 2020; Wang et al., PESGM 2019; Huang et al., PESGM 2021; Yadeta et al., arXiv 2025; Neumann et al., Applied Energy 2025 (ToP in hydrogen *planning*, not ADMM).
+
+**Why the floating leg is mandatory.** Pool sales already pay $\lambda^{\mathrm{spot}}\cdot q^{\mathrm{pool}}$. A hedge that *also* paid $K\cdot q$ with no float would be a free add-on to full spot revenue. ADMM then drives $K\to 0$ (or copies $\lambda^{\mathrm{contract}}\to 0$ into $K$), and risk-averse agents have nothing to hedge. The CfD $(K-\lambda^{\mathrm{spot}}_{\mathrm{bundle}})\cdot q$ offsets pool-price risk on the hedged slice. If $q$ equals physical pool volume on that commodity, net cash on the slice **locks at $K$**:
+
+$$
+\lambda^{\mathrm{spot}}\,q + (K-\lambda^{\mathrm{spot}})\,q = Kq.
+$$
+
+Copying $\lambda^{\mathrm{contract}}$ into $K$ was tried and rejected: that dual only matches quantities and is not an economic strike (it can sit near 0, or go negative, once $q$ matches).
+
+Temporary $q^{\mathrm{sell}}\neq q^{\mathrm{buy}}$ during ADMM is a trial point. At convergence the energy residual must clear. Low $q$ at a positive $C$ is “abuse” only if it contradicts the **chosen** volume rule (PaP pays on $q$; ToP is *meant* to pay on $C$).
 
 #### Price: clearing λ versus settlement K
 
-Three related objects appear in the code; keep them separate:
+| Object | Role | In private cash / CVaR? | When it moves |
+|--------|------|-------------------------|---------------|
+| $\lambda^{\mathrm{contract}}$ | ADMM dual on hedge-quantity imbalance (3D, like spot $\lambda$) | **No** — linear ADMM term + $(\rho/2)(q-\bar q)^2$ only | Dual ascent every iteration |
+| $K$ | Settlement strike (€/MWh), broadcast to all hours | **Yes** — CfD (and SoP penalty) | Provisional each iter; snapshotted at convergence |
+| $C$ | Shared MW ceiling per link | ToP/SoP volume terms; PPA only via $q\le C$ | Bargaining update after subproblems; snapshotted at convergence |
 
-| Object | Role | When it moves |
-|--------|------|----------------|
-| $\lambda^{\mathrm{contract}}$ | ADMM **clearing price** for contract **energy** imbalance (3D field, like spot $\lambda$) | Every ADMM iteration (dual ascent on supply − demand) |
-| $K$ | **Settlement strike** in agent cash flows (€/MWh, broadcast to all hours) | Each iteration: provisional $K$ from benchmark rule; **at convergence:** snapshotted scalar in `PPAs.csv` / `HPAs.csv` |
-| $C$ | **Shared contract capacity** (MW) | Each iteration: `update_shared_contract_capacity!`; **at convergence:** snapshotted scalar |
+**Default (`price_benchmark: negotiated`).** Let $W_{d,y}$ be representative-day weights and $n_{\mathrm{ts}}$ hours per day. The strike is the W-mean of bundled physical spot:
 
-**Default (`price_benchmark: negotiated`):** at convergence, $K$ equals the W-weighted mean of $\lambda^{\mathrm{contract}}$ over the horizon — “internally cleared” bilateral price. **Alternatives** in `data.yaml`: `electricity`, `ammonia`, `NG` (exogenous reference $B$); for HPAs also `price_structure: cfd` (fixed leg + index leg when $\gamma < 1$). PPAs always use negotiated clearing for $K^{\mathrm{PPA}}$.
+$$
+K = \frac{\sum_{y,d,h} W_{d,y}\,\lambda^{\mathrm{bundle}}_{h,d,y}}{\sum_{y,d} W_{d,y}\,n_{\mathrm{ts}}}.
+$$
 
-Agents **pay/receive** using $K$ in objectives; $\lambda^{\mathrm{contract}}$ drives ADMM toward $q^{\mathrm{supply}} = q^{\mathrm{demand}}$.
+PPA bundle: $\lambda^{\mathrm{elec}}+\lambda^{\mathrm{elecGC}}$. HPA bundle: $\lambda^{\mathrm{H2}}+\lambda^{\mathrm{H2GC}}$. That is the **fair** CfD index — the expected bundled pool price the hedge is written against. Yaml alternatives (`electricity`, `ammonia`, `NG`) replace the index with an exogenous field $B$; HPA `price_structure: cfd` floats vs $B$ instead of vs pool. **Do not** stack yaml `cfd` on top of the pool CfD. PPAs always use the bundled-spot strike.
 
-#### Risk neutrality versus risk aversion (γ)
+#### Risk neutrality versus risk aversion ($\gamma$)
 
-| Setting | Typical contract outcome | Interpretation |
-|---------|--------------------------|----------------|
-| **$\gamma = 1$** | $C \approx 0$, tiny or zero contract energy | Pool clearing is cheaper on **average**; no tail-risk motive → **no meaningful signing** (expected behaviour). |
-| **$\gamma < 1$** | $C > 0$ possible if bilateral flows improve **private CVaR** | Firms may **commit capacity** and **lock price** $K$ to hedge bad-scenario cash flows; compare PaP / ToP / SoP for who bears volume risk. |
+| Setting | Typical outcome | Interpretation |
+|---------|-----------------|----------------|
+| $\gamma=1$ | $C\approx 0$, tiny $q$ | No tail-risk motive ⇒ no hedge premium. |
+| $\gamma<1$ | $C>0$ possible | Private CVaR can value locking $K$ on a slice; ToP vs SoP changes **whose** tail moves. |
 
-Compare `PPAs.csv`, `HPAs.csv` (columns `capacity_contracted_MW`, `energy_transferred_MWh`, strike price) across $\gamma$ and entry points. Compare ME contract runs to `social_planner.jl` for **institutional** risk gaps (§4.8), not only price levels.
+Compare `PPAs.csv` / `HPAs.csv` across $\gamma$ and `me_top` vs `me_sop`. Compare to `social_planner.jl` for **institutional** risk gaps (§4.8), not only price levels.
 
-#### Contract terms: two time axes
-
-Agents enter bilateral contracts to **lock in a price and capacity** for bundled green inputs/outputs. Two axes must be kept separate:
+#### Two time axes
 
 | Axis | Behaviour |
 |---|---|
-| **ADMM iterations** | $\lambda^{\mathrm{contract}}$, provisional settlement strike $K$, and contracted capacity $C$ all **update each iteration** toward bilateral consensus (same as spot markets). |
-| **Hourly timesteps** $(h,d,y)$ | At **convergence**, strike $K$ and capacity $C$ are **scalars** — the same €/MWh and MW every hour for the contract duration. Flows $q$ vary by hour; $K$ and $C$ do not. |
+| **ADMM iterations** | $\lambda^{\mathrm{contract}}$, provisional $K$, and $C$ update every iteration. |
+| **Hours $(h,d,y)$** | At convergence, $K$ and $C$ are **scalars** (same €/MWh and MW every hour). Flows $q$ vary; $K$ and $C$ do not. |
 
-Implementation (`Source/contract_strike.jl`, `Source/contract_capacity.jl`):
-
-1. **Each ADMM iteration:** $\lambda^{\mathrm{contract}}$ dual-updates from energy imbalances; provisional $K$ = W-weighted mean of the configured benchmark field (broadcast to all hours); shared $C$ is **fixed** on both parties’ `ppa_cap` / `hpa_cap` (`apply_shared_contract_caps!`), then updated once per iteration (`update_shared_contract_capacity!`).
-2. **At convergence:** `finalize_contract_terms!` snapshots scalar $K^{\mathrm{PPA}}$, $K^{\mathrm{HPA}}$, $C^{\mathrm{PPA}}$, $C^{\mathrm{HPA}}$ into `ADMM["ContractStrikes"]` for CSV output and run summaries.
-
-There is **no mid-run freeze** of strikes or capacities at a fixed ADMM iteration.
+Each iteration: $\lambda^{\mathrm{contract}}$ dual-ascent on energy imbalance; $K$ refreshed as the W-mean above; $C$ **fixed** in both JuMP models (`apply_shared_contract_caps!`), then updated once from both cap shadows (`update_shared_contract_capacity!`). At termination, `finalize_contract_terms!` snapshots $K$ and $C$ into `ADMM["ContractStrikes"]`. There is **no mid-run freeze**.
 
 #### PPA — always pay-as-produced
 
-- **Seller:** VRES $i$ — splits generation $g_i = g^{\mathrm{EOM}}_i + g^{\mathrm{PPA}}_i$.
-- **Buyer:** Green producer — receives $g^{\mathrm{PPA}}_{i\leftarrow}$ from each VRES (bundled electricity + elec GC).
-- **Capacity:** scalar $C^{\mathrm{PPA}}_i$ (MW); hourly $g^{\mathrm{PPA}}_i \le C^{\mathrm{PPA}}_i$.
-- **Pool exclusion:** $g^{\mathrm{PPA}}$ is removed from electricity and elec-GC spot markets.
-
-Settlement at each $(h,d,y)$:
+**Seller** VRES $i$: physical pool $g^{\mathrm{EOM}}_{i,h,d,y}$; hedge $g^{\mathrm{PPA}}_{i,h,d,y}$. **Buyer** GreenProducer: hedge $g^{\mathrm{PPA}}_{i\leftarrow,h,d,y}$. Constraints (same $C_i$ on both sides):
 
 $$
-\text{Payment}_{i,h,d,y} = K^{\mathrm{PPA}}_i \cdot g^{\mathrm{PPA}}_{i,h,d,y}
+\begin{aligned}
+0 &\le g^{\mathrm{PPA}}_{i,h,d,y} \le C_i, \\
+g^{\mathrm{PPA}}_{i,h,d,y} &\le \mathrm{AF}_{i,h,d,y}\, x_i, \\
+0 &\le g^{\mathrm{PPA}}_{i\leftarrow,h,d,y} \le C_i, \\
+g^{\mathrm{PPA}}_{i\leftarrow,h,d,y} &\le e^{\mathrm{pool}}_{h,d,y}.
+\end{aligned}
 $$
 
-At convergence, $K^{\mathrm{PPA}}_i$ is the W-weighted mean of $\lambda^{\mathrm{PPA}}_{i,h,d,y}$ over the horizon (one scalar €/MWh, applied every hour).
+Availability $g\le \mathrm{AF}\,x$ is why solar hedges go to zero at night: PaP pays only on $q$, so unused $C$ is not billed. The electrolyzer bound $g^{\mathrm{PPA}}_{i\leftarrow}\le e^{\mathrm{pool}}$ keeps the hedge from exceeding physical intake; it does **not** reroute pool MW.
 
-#### HPA — three volume modes
-
-Bundled **H₂ + H₂-GC equivalent**; contract flow removed from pool H₂ / H₂-GC markets. Let $q_{h,d,y}$ be contract delivery (MW_H2), $C$ contracted capacity (MW_H2), $K$ scalar strike (€/MWh_H2, uniform over hours at convergence).
-
-**ME PaP (`me_pap.jl`) — pay-as-produced:**
+Let $\lambda^{\mathrm{el}}_{\mathrm{bundle}} = \lambda^{\mathrm{elec}}+\lambda^{\mathrm{elecGC}}$. Settlement (seller revenue = buyer cost):
 
 $$
-\pi^{\mathrm{buyer}} \mathrel{+}= K \cdot q_{h,d,y}, \qquad
-\pi^{\mathrm{seller}} \mathrel{+}= K \cdot q_{h,d,y}
+\pi^{\mathrm{PPA}}_{i,h,d,y} = \bigl(K^{\mathrm{PPA}}_i - \lambda^{\mathrm{el}}_{\mathrm{bundle},h,d,y}\bigr)\, g^{\mathrm{PPA}}_{i,h,d,y}.
 $$
 
-**ME ToP (`me_top.jl`) — take-or-pay:** buyer pays for at least $C$ MW_H2 each hour:
+$K^{\mathrm{PPA}}_i$ is the W-mean of $\lambda^{\mathrm{el}}_{\mathrm{bundle}}$ (one scalar). Bundling electricity + GC is required because the physical green electron is a **package** in this model (1:1 GO). Hedging only $\lambda^{\mathrm{elec}}$ would leave GC price risk unhedged.
+
+ADMM matches $g^{\mathrm{PPA}}_i = g^{\mathrm{PPA}}_{i\leftarrow}$ via $\lambda^{\mathrm{PPA}}_i$ (linear term **outside** CVaR) and $(\rho/2)(q-\bar q)^2$. That dual is **not** $K$.
+
+#### HPA — volume modes (equations)
+
+Hedge $q_{h,d,y}$ (MW_H2), shared ceiling $C$, strike $K$. Default floating index $\lambda^{\mathrm{H2}}_{\mathrm{bundle}} = \lambda^{\mathrm{H2}}+\lambda^{\mathrm{H2GC}}$. Yaml `cfd` replaces $\lambda^{\mathrm{H2}}_{\mathrm{bundle}}$ with benchmark $B_{h,d,y}$. Physical $h^{\mathrm{out}}$ stays in the H₂ / H₂-GC pools.
+
+**Energy CfD (nested in every HPA mode),** with notional $q^{\mathrm{pay}}$ defined below:
 
 $$
-q^{\mathrm{pay}}_{h,d,y} = \max\bigl(q_{h,d,y},\, C\bigr), \qquad
-\text{Payment}_{h,d,y} = K \cdot q^{\mathrm{pay}}_{h,d,y}
+\pi^{\mathrm{CfD}}_{h,d,y} = \bigl(K - \lambda^{\mathrm{H2}}_{\mathrm{bundle},h,d,y}\bigr)\, q^{\mathrm{pay}}_{h,d,y}.
 $$
 
-(with auxiliary $s_{h,d,y} \ge C - q_{h,d,y}$, $s \ge 0$ in the JuMP model).
+**Pay-as-produced (taxonomy; PPA uses this; not a distinct HPA entry point).** $q^{\mathrm{pay}}=q$. Cash moves only with delivery. $C$ is a rate limit, not a bill.
 
-**ME SoP (`me_sop.jl`) — send-or-pay:** seller penalised for under-delivery vs $\min(C, h^{\mathrm{out}}_{h,d,y})$:
+**Take-or-pay (`me_top.jl`) — 100% hourly ToP.** Auxiliary $s_{h,d,y}$ is forced to $C-q$ (lower *and* upper bound in JuMP, given $q\le C$):
 
 $$
-o_{h,d,y} = \min\bigl(C,\, h^{\mathrm{out}}_{h,d,y}\bigr), \qquad
-\pi^{\mathrm{seller}} \mathrel{+}= K \cdot q_{h,d,y} - K \cdot s_{h,d,y}, \quad s \ge o - q
+s_{h,d,y} = C - q_{h,d,y}, \qquad q^{\mathrm{pay}}_{h,d,y} = q_{h,d,y} + s_{h,d,y} = C.
 $$
 
-Buyer still pays PaP on received volume: $K \cdot q_{h,d,y}$.
+Buyer pays and seller receives $\pi^{\mathrm{CfD}}$ on **$C$ every hour**, even if $q\ll C$. This is the polar opposite of PaP: utilization risk sits on the offtaker. Commercial contracts often use a take-or-pay *rate* $\theta\in(0,1)$ on an annual quantity; $q^{\mathrm{pay}}=\max(q,\theta C)$ is a one-line extension. We implement $\theta=1$ hourly so ToP vs SoP is a clean qualitative contrast, not a calibrated $\theta$ sweep.
+
+**Send-or-pay (`me_sop.jl`, and `me_pap.jl`).** Buyer: $q^{\mathrm{pay}}=q$ (PaP energy CfD). Seller pays an extra strike-scaled shortfall:
+
+$$
+s_{h,d,y} = \max\bigl(0,\, C - q_{h,d,y}\bigr), \qquad
+\pi^{\mathrm{seller}} = \pi^{\mathrm{CfD}}(q) - K\, s_{h,d,y}.
+$$
+
+LP form (min-cost, $K$ typically $>0$ so the solver takes the smallest feasible $s$):
+
+$$
+s \ge C-q, \qquad 0 \le s \le C.
+$$
+
+The upper bound $s\le C$ is required: if $K$ goes slightly negative, an unbounded $s$ makes Gurobi return **0 solutions**. An auxiliary “obligation” $o\le\min(C,h^{\mathrm{out}})$ is **not** used: in a min-$s$ problem the solver sets $o=0$ (toothless SoP).
+
+**Why ToP and SoP are not symmetric in cash.** ToP scales the **CfD notional** to $C$ (price hedge on a reserved MW). SoP leaves the CfD on delivered $q$ and adds a **penalty** $Ks$ on the seller. They are not $K\cdot C$ vs $-K\cdot C$ with opposite signs on the same notional.
+
+#### Agent objective (contracts) — cash vs ADMM
+
+For a risk-aware contract agent the **private loss** that enters CVaR contains the CfD (and SoP $Ks$), **not** $\lambda^{\mathrm{contract}}\cdot q$. The ADMM matching terms sit **outside** CVaR, same as spot $\rho$ penalties:
+
+$$
+\begin{aligned}
+\min \quad
+&\gamma\Bigl(F^{\mathrm{cap}}x + \sum_y P_y \ell_y\Bigr) + (1-\gamma)\,\mathrm{CVaR}(\ell) \\
+&+ \sum \tfrac{\rho}{2} W (g-\bar g)^2
+- \sum W\,\lambda^{\mathrm{PPA}} g^{\mathrm{PPA}}
++ \cdots
+\end{aligned}
+$$
+
+(seller sign on $\lambda^{\mathrm{PPA}}g^{\mathrm{PPA}}$; buyer opposite). $\ell_y$ includes $\pm\pi^{\mathrm{CfD}}$ and, for SoP sellers, $+Ks$. At consensus the $\rho$ terms vanish; $\lambda^{\mathrm{contract}}$ is an algorithm dual, not a tariff.
+
+Shared $C$ is **JuMP-fixed** in the subproblem. Agents do not pick a private $C_s$/$C_b$. The cap dual of $q\le C$ (and the reduced cost of the fixed cap) is read **after** `optimize!` to vote on expanding $C$.
 
 #### Risk allocation — who bears what?
 
-All contract cases share the same **price hedge** at convergence: strike $K$ is a scalar applied every hour, so bilateral energy settled at $K$ is insulated from hourly spot swings on the pool markets (`λ_elec`, `λ_H2`, `λ_EP`, etc.). **Contract capacity** $C$ is a negotiated MW ceiling on the bilateral pipe in every entry point; there is **no separate €/MW capacity tariff** cleared by ADMM. What differs by volume mode is **who bears utilization, production, and volume risk** when delivery $q$ is below $C$ or when spot prices move differently from $K$.
+All contract cases share the same **price hedge** at convergence: strike $K$ is a scalar applied every hour, and the CfD $(K-\lambda^{\mathrm{spot}}_{\mathrm{bundle}})\cdot q$ offsets pool-price swings on the hedged slice. **Contract capacity** $C$ is a negotiated MW ceiling on the bilateral pipe in every entry point; there is **no separate €/MW capacity tariff** cleared by ADMM. What differs by volume mode is **who bears utilization, production, and volume risk** when delivery $q$ is below $C$.
 
 **Shared risks (all `me_pap` / `me_top` / `me_sop`):**
 
@@ -269,35 +321,30 @@ All contract cases share the same **price hedge** at convergence: strike $K$ is 
 
 | Party | Settlement | Main volume / utilization risk |
 |-------|--------------|--------------------------------|
-| **VRES (seller)** | Receives $K^{\mathrm{PPA}} \cdot g^{\mathrm{PPA}}$ | **Production risk:** revenue scales with renewable output; zero output ⇒ zero PPA revenue. $C^{\mathrm{PPA}}$ caps how much can be sold on the contract, but **unused headroom is not paid**. |
-| **Green producer (buyer)** | Pays $K^{\mathrm{PPA}} \cdot g^{\mathrm{PPA}}$ | **Input cost risk:** pays only for MWh received; if VRES delivers little, PPA bill is low but the plant may need costlier pool electricity. No minimum offtake on the PPA leg. |
+| **VRES (seller)** | Receives $(K^{\mathrm{PPA}} - \lambda^{\mathrm{elec}} - \lambda^{\mathrm{elecGC}}) \cdot g^{\mathrm{PPA}}$ | **Production risk:** hedge volume scales with renewable output; zero output ⇒ zero PPA cash. $C^{\mathrm{PPA}}$ caps how much can be hedged, but **unused headroom is not paid**. |
+| **Green producer (buyer)** | Pays $(K^{\mathrm{PPA}} - \lambda^{\mathrm{elec}} - \lambda^{\mathrm{elecGC}}) \cdot g^{\mathrm{PPA}}$ | **Input cost risk:** hedge only covers MWh contracted; if VRES delivers little, PPA cash is small but the plant still buys pool electricity. No minimum offtake on the PPA leg. |
 
-PPA shifts **renewable volume risk** to the VRES and **procurement / conversion risk** to the electrolyzer, while **locking the green-electricity price** at $K^{\mathrm{PPA}}$ for whatever is delivered.
+PPA shifts **renewable volume risk** to the VRES and **procurement / conversion risk** to the electrolyzer, while **locking the green-electricity price** at $K^{\mathrm{PPA}}$ on the hedged slice (full lock when $q$ equals physical pool volume).
 
-**HPA — pay-as-produced (`me_pap.jl`):**
+**HPA — pay-as-produced (taxonomy; not a current HPA entry point):**
 
-| Party | Settlement | Main volume / utilization risk |
-|-------|--------------|--------------------------------|
-| **Green producer (seller)** | Receives $K \cdot q$ | **Production / dispatch risk:** revenue follows actual $q$; idle hours yield no contract revenue. Must still recover fixed H₂ CAPEX from total margins. |
-| **Green offtaker (buyer)** | Pays $K \cdot q$ | **Uptake / sourcing risk:** pays only for MWh taken; if $q = 0$, no HPA energy bill—but must meet EP demand and GC rules from pool H₂ or curtail. **No penalty** for “under-using” contracted capacity $C$. |
-
-PaP is the **neutral** volume mode: $C$ is a **rate limit**, not a minimum payment. Risk is symmetric in the sense that **cash flows only move with physical delivery**.
+$C$ is a **rate limit**, not a bill. Cash follows $q$ only. PPA is this mode. `me_pap.jl` does **not** run HPA-PaP (it aliases SoP).
 
 **HPA — take-or-pay (`me_top.jl`):**
 
 | Party | Settlement | Main volume / utilization risk |
 |-------|--------------|--------------------------------|
-| **Green offtaker (buyer)** | Pays $K \cdot \max(q, C) = K \cdot C$ when $q \le C$ | **Minimum offtake / utilization risk:** pays for contracted MW each hour even when $q \ll C$ (e.g. electrolyzer down). Cannot avoid the bill by taking pool H₂ instead for that contractual slice. |
-| **Green producer (seller)** | Receives $K \cdot \max(q, C)$ | **Revenue floor:** receives at least $K \cdot C$ per hour while $q \le C$; production above $C$ is capped by $q \le C$ on the contract leg. |
+| **Green offtaker (buyer)** | Pays $(K - \lambda^{\mathrm{H2}}_{\mathrm{bundle}})\cdot C$ every hour ($q^{\mathrm{pay}}=C$) | **Minimum offtake:** CfD notional is contracted MW even when $q\ll C$. |
+| **Green producer (seller)** | Receives the same | **Revenue floor** on the hedge notional; $q\le C$ still caps the contract leg. |
 
-ToP **shifts volume / utilization risk from seller to buyer**: the offtaker guarantees a **financial minimum** at the contracted rate, analogous to paying for reserved pipeline capacity at energy price $K$. This differs from PaP, where low $q$ implies low payment—not because $C$ is absent, but because $C$ does not enter the settlement formula.
+ToP shifts utilization risk to the **buyer** (reserved-capacity economics). Code uses 100% hourly ToP ($q^{\mathrm{pay}}=C$), not $\max(q,C)$ with slack, because the auxiliary is equality-constrained to $C-q$.
 
-**HPA — send-or-pay (`me_sop.jl`):**
+**HPA — send-or-pay (`me_sop.jl` and `me_pap.jl`):**
 
 | Party | Settlement | Main volume / utilization risk |
 |-------|--------------|--------------------------------|
-| **Green offtaker (buyer)** | Pays $K \cdot q$ (PaP on delivery) | Same delivery-linked payment as PaP; **no** minimum offtake premium. |
-| **Green producer (seller)** | Receives $K \cdot q - K \cdot s$, with shortfall $s \ge \min(C, h^{\mathrm{out}}) - q$ | **Delivery / availability risk:** penalised when capable output exceeds contract delivery (under-shipping vs obligation $o = \min(C, h^{\mathrm{out}})$). |
+| **Green offtaker (buyer)** | Pays $(K - \lambda^{\mathrm{H2}}_{\mathrm{bundle}}) \cdot q$ | Same delivery-linked CfD as PaP; **no** minimum offtake premium. |
+| **Green producer (seller)** | Receives $(K - \lambda^{\mathrm{H2}}_{\mathrm{bundle}}) \cdot q - K \cdot s$, with shortfall $s = \max(0, C - q)$ | **Delivery risk:** penalised $K \cdot s$ when contract quantity is below contracted capacity $C$. |
 
 SoP **shifts delivery risk to the producer**: the buyer is not forced to pay for undelivered molecules, but the seller pays a **strike-scaled penalty** when it could have delivered more under the contract.
 
@@ -307,104 +354,127 @@ SoP **shifts delivery risk to the producer**: the buyer is not forced to pay for
                     Volume / utilization risk borne mainly by
                  Buyer (offtaker)          Seller (producer)
               ┌─────────────────────┬─────────────────────┐
-   me_pap     │  sourcing if q low  │  revenue if q low   │
-   me_top     │  pays K·C if q < C  │  floor K·C if q < C │
-   me_sop     │  PaP on q only      │  penalty if under-deliver │
+   HPA PaP    │  sourcing if q low  │  revenue if q low   │  (taxonomy; PPA only)
+   me_top     │  CfD notional = C   │  floor notional C   │
+   me_sop     │  CfD on q only      │  + K·s if q < C     │  (me_pap aliases this)
               └─────────────────────┴─────────────────────┘
 ```
 
-**Relation to $\gamma < 1$:** At $\gamma = 1$, agents are risk-neutral and the table above is the full **average-cost** story — contracts are usually unused ($C \to 0$). At $\gamma < 1$, each agent’s **private CVaR** weights bad scenarios; bilateral cash flows at fixed $K$ and shared $C$ can **reduce tail loss**, so you may see **$C > 0$** and positive contract energy when hedging dominates. Volume modes change **which cash-flow tail** (buyer’s ToP bill vs seller’s SoP penalty vs PaP variability) enters whose CVaR. CfD (`HPAs.price_structure: cfd`) splits fixed vs benchmark-index legs for HPA when $\gamma < 1$. The social planner (`social_planner.jl`) still represents **complete** risk pooling — compare ME contract runs against SP for institutional gaps (§4.8), not only against `me_pap` at $\gamma = 1$.
+**Relation to $\gamma < 1$:** At $\gamma = 1$ the table is an average-cost story and $C\to 0$ is expected. At $\gamma < 1$, private CVaR can support $C>0$. Compare `me_top` vs `me_sop` (not `me_pap` as a third HPA mode). The planner remains **complete** risk pooling (§4.8).
 
 #### HPA price structure (`data.yaml` → `HPAs`)
 
-**Fixed price (default):** $\text{Settlement}_{h,d,y} = K \cdot q^{\mathrm{pay}}_{h,d,y}$ where $q^{\mathrm{pay}}$ is $q$ (PaP/SoP buyer), $\max(q,C)$ (ToP), etc. $K$ is a scalar €/MWh (uniform over hours) set at convergence from the chosen benchmark.
+**Fixed price (default):** $\pi^{\mathrm{CfD}}=(K-\lambda^{\mathrm{H2}}_{\mathrm{bundle}})q^{\mathrm{pay}}$ with $q^{\mathrm{pay}}=q$ (SoP buyer) or $q^{\mathrm{pay}}=C$ (ToP). $K$ is the W-mean of bundled H₂+H₂-GC spot when `price_benchmark: negotiated`.
 
-**CfD (contract for difference):** strike $K$ remains a scalar; settlement decomposes into reference leg $B_{h,d,y} \cdot q^{\mathrm{pay}}$ plus difference $(K - B_{h,d,y}) \cdot q^{\mathrm{pay}} = K \cdot q^{\mathrm{pay}}$ algebraically, but $B_{h,d,y}$ follows the selected benchmark while $K$ stays constant across hours — relevant when $\gamma < 1$. Set `HPAs.price_structure: cfd`.
+**Yaml `cfd`:** float vs benchmark field $B$ instead of vs pool: $(K - B_{h,d,y}) \cdot q^{\mathrm{pay}}$. Set `HPAs.price_structure: cfd`. Do **not** stack this on top of the pool CfD.
 
 | `price_benchmark` | Field $B$ at convergence | Source in model |
 |-------------------|----------------------|-----------------|
-| `negotiated` | $\lambda^{\mathrm{HPA}}$ | Bilateral ADMM clearing (default) |
+| `negotiated` | bundled $\lambda^{\mathrm{H2}}+\lambda^{\mathrm{H2GC}}$ | Physical H₂ + H₂-GC spot (default CfD index) |
 | `electricity` | $\lambda^{\mathrm{elec}}$ | Electricity spot |
 | `ammonia` | $\lambda^{\mathrm{EP}}$ | End-product / ammonia pool |
 | `NG` | Grey-chain proxy | Grey ammonia MC ÷ `Alpha` → €/MWh_H2, derived from the `Fuel` block at the **mean** gas multiplier (§9.8) |
 
-At convergence: $K^{\mathrm{HPA}} = \text{W-weighted mean of } B$ over the horizon (scalar, uniform over hours).
+At convergence: $K^{\mathrm{HPA}} = \text{W-weighted mean of the strike index}$ over the horizon (scalar, uniform over hours).
 
 #### How contract capacity is determined
 
-There is **no separate capacity price** (no $\lambda$ for MW commitment). Each bilateral link has **one shared scalar** $C$ (MW):
+$C$ is a **single shared scalar** per link (`ADMM["SharedCap"]`), JuMP-**fixed** on both parties (`apply_shared_contract_caps!`), then updated **outside** the subproblems. `me_top`, `me_sop`, and `me_pap` share this update; only HPA settlement differs.
 
-| Pool | Storage key | Parties |
-|------|-------------|---------|
-| PPA (per VRES) | `ADMM["SharedCap"]["ppa"][vres_id]` | VRES seller ↔ green producer buyer |
-| HPA (per H₂ producer) | `ADMM["SharedCap"]["hpa"][h2_id]` | green producer seller ↔ green offtaker buyer |
+##### Why not two-party ADMM on $C$
 
-**Design rationale.** Real contracts specify **one** capacity both parties accept. An earlier formulation let each agent optimise its own `ppa_cap` / `hpa_cap` with ADMM penalties; under take-or-pay that produced a spurious buyer-vs-seller fight ($C \to 0$ vs $C \to \max$) and ADMM non-convergence. The shared-$C$ design applies to **all three entry points** (`me_pap`, `me_top`, `me_sop`).
+Letting each side pick $C_s$ and $C_b$ and matching them like energy **failed**. Under ToP the buyer’s cash is increasing in $C$ (pays on $C$), so the buyer’s local problem drives $C_b\to 0$ while the seller drives $C_s$ up. The “consensus” $C$ then oscillates or collapses. Energy $q$ is a flow with opposite signs in a market-clearing constraint; $C$ is a **common parameter** of both settlements. A parameter that one party wants large and the other small is not a Boyd equality split.
 
-**1. Agents take $C$ as given**
+##### Why not infer $C$ from $q$
 
-`ppa_cap` / `hpa_cap` remain JuMP variables but are **fixed** before each agent solve (`fix(cap, C)` in `apply_shared_contract_caps!`). Constraints $q_{h,d,y} \le C$ and settlement (PaP / ToP / SoP) use that value. Neither party optimises $C$ in its subproblem.
+Observed $q$ is **censored** by $q\le C$. If the pipe is binding, $q^{\mathrm{peak}}\approx C$ whether the desired pipe is $C$ or $10C$. Energy imbalance is also uninformative: when both are rationed at the same $C$, $q^{\mathrm{sell}}-q^{\mathrm{buy}}=0$ even though both want more MW. The correct signal is the **shadow** of $q\le C$ (W-weighted positive dual $\mu$) and/or the reduced cost of the fixed cap (min problem: $\mathrm{RC}<0$ ⇒ raising $C$ helps).
 
-**2. Consensus / bargaining step (outside subproblems)**
+Party $i$ **wants more** if $\max(\mu_i, -\mathrm{RC}_i) > \texttt{dual\_tol}$. Expand only if **both** available duals vote yes (unanimous consent). If duals are missing, a conservative fallback requires both sides to be using the full slice ($q_s\approx q_d\approx C$).
 
-After each ADMM iteration, `update_shared_contract_capacity!` (`Source/contract_capacity.jl`) sets:
+##### Expand, hold, idle snap
+
+$q$ cannot jump in the same iteration $C$ jumps (agents solve with $C$ fixed). So:
+
+- **Expand** only after `up_confirm_iters` consecutive unanimous votes (default 3) — ignore one noisy dual.
+- **Hold** when they stop asking for more. Do **not** set $C^{\mathrm{target}}=0$ on a “no” vote: that bang-bangs (expand 8.75 MW, then shrink to 0, then bind again) and never settles.
+- **Idle snap to 0** only if mean mutual utilisation $\mathrm{mean}(\min(q_s,q_d))/C \le 2\%$ for 3 iterations. That is the risk-neutral unused-pipe outcome, not a default shrink.
+
+Do not trim unused headroom toward $q^{\mathrm{peak}}$ every non-expand iteration: after an expand, $q$ needs several ADMM steps to fill the new pipe; trimming immediately undoes the expand.
+
+##### Step size (why not 8.75 MW)
+
+A damped additive crawl
 
 $$
-C^{\mathrm{target}} = \begin{cases}
-\min\bigl(C_{\mathrm{phys}},\, C + \eta_{\uparrow}\,|\overline{\mathrm{imb}}|\bigr) & \text{if cap binds and energy imbalance wants more volume} \\
-q^{\mathrm{peak}} & \text{otherwise}
-\end{cases}
-\qquad
-C^{k+1} = (1-\tau)\, C^{k} + \tau\, C^{\mathrm{target}}
+C \leftarrow (1-\tau)C + \tau(C+\eta) = C + \tau\eta
 $$
 
-where $q^{\mathrm{peak}} = \max_{h,d,y}(\text{contract supply}, \text{contract demand})$, $\overline{\mathrm{imb}}$ is mean energy imbalance on that link, $C_{\mathrm{phys}}$ is the minimum of relevant plant caps, and $(\tau, \eta_{\uparrow})$ come from `ADMM.contract_cap` in `data.yaml` (defaults: `relaxation: 0.35`, `expand_step: 2.0`).
+with $\tau=0.35$, $\eta=25$ MW produced **8.75 MW** steps. That is not an economic quantity. The physical bottleneck is the **smaller plant**, not the 55 GW VRES fleet:
 
-**Intuition:** $C$ tracks **utilised** bilateral intent. No flow and no hedge motive → $C \to 0$. Sustained contract dispatch → $C$ rises toward $q^{\mathrm{peak}}$ (capped physically).
+$$
+C^{\mathrm{PPA}}_{\mathrm{phys}} = \min\bigl(x^{\mathrm{VRES}},\, x^{\mathrm{H2}}/\eta\bigr), \qquad
+C^{\mathrm{HPA}}_{\mathrm{phys}} = \min\bigl(x^{\mathrm{H2}},\, x^{\mathrm{EP}}/\alpha\bigr).
+$$
 
-**3. Convergence and reporting**
+Those are $\sim 1$ GW in the NL calibration. An 8.75 MW crawl cannot reach that scale before shadows drop, so equilibrium $C$ was a token of tens of MW **because of the step**, not because of preferences.
 
-Cap residuals monitor **alignment** $|C - q^{\mathrm{peak}}|$ (primal) and **stability** $|C^{k} - C^{k-1}|$ (dual). Contract **energy** clears via $\lambda^{\mathrm{contract}}$; **price** $K$ follows benchmark rules in [Price: λ versus K](#price-clearing-λ-versus-settlement-k).
+Sizing $\Delta C$ on dual *magnitude* ($\Delta C \propto \min(\mu_s,\mu_b)$) would mix €/MW-year into MW and needs an arbitrary scale. Duals already **vote**. Geometry of the known feasible set sets the **step**:
 
-History: `results["shared_ppa_cap"]`, `results["shared_hpa_cap"]`. At convergence, `finalize_contract_terms!` → `PPAs.csv` / `HPAs.csv` column `capacity_contracted_MW`.
+$$
+\Delta C = \min\Bigl( C_{\mathrm{phys}}-C,\; \max(\eta_{\min},\, \phi\,(C_{\mathrm{phys}}-C)),\; \eta_{\max} \Bigr),
+$$
+
+with shipped $\eta_{\min}=25$, $\phi=0.2$, $\eta_{\max}=500$ (`expand_step`, `expand_frac`, `expand_max`). Applied **undamped** so yaml knobs mean what they say. Interpretation: each confirmed expand takes 20% of remaining headroom (at least 25 MW, at most 500 MW) toward the physical cap — a damped Newton step on a scalar with a known upper bound. $\eta_{\max}$ stops one iterate from swallowing the whole electrolyzer before counterparties re-solve.
+
+##### Residuals and stopping
+
+| Residual | Definition | Why |
+|----------|------------|-----|
+| Energy primal/dual | Boyd on $q^{\mathrm{sell}}-q^{\mathrm{buy}}$ | Same as spot markets |
+| Cap primal | $|C-q^{\mathrm{peak}}|$ | Diagnostic of unused headroom; **not** a two-party $C_s-C_b$ |
+| Cap dual | $|C^k-C^{k-1}|$ | $C$ must stop moving |
+
+`shared_contract_capacity_settled` is **fail-closed**: $|C^k-C^{k-1}|\le \texttt{settle\_tol}$ for `settle_iters` consecutive iterations, not currently expanding, no pending expand vote. Holding a used $C$ is settled. Flow residuals alone must not stop the loop while $C$ is still crawling (that was a fake 7-iter “converged”).
+
+`finalize_contract_terms!` writes $C$ to `PPAs.csv` / `HPAs.csv`.
 
 #### One ADMM iteration (contracts case)
 
 ```text
 For iteration k = 1, 2, …
-  1. Fix shared C^k on all contract parties (apply_shared_contract_caps!)
-  2. Update ḡ, λ, provisional K, z_cap; solve all subproblems (Gurobi)
-  3. Record contract energy q; compute energy imbalances
-  4. Update shared C^{k+1} (update_shared_contract_capacity!)
-  5. Compute residuals; update λ^{k+1}; adapt ρ (update_rho_contracts!)
-  6. Test convergence (energy + cap alignment + physical capacity + spot markets)
-After loop: finalize_contract_terms! → scalar K, C for reporting
+  1. Refresh ḡ, spot λ, provisional K; fix shared C; solve all subproblems
+  2. Record hedge q (not private C_s / C_b)
+  3. Spot + contract energy imbalances; Boyd residuals
+  4. update_shared_contract_capacity! (shadow vote → expand / hold / idle snap)
+  5. Dual-ascent λ_contract; adapt ρ (spot then contracts)
+  6. Stop only if spot + q + physical cap + C-settled all pass
+After loop: finalize_contract_terms! → scalar K, C
 ```
 
 #### Contract implementation files
 
 | File | Role |
 |------|------|
-| `Source/contract_strike.jl` | Benchmarks, per-iteration $K$ refresh, `finalize_contract_terms!` |
-| `Source/contract_capacity.jl` | Shared $C$ init, bargaining update, fix caps before agent solves |
-| `Source/contract_settlement.jl` | PaP / ToP / SoP payment terms |
-| `Source/ADMM_contracts.jl` | Main loop; shared-cap update; `finalize_contract_terms!` after ADMM |
-| `Source/ADMM_subroutine_contracts.jl` | Per-agent $\bar g$, $\lambda$, $K$, $B$ refresh; apply fixed $C$ |
+| `Source/contract_strike.jl` | $K$ as W-mean of bundled spot (not $\lambda^{\mathrm{contract}}$); `finalize_contract_terms!` |
+| `Source/contract_capacity.jl` | Shared $C$: init, JuMP fix, bargaining update, settle test |
+| `Source/contract_settlement.jl` | PPA CfD; HPA ToP / SoP LP forms |
+| `Source/ADMM_contracts.jl` | Loop; energy residuals; $C$ update; stop test |
+| `Source/ADMM_subroutine_contracts.jl` | Per-agent $\bar q$, $\lambda^{\mathrm{contract}}$, $K$; `apply_shared_contract_caps!` |
 
-During ADMM, $\lambda^{\mathrm{PPA/HPA}}$ and provisional $K$ update every iteration. At convergence, `ADMM["ContractStrikes"]` holds scalar $K$ and $C$ for reporting.
+At convergence `ADMM["ContractStrikes"]` holds scalar $K$ and $C$ for reporting.
 
 #### Recommended workflow
 
 1. Run `social_planner.jl` (equilibrium benchmark).
 2. Run `market_exposure.jl` (uncontracted ME).
-3. Run `me_pap.jl`, `me_top.jl`, and/or `me_sop.jl` with the same `data.yaml` (SP warm-start for λ, primals, capacities).
+3. Run `me_top.jl` and/or `me_sop.jl` with the same `data.yaml` (SP warm-start). `me_pap.jl` is a SoP alias.
 
 **Suggested comparisons:**
 
 | Question | What to run / read |
 |----------|-------------------|
-| Pool vs contracts at $\gamma=1$ | `market_exposure.jl` vs `me_pap.jl`; expect $C \approx 0$ |
-| PaP vs ToP vs SoP volume risk | Same $\gamma$, three entry points; `HPAs.csv` + §2 *Risk allocation* |
+| Pool vs contracts at $\gamma=1$ | `market_exposure.jl` vs `me_sop.jl`; expect $C \approx 0$ |
+| ToP vs SoP volume risk | Same $\gamma$; `me_top.jl` vs `me_sop.jl`; `HPAs.csv` + §2 *Risk allocation* |
 | Hedging with contracts | $\gamma=0.5$, sweep `beta`; check $C>0$ and contract energy |
 | Institution vs SP | `social_planner.jl` vs ME contract case; `Risk_Metrics.csv` |
 
@@ -420,8 +490,8 @@ The markets are coupled through the **electrolyzer**, which sits at the nexus:
 The **end-product market** is coupled to H2 and `H2_GC` through the offtakers, who convert hydrogen into the end product and must comply with the GC mandate.
 
 In the **contracts case**:
-- PPA couples VRES and GreenProducer: VRES splits generation `g_EOM + g_ppa`, and GreenProducer uses `e_in_pool + g_ppa_from`.
-- HPA couples GreenProducer and GreenOfftaker: GreenProducer splits hydrogen pool sale vs contract (`h2_out - h2_hpa` to pool, `h2_hpa` to contract).
+- PPA couples VRES and GreenProducer: VRES sells `g_EOM` to the pool and holds hedge `g_ppa`; GreenProducer buys pool power `e_in_pool` and hedge `g_ppa_from`.
+- HPA couples GreenProducer and GreenOfftaker: GreenProducer sells physical `h2_out` to the pool and holds hedge `h2_hpa`.
 
 ---
 
@@ -431,21 +501,23 @@ In the **contracts case**:
 
 | Agent | Type | Description |
 |---|---|---|
-| `Gen_VRES_01` | `VRES` | Variable renewable (e.g. solar). Zero marginal cost. Produces both electricity and elec GCs (1:1). Constrained by hourly availability factor × **endogenous capacity**. Makes **one** installed-capacity and investment decision (`cap_VRES`, `inv_VRES`), incurring fixed annualised CAPEX `FixedCost_per_MW × cap_VRES` (same capacity in all weather scenarios). In contract entry points: splits generation into `g_EOM` (pool) and `g_ppa` (PPA); `g_ppa ≤ ppa_cap` where `ppa_cap` is the **shared** scalar $C^{\mathrm{PPA}}$ fixed each ADMM iteration; settlement at $K^{\mathrm{PPA}} \times g^{\mathrm{PPA}}$ (PaP). |
-| `Gen_Conv_01` | `Conventional` | Dispatchable thermal fleet proxy. Constant availability (AF = 1). Uses a 3-stage increasing marginal-cost curve (coal-like, biomass-like, NG-like blocks) with configurable stage shares, stage-start marginal costs, and a final high-load marginal cost. No GC production. |
+| `Gen_VRES_01` | `VRES` | Variable renewable (e.g. solar). Zero marginal cost. Produces both electricity and elec GCs (1:1). Constrained by hourly availability factor × **endogenous capacity**. Makes **one** installed-capacity and investment decision (`cap_VRES`, `inv_VRES`), incurring fixed annualised CAPEX `FixedCost_per_MW × cap_VRES` (same capacity in all weather scenarios). In contract entry points: physical pool dispatch `g_EOM ≤ AF × cap`; hedge `g_ppa ≤ ppa_cap` with shared scalar $C^{\mathrm{PPA}}$; CfD settlement $(K^{\mathrm{PPA}} - \lambda^{\mathrm{elec}} - \lambda^{\mathrm{elecGC}}) \times g^{\mathrm{PPA}}$. |
+| `Gen_Conv_CCGT` | `Conventional` | CCGT block (14,040 MW). Constant availability (AF = 1). Flat SRMC from `Fuel` block; gas-linked across scenarios. No GC production. |
+| `Gen_Conv_Coal` | `Conventional` | Hard-coal block (1,800 MW). Flat SRMC; unaffected by gas-price scenarios. |
+| `Gen_Conv_Biomass` | `Conventional` | Biomass block (2,160 MW). Flat SRMC; ETS zero-rated fuel. Merit order among the three emerges from market clearing rather than an enforced stage stack. |
 | `Cons_Elec_01` | `Consumer` | Elastic electricity demand. Quadratic utility `U(d) = A_E·d − ½B_E·d²` gives inverse demand `p(d) = A_E − B_E·d`. Bounded by `PeakLoad × load_profile`. |
 
 ### 3.2 Hydrogen-Sector Agent
 
 | Agent | Type | Description |
 |---|---|---|
-| `Prod_H2_Green` | `GreenProducer` | PEM electrolyzer with **endogenous H₂ output capacity**. Converts electricity to H₂ with efficiency `η = 1/SpecificConsumption`. Buys elec + elec GCs; sells H₂ + H₂ GCs. Annual green-backing constraint ensures GCs purchased ≥ `(1/η) × GCs issued`. Makes **one** H₂ capacity and investment decision (`cap_H2_y`, `inv_cap_H2`), incurring fixed annualised CAPEX `FixedCost_per_MW_Electrolyzer × cap_H2_y`. In contract entry points: receives `g_ppa_from` (PPA, settlement $K^{\mathrm{PPA}}$) and buys `e_in_pool`; sells `h2_hpa` under HPA (`h2_hpa ≤ hpa_cap` with shared $C^{\mathrm{HPA}}$; settlement at $K^{\mathrm{HPA}}$ per volume mode of the entry point). |
+| `Prod_H2_Green` | `GreenProducer` | PEM electrolyzer. **IEA nameplate is electrical input** (`Capacity_Electrolyzer`, MW_e). Implied H₂ output = MW_e / `SpecificConsumption`. Endogenous JuMP variable `cap_H2_y` is H₂ output; annualised CAPEX is `FixedCost_per_MW_Electrolyzer × SpecificConsumption × cap_H2_y` so the IEA €/MW_e figure is applied to electrical MW. Buys elec + elec GCs; sells H₂ + H₂ GCs. Annual green-backing: GCs purchased ≥ `(1/η) ×` GCs issued. In contract entry points: receives `g_ppa_from` (PPA) and sells `h2_hpa` under HPA. |
 
 ### 3.3 Offtaker Agents
 
 | Agent | Type | Description |
 |---|---|---|
-| `Offtaker_Green` | `GreenOfftaker` | Buys green H₂ and converts it to end product via `Alpha` (MWh_EP per MWh_H₂; default 0.75 — **not** 1:1). Must buy H₂ GCs for ≥ 42% of **H₂ intake** (annual mandate `gamma_GC = 0.42` on `h2_in`, not on EP). Tight stoichiometric link: `ep = α × h2_in`. Has **endogenous EP output capacity** `cap_EP_y` (scalar, non-anticipative) with investment `inv_EP` and fixed annualised CAPEX `FixedCost_per_MW_EP_Out × cap_EP_y`. In contract entry points, buys `h2_hpa_from` under HPA (shared $C^{\mathrm{HPA}}$; settlement $K^{\mathrm{HPA}}$ per volume mode) in addition to pool H₂. |
+| `Offtaker_Green` | `GreenOfftaker` | Haber–Bosch plant. **Nameplate is ammonia product output** (`Capacity_EP_Out`, MW_EP / t NH₃-yr), not H₂ feed. H₂ intake = `ep / Alpha`. Tight link `ep = α × h2_in`. Endogenous `cap_EP_y` with CAPEX `FixedCost_per_MW_EP_Out × cap_EP_y` (synthesis + ASU, excluding the electrolyzer). GC mandate 42% of H₂ intake. |
 | `Offtaker_Grey` | `GreyOfftaker` | Produces EP from conventional (grey, SMR) feedstock at a **scenario-dependent** marginal cost `MC[jy]` derived from the gas and CO₂ prices (§9.8). Does **not** buy physical H₂; its H₂ feedstock is inferred as `ep / gamma_NH3` (`gamma_NH3` = MWh_EP per MWh_H₂, default 0.75). Must buy H₂ GCs for ≥ `gamma_GC × (1/gamma_NH3) × ep` — i.e. ≥ 42% of the **implied H₂ feedstock**. |
 | `Offtaker_Import` | `EPImporter` | Imports EP from outside the system at `ImportCost`. No H₂ or GC involvement. Acts as a price cap on the EP market. |
 
@@ -582,8 +654,8 @@ $$
 $$
 
 - **VRES:** $\mathrm{VC} \approx 0$; revenue from elec + elec_GC; CAPEX on `cap_VRES`.
-- **Conventional:** convex **staged** variable cost (piecewise-quadratic stack) — aggregate merit-order approximation.
-- **Electrolyzer:** buys elec + elec_GC; sells H₂ + H₂_GC; pays OPEX; CAPEX on H₂ capacity; **green-backing** links GC purchases to H₂ GC issuance.
+- **Conventional:** flat variable cost `MC[y] × g` per plant (or legacy convex **staged** stack when `StageTechnologies` is set) — merit order via market price when using flat plants.
+- **Electrolyzer:** buys elec + elec_GC; sells H₂ + H₂_GC; pays OPEX; CAPEX on electrical MW (IEA kWe, converted onto H₂-side capacity); **green-backing** links GC purchases to H₂ GC issuance.
 - **Green/grey offtakers:** processing/import cost; sell EP; buy H₂ and/or H₂ GC per route; **GC mandate** on implied or actual H₂ use.
 
 **Consumers (electricity, GC).** Minimise **expenditure minus utility**:
@@ -625,10 +697,10 @@ The planner is **not** an MCP solved directly as complementarity; it is a **math
 `me_pap.jl`, `me_top.jl`, or `me_sop.jl` adds **PPA** and **HPA** bilateral pools (§2):
 
 - Same **price-taking** structure on pool markets and on contract clearing prices $\lambda_{\mathrm{ppa}}$, $\lambda_{\mathrm{hpa}}$.
-- **Settlement** at scalar strike $K$ (PPA always PaP; HPA volume mode set by entry point). $K$ and shared $C$ evolve each ADMM iteration; both snapshotted at convergence.
-- **Shared contract capacity** $C$ per link — updated outside agent subproblems (`contract_capacity.jl`), not via opposing per-agent cap optimisers.
+- **Settlement** at scalar strike $K$ (PPA hedge; HPA volume mode set by entry point). $K$ and bilateral capacity choices evolve each ADMM iteration and are snapshotted at convergence.
+- **Contract capacity** $C$ per link is a bilateral consensus variable (each side enters a local cap decision; ADMM drives agreement).
 
-Economically: extra **coupling constraints** (VRES splits generation; electrolyzer splits intake; etc.) and extra **clearing conditions** for contract energy. Capacity $C$ is coordinated by a **utilisation-based consensus step**, not a separate MW price or Nash bargaining game. At $\gamma < 1$, contracts can appear because **private CVaR** values fixed-price bilateral cash flows; at $\gamma = 1$, unused contracts ($C \approx 0$) are equilibrium-consistent.
+Economically: contracts add bilateral **cash-flow/risk-sharing channels** and additional clearing conditions for contract energy/capacity, while spot markets keep physical dispatch balance. At $\gamma < 1$, contracts can appear because **private CVaR** values fixed-price bilateral cash flows; at $\gamma = 1$, unused contracts ($C \approx 0$) are equilibrium-consistent.
 
 ### 4.8 Literature labels and price interpretation (d'Aertrycke et al.)
 
@@ -642,7 +714,7 @@ Mapping to d'Aertrycke, Ehrenmann, Ralph & Smeers (2018), *Risk trading in capac
 
 **Complete risk trading (SP, $\gamma < 1$):** one system-wide CVaR on aggregate welfare — centralised tail-risk pooling.
 
-**Incomplete risk trading (ME / ME+C, $\gamma < 1$):** private CVaR per agent; no modelled risk market. ME+C adds **physical** contracts, not complete financial risk trading.
+**Incomplete risk trading (ME / ME+C, $\gamma < 1$):** private CVaR per agent; no modelled risk market. ME+C adds bilateral **hedging/settlement** contracts, not complete financial risk trading.
 
 **Prices when $\gamma < 1$:**
 
@@ -928,9 +1000,19 @@ where loss_VRES[y] = Σ_{h,d} W × ( MC×g − λ_elec×g − λ_GC×g )
       g[h,d,y] ≤ AF[h,d,y] × cap_VRES     (same cap_VRES in all scenarios y)
 ```
 
-**VRES in contracts case** (`build_power_agent_contracts.jl`): Splits generation into `g_EOM` (pool) and `g_ppa` (PPA). Loss includes `−K_ppa×g_ppa`; penalties add `(ρ_ppa/2)×Σ W×(g_ppa − ḡ_ppa)²`. Constraint `g_ppa ≤ ppa_cap`; `ppa_cap` **fixed** each iteration to shared $C$ (no `ρ_ppa_cap` penalty).
+**VRES in contracts case** (`build_power_agent_contracts.jl` / `solve_power_agent_contracts.jl`): Physical pool `g_EOM`; hedge `g_ppa`. CVaR loss includes the CfD `−(K − λ_elec − λ_elec_GC)×g_ppa` (not `λ_ppa×g_ppa`). The ADMM dual `−Σ W λ_ppa g_ppa` and `(ρ_ppa/2)(g_ppa − ḡ_ppa)²` sit **outside** CVaR. `ppa_cap` is JuMP-fixed to shared $C$. Bounds: `g_ppa ≤ C` and `g_ppa ≤ AF × cap_VRES`.
 
-**Conventional generator (3-stage increasing cost):**
+**Conventional generator (flat single plant, default NL calibration):**
+
+```text
+min Σ W × ( MC_y × g − λ_elec×g )  +  (ρ_elec/2)×Σ W×(g − ḡ_elec)²
+
+subject to: 0 ≤ g ≤ Capacity
+```
+
+Each conventional agent names one `Technology` (fuel, efficiency, VOM). Its short-run marginal cost `MC_y` is **derived per scenario** from the `Fuel` block (§9.8). Three agents (`Gen_Conv_CCGT`, `Gen_Conv_Coal`, `Gen_Conv_Biomass`) replace the former single 3-stage stack; merit order (CCGT → coal → biomass at base gas, reordering under gas shocks) emerges from competitive clearing rather than an enforced monotonic stage curve.
+
+**Legacy conventional (3-stage increasing cost):** still supported when `StageTechnologies` is set instead of `Technology`:
 
 ```text
 min Σ W × ( Σ_s (base_s,y×g_s + 0.5×slope_s,y×g_s²) − λ_elec×g )  +  (ρ_elec/2)×Σ W×(g − ḡ_elec)²
@@ -939,8 +1021,6 @@ subject to: g = Σ_s g_s,   0 ≤ g_s ≤ cap_s
 ```
 
 Stage capacities come from `Capacity` and `StageCapacityShares` (normalised internally). Stage costs are **derived per scenario** from the `Fuel` block and the technology listed for each stage — `base_{s,y}` and `slope_{s,y}` therefore carry a scenario index $y$, because the gas price differs across the grid (§9.8). Slopes are set so marginal cost is continuous across stage boundaries (`end MC_1 = base_2`, `end MC_2 = base_3`, `end MC_3 = OCGT SRMC`). Changing shares reshapes the fleet's aggregate average variable cost.
-
-**Why the staged form (default NL calibration):** the three stages are a small coal-like and biomass-like residual plus a dominant CCGT block (shares `[0.08, 0.12, 0.80]`, matching NL fossil generation being ≈80% gas), with an OCGT peaking tail where the least efficient units set price. Each stage's SRMC is computed from its fuel price, efficiency, emission factor, and the CO₂ price rather than being entered directly, so the merit order responds correctly to a gas shock; the resulting values and their sources are in §9.6 and §9.8. Legacy `StageBaseCosts` / `FinalMarginalCost` entries are still accepted when the technology definitions are absent.
 
 **Why linear-within-stage is realistic enough:**
 - Real unit commitment/economic dispatch stacks are piecewise and heterogeneous; aggregated systems are commonly approximated by piecewise-linear or piecewise-quadratic supply curves.
@@ -968,9 +1048,9 @@ where loss_H2[y] = Σ_{h,d} W × ( λ_elec×e_in + λ_GC×gc_e + op×h2 − λ_H
       dispatch and conversion indexed by scenario y; cap_H2_y is scalar (non-anticipative)
 ```
 
-**GreenProducer in contracts case** (`build_H2_agent_contracts.jl`): Uses `e_in_pool` (pool) and `g_ppa_from` (PPA). Loss includes `+K_ppa×g_ppa_from`; conversion `h2_out = η×(e_in_pool + g_ppa_from)`; penalties add `(ρ_ppa/2)×Σ W×(−g_ppa_from − ḡ_ppa)²` only (no `ρ_ppa_cap`; `ppa_cap` fixed to shared $C$). Sells `h2_hpa` under HPA with `−K_hpa×h2_hpa` and `(ρ_hpa/2)×Σ W×(h2_hpa − ḡ_hpa)²`; `hpa_cap` fixed to shared $C^{\mathrm{HPA}}$ (no `ρ_hpa_cap`).
+**GreenProducer in contracts case** (`build_H2_agent_contracts.jl`): Physical conversion `h2_out = η×e_in_pool`. Hedge `g_ppa_from` / `h2_hpa` enter CVaR via PPA buyer CfD and HPA seller terms (ToP notional $C$ or SoP $Ks$). ADMM `λ_ppa`/`λ_hpa` linear terms and $\rho$ quadratics are outside CVaR. Caps are shared-$C$ fixes, not two-party consensus.
 
-**GreenOfftaker in contracts case** (`build_offtaker_agent_contracts.jl`): Buys `h2_hpa_from` under HPA (`h2_hpa_from ≤ hpa_cap` with shared $C^{\mathrm{HPA}}$ fixed each iteration). Settlement follows the entry-point volume mode (PaP / ToP / SoP) at $K^{\mathrm{HPA}}$; penalties add `(ρ_hpa/2)×Σ W×(−h2_hpa_from − ḡ_hpa)²` only.
+**GreenOfftaker in contracts case** (`build_offtaker_agent_contracts.jl`): Hedge `h2_hpa_from`. CVaR includes the HPA buyer CfD (`q` under SoP, notional $C$ under ToP). Physical EP conversion stays on pool hydrogen.
 
 **Green offtaker (with endogenous EP capacity and CVaR):**
 
@@ -996,7 +1076,8 @@ These templates are implemented in the `build_*_agent.jl` files as follows:
 | Constraint | Equation | Scope | Rationale |
 |---|---|---|---|
 | VRES capacity | `g ≤ AF × cap_VRES` | Per (h,d,y) | Generation limited by resource availability × **endogenous** installed capacity |
-| Conventional staging | `g = Σ_s g_s`, `0 ≤ g_s ≤ cap_s` | Per (h,d,y) | Piecewise thermal stack with increasing stage costs and fixed total capacity |
+| Conventional staging (legacy) | `g = Σ_s g_s`, `0 ≤ g_s ≤ cap_s` | Per (h,d,y) | Piecewise thermal stack with increasing stage costs |
+| Conventional flat plant | `0 ≤ g ≤ Capacity` | Per (h,d,y) | Single-technology dispatch; SRMC constant within scenario |
 | Consumer load | `d ≤ PeakLoad × load_profile` | Per (h,d,y) | Maximum consumption bound |
 | H₂ conversion | `h2_out = η × e_in` | Per (h,d,y) | Stoichiometric mass/energy balance |
 | H₂ GC physical limit | `gc_h2 ≤ h2_out` | Per (h,d,y) | Cannot certify more than produced |
@@ -1309,16 +1390,16 @@ r_cap^k = sqrt(Σ_m r_m^k²),    s_cap^k = sqrt(Σ_m s_m^k²)
 
 #### 6.4.3 Stopping rule
 
-Convergence is checked **per agent**, not on the aggregate. For each capacity-owning agent the Boyd absolute + relative test uses a **scalar** absolute term (because capacity is one decision, not an $n_{\mathrm{yr}}$-vector):
+Convergence is checked **per agent**, not on the aggregate. For each capacity-owning agent the Boyd test uses a **dedicated scalar MW tolerance** `ε_cap` (`ADMM.epsilon_cap`), not the flow-market `ε_abs`:
 
 ```
-ε_pri_m  = ε_abs · 1.0 + ε_rel · ResidualScale_Primal_m
-ε_dual_m = ε_abs · 1.0 + ε_rel · ResidualScale_Dual_m
+ε_pri_m  = ε_cap + ε_rel · ResidualScale_Primal_m
+ε_dual_m = ε_cap + ε_rel · ResidualScale_Dual_m
 ```
 
-with `ResidualScale_*_m` initialised from the first non-zero observation per agent. (Flow markets, by contrast, use `ε_abs · sqrt(n_slots)` with `n_slots = nHours × nReprDays × nYears` — see §6.5.) Capacity is converged iff `r_m ≤ ε_pri_m` and `s_m ≤ ε_dual_m` for **every** `m`. *Why per-agent and not aggregate*: averaging residuals across agents can hide a single laggard whose split is still far from feasibility; an aggregate test would declare convergence even when one agent type (e.g. a strongly binding electrolyzer) has not satisfied the equality. The per-agent test is direction-correct: capacity is "done" when every agent's split is satisfied.
+Capacity is one decision, so there is **no** `sqrt(n_slots)` factor (unlike flow markets, §6.5). Reusing the per-slot flow `ε_abs` on a scalar split would make capacity ~50× tighter in MW than the market L2 test — that is a dimensional mismatch, not “the same accuracy.” In the contracts case the right-hand side is further multiplied by `cap_tol_relax` (§6.7). Capacity is converged iff `r_m ≤ ε_pri_m` and `s_m ≤ ε_dual_m` for **every** `m`. *Why per-agent and not aggregate*: averaging residuals across agents can hide a single laggard whose split is still far from feasibility; an aggregate test would declare convergence even when one agent type (e.g. a strongly binding electrolyzer) has not satisfied the equality. The per-agent test is direction-correct: capacity is "done" when every agent's split is satisfied.
 
-The optional knob `cap_tol_relax` multiplies the right-hand side of the per-agent **physical investment capacity** test in the **contracts** case only (shipped `data.yaml` value: **25**; code fallback if the key is absent: **100**). Plain ME leaves it at 1. See §6.7. Contract capacity $C$ uses separate alignment residuals (§2, §6.7).
+The optional knob `cap_tol_relax` multiplies the right-hand side of the per-agent **physical investment capacity** test in the **contracts** case only (shipped `data.yaml` value: **10**; code fallback if the key is absent: **100**). Plain ME leaves it at 1. See §6.7. Bilateral contract capacity $C$ (PPA/HPA cap consensus) uses `ε_cap` without this extra multiplier.
 
 #### 6.4.4 Per-agent ρ controller
 
@@ -1386,10 +1467,11 @@ In tightly-coupled runs, raw `z` targets can jump sharply when flow consensus os
 
 ### 6.5 Convergence Tolerances (Boyd-style)
 
-Instead of a single scalar tolerance, the implementation follows the **absolute + relative** stopping criteria proposed by Boyd et al. (2011) for ADMM. For each market `k` we define:
+Instead of a single scalar tolerance, the implementation follows the **absolute + relative** stopping criteria proposed by Boyd et al. (2011) for ADMM. Three knobs are stored in `data.yaml` → `ADMM`:
 
-- Absolute tolerance `ε_abs` (MW-scale), taken from `ADMM.epsilon_abs` in `data.yaml` if present, otherwise from `ADMM.epsilon`.
-- Relative tolerance `ε_rel` (dimensionless), taken from `ADMM.epsilon_rel` in `data.yaml` if present, otherwise `0.0`.
+- Flow-market absolute tolerance `ε_abs` (MW **per slot**), from `epsilon_abs` if present, otherwise `epsilon` (ME) or `epsilon_contracts` (ME+C).
+- Capacity absolute tolerance `ε_cap` (MW, **scalar**), from `epsilon_cap` (default `5.0`).
+- Relative tolerance `ε_rel` (dimensionless), from `epsilon_rel` if present, otherwise `0.0`.
 
 Let:
 
@@ -1407,37 +1489,63 @@ The stopping rule is:
 
 - **Primal (flow)**: for every spot market `k`, the L2 norm of the imbalance vector must satisfy `‖r_k‖₂ ≤ ε_pri_k`.
 - **Dual (flow)**: for every spot market `k`, the L2 norm of the change in consensus deviation must satisfy `‖s_k‖₂ ≤ ε_dual_k`.
-- **Capacity**: for every capacity-owning agent `m`, both the primal and dual scalar residuals must satisfy the per-agent Boyd test of §6.4.3.
+- **Capacity**: for every capacity-owning agent `m`, both the primal and dual scalar residuals must satisfy the per-agent Boyd test of §6.4.3 (`ε_cap`, not `ε_abs · √n`).
 
 **All five spot markets and every capacity-owning agent** must simultaneously satisfy their conditions for convergence to be declared (`within_tol(...) && within_tol_cap()` in `ADMM.jl`). Declaring "five markets done" while capacity is still drifting is not convergence.
 
 This has three advantages over a single scalar `epsilon`:
 
-1. **Scale awareness**: Markets with large typical flows (e.g. electricity) naturally get larger absolute tolerances than thin markets (e.g. GC), while still using a common `(ε_abs, ε_rel)` pair.
-2. **Robustness to refinement**: If the temporal resolution or the number of representative days changes (n increases), the `sqrt(n)` factor keeps the per-slot accuracy comparable.
-3. **Numerical realism**: Once residuals are small relative to the problem’s own scale (`Scale_*[k]`), the criteria do not force the algorithm to chase tiny numerical oscillations; they recognise that the solution is “good enough” in the sense of Boyd et al.
+1. **Scale awareness**: Markets with large typical flows (e.g. electricity) naturally get larger absolute L2 tolerances than thin markets (e.g. GC), while still using a common per-slot `ε_abs`.
+2. **Robustness to refinement**: If the temporal resolution or the number of representative days changes (n increases), the `sqrt(n)` factor keeps the **per-slot** (RMS) accuracy comparable: `‖r‖₂ ≤ ε_abs √n` is equivalent to RMS imbalance ≤ `ε_abs`.
+3. **Numerical realism**: Once residuals are small relative to the problem’s own scale, the criteria do not force the algorithm to chase tiny numerical oscillations; they recognise that the solution is “good enough” in the sense of Boyd et al.
 
 #### Relative tolerance ε_rel
 
-The optional `ε_rel` term adds a scale-relative component. When `ε_rel > 0`, markets with larger typical residual magnitudes get proportionally larger tolerances. Set `epsilon_rel: 0.01` in `data.yaml` to enable a 1% relative tolerance. The default is `0.0`.
+The optional `ε_rel` term adds a scale-relative component. When `ε_rel > 0`, markets with larger typical residual magnitudes get proportionally larger tolerances. Set `epsilon_rel: 0.01` in `data.yaml` to enable a 1% relative tolerance. The default is `0.0` (absolute tests only), so the numbers below are exact.
 
-#### Choosing ε and recommended values
+#### Chosen values (and why)
 
-The choice of `ε_abs` (or `epsilon` in `data.yaml`) trades off convergence speed vs. price/quantity accuracy:
+Default horizon: $n = 24 \times 8 \times 15 = 2{,}880$ slots, $\sqrt{n} = \sqrt{2880} \approx 53.67$. Shipped values:
 
-- smaller `ε_abs` -> tighter residuals, closer dual prices to benchmark;
-- larger `ε_abs` -> earlier stopping with looser dual accuracy.
+| Knob | Value | What it controls | Effective test |
+|------|-------|------------------|----------------|
+| `epsilon` | **0.2** MW/slot | ME flow markets | L2 ≤ $0.2 \times 53.67 = \mathbf{10.73}$ MW |
+| `epsilon_contracts` | **2.0** MW/slot | ME+C flow markets (PPA/HPA energy uses the same) | L2 ≤ $2.0 \times 53.67 = \mathbf{107.3}$ MW |
+| `epsilon_cap` | **5.0** MW | Scalar $x=z$ split (physical cap; also PPA/HPA $C$) | $|x-z| \le \mathbf{5.0}$ MW (ME and contract $C$); $\times$ `cap_tol_relax` for ME+C physical cap |
+| `cap_tol_relax` | **10** | Extra ME+C multiplier on physical investment only | ME+C physical cap ≤ $\mathbf{50}$ MW |
 
-Because the stopping test scales with `sqrt(n_slots)`, effective absolute tolerance grows with horizon size. For the default 15-scenario grid (`24 × 8 × 15 = 2,880` slots), use a smaller `epsilon` when close price agreement with the social planner is required.
+**1. Flow-market `epsilon = 0.2` (ME).**
+Boyd's `sqrt(n)` rule means the per-slot accuracy is exactly `ε_abs`: RMS imbalance ≤ 0.2 MW. On the Dutch system this is negligible:
+
+- vs peak load ~18,000 MW: $0.2 / 18000 = 0.0011\%$.
+- Money-metric upper bound (treat 0.2 MW as a persistent hourly imbalance at a typical electricity price ~32 €/MWh): $0.2 \times 32 \times 8760 \approx 56$ k€/year, against $\mathbb{E}[\mathrm{SW}] \approx 49$ bn € — about **0.00011%** of welfare. The actual money-metric is smaller because the residual is an L2 budget across 2,880 slots, not a bias in every hour.
+- The previous value `0.1` already cleared all five markets in the $\gamma=0.5$, $\beta=0.8$ ME run (L2 residuals ~1.6–3.1 vs a 5.37 MW bar). Doubling to 0.2 keeps the same economic interpretation and gives modest headroom without letting prices wander: a 0.2 MW RMS gap cannot move a 30 €/MWh electricity price in any economically reportable way.
+
+**2. Flow-market `epsilon_contracts = 2.0` (ME+C).**
+ME+C adds PPA/HPA energy tensors plus two scalar $C$ splits on top of the five spot markets, so residual floors sit higher than in plain ME. **2.0 MW RMS is Boyd's $\varepsilon_{\mathrm{rel}}\sim 10^{-4}$ applied to NL peak load** ($10^{-4}\times 18{,}000 = 1.8$ MW). That is **10×** the ME bar (`2.0 / 0.2`), still **7× tighter** than Boyd's looser $10^{-3}$ relative (18 MW RMS). Money-metric: $2.0 \times 32 \times 8760 \approx 560$ k€/year (**0.0011%** of 49 bn € welfare). The L2 bar of 107 MW looks large only if one forgets it is an Euclidean budget over 2,880 slots; the economically meaningful figure is the 2 MW RMS.
+
+**3. Capacity `epsilon_cap = 5.0` MW.**
+Capacity is a **scalar** (one MW number per agent), so Boyd's `sqrt(n)` factor does **not** apply. Reusing a 0.1–1 MW cap test against a flow L2 bar of tens of MW is a dimensional mismatch, not “the same accuracy.” Relative to SP capacities (wind 76.4 GW, solar 55.0 GW, electrolyzer 1.43 GW, green offtaker 1.07 GW):
+
+- 5 MW is $5/76358 = 0.0065\%$ of wind and $0.009\%$ of solar — **tighter than Boyd $10^{-4}$** on VRES.
+- 5 MW is $0.35\%$ of the electrolyzer and $0.47\%$ of the offtaker — between Boyd $10^{-3}$ and a few-tenths of a percent, and **one typical PEM stack** (5–20 MW). Planning models do not commission 1 MW of electrolysis.
+- Money-metric at shipped annuities: 5 MW of wind × 18,500 €/MW-year = **92.5 k€/year**; 5 MW of electrolyzer × 262,000 €/MW_e-year ≈ **1.3 M€/year** — both **≪ 0.003%** of 49 bn € welfare.
+- **Observed ADMM floor.** In the $\gamma=0.5$, $\beta=0.8$ ME run, all five spot markets were inside the old 5.37 MW bar from iteration 418 onward. Wind $|x-z|$ never fell to 0.1 MW: it reached a best of **0.17 MW at iter 476**, then oscillated in **0.23–0.67 MW** (`ρ_cap` frozen near 0.9). That band is a penalty-augmented limit cycle. A 1 MW bar sits above the ME floor but was **too tight for bilateral contract $C$** (the same scalar-split trap on a hedge that inherits PPA/HPA energy chatter). 5 MW sits above that floor with margin; chasing 1 MW of $C$ is asking the solver to kill a sub-stack consensus gap.
+
+**4. Contracts physical-cap extra factor `cap_tol_relax = 10`.**
+In ME+C, physical `z_cap` uses **pool flow only** (same as ME): hedges do not occupy a second slice of plant capacity. Effective bar: $10 \times 5.0 = \mathbf{50}$ MW = $0.065\%$ of the 76 GW wind fleet (Boyd $10^{-3}$ is 0.1%) and $3.5\%$ of the 1.43 GW electrolyzer. Bilateral hedge capacity $C$ does **not** get this extra factor; it uses `ε_cap = 5.0` MW like a scalar contract position.
+
+**What we are not doing.** These values do not change the equilibrium (penalties vanish at $x=z$ and market imbalance 0). They only stop the loop from burning hundreds of iterations on sub-stack capacity chatter after prices and dispatch have already cleared. For a tighter numerical study, lower `epsilon` / `epsilon_cap`; do not raise `max_iter` in the hope that a 1 MW contract-$C$ split will eventually die.
 
 #### Two epsilon values: `epsilon` vs `epsilon_contracts`
 
 The **ME contract cases** (`me_pap`, `me_top`, `me_sop`) have more coupled markets (standard flows + contract energy + contract capacity + capacity consensus) and stronger interdependence (VRES splits pool vs contract; electrolyzer does the same). As a result, convergence is slower and residuals tend to be larger than in `market_exposure`. To avoid running to `max_iter` without declaring convergence when results are already good enough, the contracts case uses a separate tolerance:
 
-- **`epsilon`** — Used by `market_exposure`.
-- **`epsilon_contracts`** — Used by `me_pap.jl` / `me_top.jl` / `me_sop.jl` when set in `data.yaml`. If not set, the contracts case falls back to `epsilon`.
+- **`epsilon`** — Used by `market_exposure` (shipped **0.2** MW/slot).
+- **`epsilon_contracts`** — Used by `me_pap.jl` / `me_top.jl` / `me_sop.jl` when set in `data.yaml` (shipped **2.0** MW/slot, 10× ME). If not set, the contracts case falls back to `epsilon`.
+- **`epsilon_cap`** — Shared scalar MW bar for capacity splits in both ME and ME+C (shipped **5.0** MW).
 
-Both cases use the same convergence logic; only the tolerance value differs. **`cap_tol_relax`** relaxes **physical investment capacity** consensus only (§6.4, §6.7); shared contract capacity $C$ is checked separately via $|C - q^{\mathrm{peak}}|$ and $|C^k - C^{k-1}|$.
+Both cases use the same convergence logic; only the flow-market `ε_abs` and the contracts-only `cap_tol_relax` multiplier differ. **`cap_tol_relax`** relaxes **physical investment capacity** consensus only (§6.4, §6.7); bilateral contract $C$ uses `ε_cap` without that multiplier.
 
 ### 6.6 Warm-start from Social Planner
 
@@ -1468,7 +1576,7 @@ Warm-starting ADMM from the social planner solution is **critical** for fast, re
 
 ### 6.7 Contract Pools ADMM (me_pap / me_top / me_sop)
 
-The contracts loop (`ADMM_contracts.jl`) **extends** the full standard ME iteration of §6.1 — it does not replace it. Spot-market imbalance / residual / λ / ρ steps still run; the table below lists only the **additional** contract-specific steps. Shared-cap fixing happens **inside** each `ADMM_subroutine_contracts!` call (not once before the agent loop). Spot-market λ updates precede contract λ updates; `update_rho_contracts!` is last. **All three entry points** use the same contract ADMM; only HPA settlement (PaP / ToP / SoP) differs.
+The contracts loop (`ADMM_contracts.jl`) **extends** the full standard ME iteration of §6.1 — it does not replace it. Shared-cap fixing happens **inside** each `ADMM_subroutine_contracts!` call. Spot-market λ updates precede contract λ updates; `update_rho_contracts!` is last. **All three entry points** use the same contract ADMM; only HPA settlement (ToP vs SoP) differs. `me_pap.jl` aliases SoP.
 
 **Per iteration (contract additions on top of §6.1):**
 
@@ -1486,13 +1594,16 @@ The contracts loop (`ADMM_contracts.jl`) **extends** the full standard ME iterat
 - The five **spot** markets and every **physical capacity** agent (§6.5).
 - **PPA/HPA energy** (`ppa`, `hpa`): 3D imbalances; $\lambda^{\mathrm{ppa}}_i$, $\lambda^{\mathrm{hpa}}_j$ prices; Boyd residuals like spot markets.
 - **Shared cap** (`ppa_cap_*`, `hpa_cap_*` in `ADMM_Convergence.csv`): scalar $|C - q^{\mathrm{peak}}|$ and $|C^k - C^{k-1}|$ — **not** supplier-cap minus buyer-cap.
+- **Shared $C$ settled** (`shared_contract_capacity_settled`): ADMM does **not** stop while any link is expanding, pending an expand (`CapSignal` up), or moving more than `contract_cap.settle_tol` MW per iteration. Holding a positive $C$ after both sides stop asking for more is allowed. Idle snap to zero still has to finish and then stay flat. Flow residuals alone can pass while $C$ is still crawling.
 
 **Tolerances** (contracts case is more coupled; see §6.5):
 
-- **`epsilon_contracts`** — Base tolerance for flow markets (default 0.5 vs 0.1 for plain ME).
-- **`cap_tol_relax`** — Multiplier for **physical** capacity consensus only (shipped `data.yaml` value: 25; code fallback if absent: 100).
+- **`epsilon_contracts`** — Base per-slot tolerance for flow markets (shipped 2.0 vs ME `epsilon` 0.2; 10× ratio).
+- **`epsilon_cap`** — Scalar MW bar for physical and bilateral contract capacity (shipped 5.0 MW).
+- **`cap_tol_relax`** — Extra multiplier for **physical** investment capacity only (shipped `data.yaml` value: 10 → 50 MW).
+- **`contract_cap.settle_tol`** — Max allowed $|C^k - C^{k-1}|$ (MW) when declaring convergence (default 0.5).
 
-Full economic interpretation of $C$, $K$, and $\gamma$: §2 *Contract pools*. Configuration: `ADMM.contract_cap`, `PPAs`, `HPAs` in `data.yaml`.
+Full economic interpretation of $C$, $K$, volume modes, and the $C$ step-size rule: §2 *Contract pools*. Configuration: `ADMM.contract_cap`, `PPAs`, `HPAs` in `data.yaml`.
 
 ### 6.8 Sign Convention
 
@@ -1639,24 +1750,30 @@ These residuals are negligible for:
 
 **Why not `1e-8` by default?** Tighter KKT tolerance mainly buys marginally cleaner dual multipliers. On the **stiff social CVaR QCP** (epigraph + tail constraints, especially at **low $\beta$** with few scenarios), `1e-8` often makes IPOPT declare `LOCALLY_INFEASIBLE` even when the primal allocation is already economically meaningful. That failure mode triggered unnecessary auxiliary solves and retries without improving reported prices in any material way.
 
-**Default workflow (no extra warm-start).** At `ipopt_tol = 1e-6`, a **single IPOPT pass** usually suffices. CVaR variable seeds in `build_social_planner.jl` provide a feasible-ish starting point without a separate $\gamma=1$ auxiliary solve. Optional knobs:
+**Default workflow at $\gamma<1$.** IPOPT’s restoration phase often reports `LOCALLY_INFEASIBLE` from a cold start even though the RA QCP has the **same constraints** as the RN problem (only the objective changes). The shipped path is:
+
+1. CVaR seeds in `seed_social_cvar_starts!` (epigraph + Rockafellar–Uryasev feasible; the old $\mathtt{sw\_aux}=\alpha=-10^{15}$, $u=0$, $\mathrm{CVaR}=0$ start was itself infeasible).
+2. **`risk_warmstart: true`**: solve $\gamma=1$ first, copy dispatch/capacity, reseat $\alpha,u,\mathrm{CVaR}$ at the target $\beta$.
+3. Adaptive barrier (`ipopt_mu_strategy: adaptive`).
+4. If the RA pass still fails, retry at `ipopt_retry_tol = 1e-5` from the failed iterate.
 
 | Parameter | Default | Role |
 |---|---|---|
 | `ipopt_tol` | `1.0e-6` | Primary KKT tolerance |
 | `ipopt_max_iter` | `5000` | Iteration cap |
 | `ipopt_print_level` | `0` | `0` = silent; `3`–`5` = IPOPT log |
-| `risk_warmstart` | `false` | If `true` and $\gamma<1$: extra $\gamma=1$ solve, copy primals only |
-| `risk_warmstart_beta` | `0.95` | $\beta$ for that auxiliary solve |
-| `ipopt_retry_tol` | `1e-5` | Used only if the first solve fails (code default) |
+| `risk_warmstart` | `true` | If $\gamma<1$: extra $\gamma=1$ solve, copy primals, reseat CVaR |
+| `risk_warmstart_beta` | `ADMM.beta` | $\beta$ for that auxiliary solve (idle at $\gamma=1$) |
+| `ipopt_mu_strategy` | `adaptive` | IPOPT barrier update |
+| `ipopt_retry_tol` | `1e-5` | Used only if the first RA solve fails (code default) |
 | `ipopt_retry_max_iter` | `8000` | Iteration cap on retry (code default) |
 
-Set `risk_warmstart: true` only for numerically difficult cases (e.g. very low $\beta$ with few scenarios). See also **§9.2.1**.
+Set `risk_warmstart: false` only to skip the extra RN solve (e.g. $\gamma=1$, or after you have confirmed a single RA pass succeeds). See also **§9.2.1**.
 
 #### ADMM note on capacity tolerance scaling
 
 In `market_exposure` ADMM, flow-market tolerances use Boyd-style horizon scaling (`ε_abs * sqrt(n_slots) + ε_rel * scale`), where `n_slots = nHours × nReprDays × nYears`.  
-Capacity consensus is not a full flow tensor; it is low-dimensional (yearly scalar/vector). Therefore, capacity convergence is checked on a scalar basis (`sqrt(1)`), avoiding premature convergence declarations from over-loose `sqrt(n_slots)` scaling on the capacity channel.
+Capacity consensus is not a full flow tensor; it is a scalar MW split. It is therefore tested against a dedicated `ε_cap` (shipped 5.0 MW) with **no** `sqrt(n_slots)` factor — see §6.5. Applying the flow `ε_abs` unscaled to capacity would make the cap test ~50× tighter in MW than the market L2 test.
 
 ### 7.3 Code Architecture
 
@@ -1726,7 +1843,7 @@ The formulations are structurally identical in SP and ME:
 
 ### 7.6 Risk metrics post-processing (CVaR reporting)
 
-After each run, the project writes **`Risk_Metrics.csv`** and **`Social_Welfare_Per_Year.csv`** and prints a **risk metrics** block to the console. Implementation: `Source/compute_social_risk_metrics.jl`, called from `save_social_planner_results.jl`, `save_results.jl`, and `save_results_contracts.jl`.
+After each run, the project writes **`Risk_Metrics.csv`**, **`Social_Welfare_Per_Year.csv`**, **`Welfare_By_Group_Per_Year.csv`**, and **`Welfare_By_Agent_Per_Year.csv`**, and prints a **risk metrics** block to the console. Implementation: `Source/compute_social_risk_metrics.jl`, called from `save_social_planner_results.jl`, `save_results.jl`, and `save_results_contracts.jl`. The planner **objective is unchanged**: demand utility stays inside social welfare and social CVaR. The extra files are a **reporting split** so RA / contract effects are visible on the non-demand remainder.
 
 #### What is reported
 
@@ -1737,6 +1854,9 @@ After each run, the project writes **`Risk_Metrics.csv`** and **`Social_Welfare_
 | **$\alpha$ (VaR proxy)** | `alpha_social` from the planner | From the ex-post CVaR calculation |
 | **Sum of private agent CVaRs** | n/a | $\mathrm{CVaR}_{\mathrm{VRES}}+\mathrm{CVaR}_{\mathrm{H2}}+\mathrm{CVaR}_{\mathrm{Green}}$ at ADMM convergence (internal to agent problems) |
 | **Gap vs SP** | 0 | `social_CVaR_gap_vs_SP` = ex-post ADMM social CVaR minus SP social CVaR (requires `social_planner_results/Risk_Metrics.csv` from a prior SP run) |
+| **Demand vs rest** | Same split | `expected_welfare_demand` = electricity + GC (+ H₂/EP if present) **utility**; `expected_welfare_ex_demand` = all other planner welfare (generation, H₂, ammonia, import **costs**). Transfers still cancel. `share_demand_of_E_SW` can exceed 100% because the rest is typically negative. |
+
+**Demand vs rest (diagnostics only).** Net social welfare is dominated by consumer utility \(U(d)\). Risk aversion and contracts mainly move **real-resource costs** (VRES annuity, thermal fuel, electrolyzer, Haber–Bosch, imports). Compare cases on `expected_welfare_ex_demand` and `Welfare_By_Group_Per_Year.csv`, not only on \(\mathbb{E}[\mathrm{SW}]\). The ex-post CVaR of the rest (`welfare_ex_demand_CVaR`) is **not** in any agent’s objective.
 
 **Important distinctions:**
 
@@ -1764,13 +1884,15 @@ When $\gamma = 1$, social CVaR is inactive in objectives; reported values should
 
 | File | Contents |
 |---|---|
-| `Risk_Metrics.csv` | One row per metric (`expected_social_welfare`, `social_CVaR`, `alpha_social`, `sum_private_CVaR`, `social_CVaR_gap_vs_SP`, …) |
-| `Social_Welfare_Per_Year.csv` | `scenario_year`, `probability`, `social_welfare`, `social_loss` per year |
+| `Risk_Metrics.csv` | One row per metric (`expected_social_welfare`, `social_CVaR`, `alpha_social`, `sum_private_CVaR`, `social_CVaR_gap_vs_SP`, `expected_welfare_demand`, `expected_welfare_ex_demand`, `share_demand_of_E_SW`, `welfare_ex_demand_CVaR`, plus `expected_welfare_group_*`) |
+| `Social_Welfare_Per_Year.csv` | `scenario_year`, `probability`, `social_welfare`, `social_loss`, `welfare_demand`, `welfare_ex_demand` |
+| `Welfare_By_Group_Per_Year.csv` | Per scenario year, planner welfare by group (`elec_demand`, `gc_demand`, `vres`, `conventional`, `h2_producer`, offtakers, …) |
+| `Welfare_By_Agent_Per_Year.csv` | Same split at agent id |
 | `Private_CVaR_By_Agent.csv` | ADMM only: per risk-averse agent `CVaR_private` and `alpha_private` |
 
 #### Console log
 
-Logs report **positive welfare** (bn EUR): expected welfare, **tail welfare** (= average welfare in the worst $(1-\beta)$ share of scenarios; higher is better), min scenario welfare, and spread. Internally the solver uses loss $L_y=-\mathrm{SW}_y$; `Risk_Metrics.csv` stores both `social_CVaR` (the model's epigraph variable) and `social_CVaR_recomputed` (ex-post from the realised per-scenario welfares). ADMM runs add **SP tail welfare (benchmark)** and **tail welfare gap vs SP** (negative ⇒ ME worse on aggregate tail).
+Logs report **positive welfare** (bn EUR): expected welfare, **demand utility vs ex-demand rest**, **tail welfare** (= average welfare in the worst $(1-\beta)$ share of scenarios; higher is better), min scenario welfare, spread, and the spread/tail of the ex-demand remainder. Internally the solver uses loss $L_y=-\mathrm{SW}_y$; `Risk_Metrics.csv` stores both `social_CVaR` (the model's epigraph variable) and `social_CVaR_recomputed` (ex-post from the realised per-scenario welfares). ADMM runs add **SP tail welfare (benchmark)** and **tail welfare gap vs SP** (negative ⇒ ME worse on aggregate tail).
 
 **Tail lines are always the ex-post value.** At $\gamma = 1$ the CVaR term carries zero objective weight, so the solver's `cvar_social` variable is left arbitrarily loose and is not a meaningful number; reporting it would produce nonsense such as a tail welfare below the minimum scenario welfare, and an ADMM-vs-SP gap of several billion euros where the two are in fact identical. Both the console lines and the SP benchmark comparison therefore use the recomputed value.
 
@@ -1854,7 +1976,7 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 | `nTimesteps` | 24 | Hours per representative day (hourly resolution) |
 | `nReprDays` | 8 | Representative days (trade-off: speed vs. accuracy) |
 | `nYears` | 1 | Fallback scenario count, used only if the `Scenarios` block is absent |
-| `base_year` | 2021 | `[NL]` Calibration-year **label** for installed capacities, fuel prices, and costs (CBS / TTF / EU-ETS 2021); **not** a scenario file label and **not read by any code** — metadata for the documentation only; see §9.6–§9.8 |
+| `base_year` | 2025 | `[NL]` Calibration-year **label** for installed capacities (CBS 2025 nader voorlopig), fuel prices (2024 annual averages), and costs; **not** a scenario file label and **not read by any code** — metadata for the documentation only; see §9.6–§9.8 |
 
 ### 9.1.1 Scenarios
 
@@ -1869,10 +1991,10 @@ The scenario count is **derived**: `nYears = 5 × 3 = 15`, all equiprobable.
 
 | Parameter | Value | Description |
 |---|---|---|
-| `GasPrice` | 47.15 €/MWh_th | `[NL]` TTF 2021 annual average `[TTF-2021]` |
-| `CoalPrice` | 12.40 €/MWh_th | API2 2021 average (≈121 €/t ÷ 8.14 MWh_th/t) `[API2-2021]` |
-| `BiomassPrice` | 30.00 €/MWh_th | NW-Europe industrial wood pellet 2021 `[PELLET-2021]` |
-| `CO2Price` | 52.64 €/tCO₂ | `[NL]` EU-ETS EUA 2021 annual average `[ETS-2021]` |
+| `GasPrice` | 34.40 €/MWh_th | `[NL]` TTF 2024 annual average `[TTF-2024]` |
+| `CoalPrice` | 12.54 €/MWh_th | API2 2024 average (≈102 €/t ÷ 8.14 MWh_th/t) `[API2-2024]` |
+| `BiomassPrice` | 33.00 €/MWh_th | NW-Europe industrial wood pellet 2024 `[PELLET-2024]` |
+| `CO2Price` | 64.79 €/tCO₂ | `[NL]` EU-ETS EUA 2024 annual average `[ETS-2024]` |
 | `GasEmissionFactor` | 0.2016 tCO₂/MWh_th | Natural gas, 56.1 kg/GJ `[IPCC-EF]` |
 | `CoalEmissionFactor` | 0.3406 tCO₂/MWh_th | Hard coal, 94.6 kg/GJ `[IPCC-EF]` |
 | `BiomassEmissionFactor` | 0.0 | ETS zero-rated |
@@ -1885,13 +2007,21 @@ This block is the **single source of truth** for every fuel- and carbon-linked c
 |---|---|---|
 | `rho_initial` | 1.0 | Default penalty weight (neutral starting point) |
 | `nScenarioYears` | 15 | Fallback scenario count, used only if the `Scenarios` block is absent (§9.1.1) |
-| `max_iter` | 2000 | Maximum ADMM iterations |
-| `epsilon` | 0.1 | Convergence tolerance for `market_exposure`; see §6.5 for accuracy/speed trade-off. |
-| `epsilon_contracts` | 0.5 | [me_pap / me_top / me_sop] Contracts tolerance; looser than ME `epsilon` (0.1) because the contract cases are more tightly coupled (§6.5). |
-| `cap_tol_relax` | 25 | [me_pap / me_top / me_sop only] Multiplier for **physical investment capacity** consensus (§6.4). Does **not** apply to shared contract $C$. |
-| `contract_cap.relaxation` | 0.35 | Damping $\tau$ in shared-$C$ bargaining update (§2). |
-| `contract_cap.expand_step` | 2.0 | MW expansion per unit mean contract energy imbalance when cap binds. |
+| `max_iter` | 1000 | Maximum ADMM iterations |
+| `epsilon` | 0.2 | ME flow-market Boyd `ε_abs` (MW per slot); L2 bar = 0.2 × √2880 ≈ 10.73 MW. See §6.5. |
+| `epsilon_contracts` | 2.0 | [me_pap / me_top / me_sop] Flow-market `ε_abs`; 10× ME (Boyd $10^{-4}$ of NL peak). L2 bar ≈ 107 MW (§6.5). |
+| `epsilon_cap` | 5.0 | Scalar MW bar for physical (and bilateral contract) capacity splits. Not scaled by √n_slots (§6.4.3, §6.5). |
+| `cap_tol_relax` | 10 | [me_pap / me_top / me_sop only] Extra multiplier on `ε_cap` for **physical investment** capacity (§6.4): 10 × 5 = 50 MW. Does **not** apply to bilateral contract $C$. |
+| `contract_cap.initial` | 0 | Seed $C$ (MW). `0` = no-contract warm start; raise if $q \le C$ is presolved away (§2). |
+| `contract_cap.relaxation` | 0.35 | Unused on expand/hold (kept for compatibility). Idle unused $C$ still snaps to 0. |
+| `contract_cap.expand_step` | 25 | Minimum MW added to $C$ when **both** sides’ cap shadows want more $C$ (§2). Applied **undamped**. |
+| `contract_cap.expand_frac` | 0.2 | Fraction of remaining headroom to the physical bottleneck added on each expand. |
+| `contract_cap.expand_max` | 500 | Cap on one expand (MW). |
+| `contract_cap.up_confirm_iters` | 3 | Consecutive unanimous “want more” votes before an expand (**code default**; not in shipped yaml). |
+| `contract_cap.settle_tol` | 0.5 | Max $|C^k - C^{k-1}|$ (MW) before ADMM may stop (§6.7). |
+| `contract_cap.settle_iters` | 3 | Consecutive iterations $C$ must stay within `settle_tol` (and not be expanding). Hold at a used $C$ is settled. |
 | `contract_cap.bind_tol` | 1e-6 | Numerical tolerance: treat $q^{\mathrm{peak}} \approx C$ as binding. |
+| `contract_cap.dual_tol` | 1e-4 | Min W-weighted shadow of $q \le C$ (€/MW-year) to count as “wants more $C$”. |
 | `rho_cap_initial` | 0.1 | Initial per-agent capacity penalty for the equality split (§6.4). Present in shipped `data.yaml`. |
 | `rho_cap_inc_factor` | 1.05 | Per-agent capacity controller increase factor; decrease factor is the reciprocal. **Code default** (not in shipped `data.yaml`). See §6.4.4. |
 | `rho_cap_max` | 30 | Per-agent capacity penalty upper bound. **Code default** (not in shipped `data.yaml`). See §6.4.4. |
@@ -1909,8 +2039,9 @@ Used **only** by `social_planner.jl`. ADMM subproblems continue to use Gurobi.
 | `ipopt_tol` | `1.0e-6` | IPOPT KKT tolerance. Justification and magnitude table: **§7.2** |
 | `ipopt_max_iter` | `5000` | IPOPT iteration cap |
 | `ipopt_print_level` | `0` | `0` = silent; `3`–`5` = iteration log |
-| `risk_warmstart` | `false` | Optional $\gamma=1$ auxiliary solve before risk-averse run |
-| `risk_warmstart_beta` | `0.95` | $\beta$ for auxiliary warm-start only |
+| `risk_warmstart` | `true` | When $\gamma<1$: $\gamma=1$ auxiliary solve, copy dispatch/capacity, reseat CVaR. Prevents IPOPT restoration failure. |
+| `risk_warmstart_beta` | `ADMM.beta` | $\beta$ for auxiliary warm-start only (does not change the RN primal) |
+| `ipopt_mu_strategy` | `adaptive` | IPOPT barrier strategy |
 | `ipopt_retry_tol` | `1e-5` | Retry tolerance if first solve fails (**code default** — commented out in shipped `data.yaml`) |
 | `ipopt_retry_max_iter` | `8000` | Retry iteration cap (**code default** — commented out in shipped `data.yaml`) |
 
@@ -1931,7 +2062,7 @@ Each block specifies `coalition_id` (JuMP agent ID) and `members` (YAML cross-re
 
 | Market | `initial_price` | `rho_initial` | Notes |
 |---|---|---|---|
-| `elec_market` | 100.0 €/MWh | 1.0 | Seed near NL 2021 wholesale with realistic VRES/gas costs |
+| `elec_market` | 77.0 €/MWh | 1.0 | Seed near NL 2024 wholesale with realistic VRES/gas costs |
 | `elec_GC_market` | 3.0 €/MWh_GC | 0.3 | Seed near realistic GoO clearing (abundant VRES ⇒ low premium) |
 | `H2_market` | 155.0 €/MWh_H2 | 0.5 | Seed ≈ 5 €/kg green H₂ at realistic power prices |
 | `H2_GC_market` | 25.0 €/MWh_GC | 1.0 | Seed near green-H₂ certificate value under the 42% mandate |
@@ -1957,7 +2088,7 @@ HPAs:
 
 | Block | Parameter | Description |
 |---|---|---|
-| `ADMM.contract_cap` | `relaxation`, `expand_step`, `bind_tol` | Shared bilateral capacity $C$ bargaining (§2, `contract_capacity.jl`) |
+| `ADMM.contract_cap` | `initial`, `expand_step`, `expand_frac`, `expand_max`, `bind_tol`, `dual_tol` | Shared bilateral capacity $C$ bargaining (§2, `contract_capacity.jl`) |
 | `PPAs` | `initial_price`, `rho_initial` | Seed for `λ_ppa` and ADMM energy penalty on PPA flow |
 | `HPAs` | `initial_price`, `rho_initial` | Seed for `λ_hpa` and ADMM energy penalty on HPA flow |
 | `HPAs` | `price_structure` | `fixed` or `cfd` (§2 *HPA price structure*) |
@@ -1965,14 +2096,14 @@ HPAs:
 
 Per-agent overrides under `PPAs.Gen_VRES_Solar`, `HPAs.Prod_H2_Green`, etc.
 
-PPA and HPA use **one shared scalar capacity** $C$ (MW) per bilateral link — stored in `ADMM["SharedCap"]`, updated by `contract_capacity.jl`, **not** chosen independently by buyer and seller. There is no separate MW clearing price for $C$. Settlement strike $K$ is a scalar €/MWh (uniform over hours) snapshotted at convergence; during ADMM, provisional $K$ tracks the configured benchmark each iteration while $\lambda^{\mathrm{contract}}$ clears **energy** on the contract pool.
+PPA and HPA use **one shared scalar capacity** $C$ (MW) per bilateral link — stored in `ADMM["SharedCap"]`, updated by `contract_capacity.jl`, **not** chosen independently by buyer and seller. There is no separate MW clearing price for $C$. Settlement strike $K$ is a scalar €/MWh (uniform over hours) equal to the W-mean of bundled physical spot (PPA: elec+GC; HPA: H₂+H₂-GC when `negotiated`). $\lambda^{\mathrm{contract}}$ clears **hedge quantity** $q$ only; it is not the strike.
 
 ### 9.5 Agent Parameters
 
 See `Data/data.yaml` for the full annotated configuration. Key parameters:
 
 - **VRES**: `Capacity`, `Profile_Column`, `MarginalCost`
-- **Conventional**: `Capacity`, `StageCapacityShares`, `StageTechnologies` (name/fuel/efficiency/vom per stage), `PeakTechnology` (legacy `StageBaseCosts` / `FinalMarginalCost` / `MarginalCost` still accepted as a fallback)
+- **Conventional**: `Capacity`, `Technology` (name/fuel/efficiency/vom) for flat plants; or legacy `StageCapacityShares`, `StageTechnologies`, `PeakTechnology` (`StageBaseCosts` / `FinalMarginalCost` / scalar `MarginalCost` still accepted)
 - **Consumer**: `PeakLoad`, `Load_Column`, `A_E`, `B_E` (quadratic utility)
 - **Electrolyzer**: `Capacity_Electrolyzer`, `Capacity_H2_Output`, `SpecificConsumption`, `OperationalCost`
 - **Green offtaker**: `Capacity_H2_In`, `Capacity_EP_Out`, `Alpha`, `ProcessingCost`
@@ -1982,7 +2113,7 @@ See `Data/data.yaml` for the full annotated configuration. Key parameters:
 
 ### 9.6 NL Calibration and Data Sources
 
-This model is calibrated to the **Netherlands, base year 2021**. Every input that represents Dutch reality is tagged `[NL]` in `Data/data.yaml` with a short source key; the keys are resolved here and in §14. Endogenous variables (installed capacities after investment, all market prices) are **outputs**, not inputs — the values below are the *inputs/seeds* the optimiser starts from or is bounded by.
+This model is calibrated to the **Netherlands, base year 2025** (installed capacities from CBS 2025 nader voorlopig; fuel and wholesale prices from **2024** annual averages — the latest complete market year). Every input that represents Dutch reality is tagged `[NL]` in `Data/data.yaml` with a short source key; the keys are resolved here and in §14. Endogenous variables (installed capacities after investment, all market prices) are **outputs**, not inputs — the values below are the *inputs/seeds* the optimiser starts from or is bounded by.
 
 **Unit convention.** Ammonia (the end product, EP) is accounted on an energy basis using its lower heating value **LHV = 18.6 MJ/kg ⇒ 5.167 MWh_EP per tonne NH₃** `[LHV]`. All €/t ↔ €/MWh_EP and Mt ↔ TWh conversions use this factor (e.g. 1000 €/t ÷ 5.167 ≈ 194 €/MWh_EP; 3 Mt/yr × 5.167 ≈ 15.5 TWh/yr).
 
@@ -1990,38 +2121,38 @@ This model is calibrated to the **Netherlands, base year 2021**. Every input tha
 
 | Parameter (agent) | Value | Basis / derivation | Source |
 |---|---|---|---|
-| `base_year` | 2021 | Calendar year of the CBS capacity, fuel-price, and cost calibration; weather files use labels 1..5 | `[CBS-RE]`, `[CBS-EP]` |
-| Solar `Capacity` | 14,823 MW | CBS installed solar PV at end-2021 (14,823 MWp) | `[CBS-RE]` |
-| Wind `Capacity` | 7,700 MW | CBS installed wind (on+offshore) at end-2021 | `[CBS-RE]` |
-| Solar `FixedCost_per_MW` | 90,000 €/MW-yr | ≈0.75 M€/MW CAPEX+FOM, 25 yr, 8% WACC ⇒ LCOE ≈43 €/MWh | `[IRENA-2022]` |
-| Wind `FixedCost_per_MW` | 170,000 €/MW-yr | ≈2.0 M€/MW (offshore-leaning) CAPEX+FOM ⇒ LCOE ≈57 €/MWh | `[IRENA-2022]` |
-| Conventional `Capacity` | 16,000 MW | NL dispatchable fossil fleet ~16 GW (mostly gas) | `[CBS-EP]`, `[TNO-2026]` |
-| Conventional `StageCapacityShares` | [0.08, 0.12, 0.80] | NL fossil generation ≈80% gas, small coal/biomass residual | `[CBS-EP]` |
-| `Fuel.GasPrice` | 47.15 €/MWh_th | TTF 2021 annual average; the anchor from which both power and ammonia gas costs are derived (§9.8) | `[TTF-2021]` |
-| `Fuel.CO2Price` | 52.64 €/tCO₂ | EU-ETS EUA 2021 annual average | `[ETS-2021]` |
-| Conventional stage efficiencies | 0.42 / 0.38 / 0.58, peak 0.38 | Coal steam, biomass, modern NL CCGT, OCGT peaker (net LHV) | `[IEA-WEO]` |
-| ⇒ derived stage SRMC at base gas | [75.2, 81.9, 101.1] / tail 155.0 €/MWh | fuel ÷ η + (EF ÷ η) × CO₂ + VOM; CCGT ≈101 €/MWh_e is consistent with 2021 NL day-ahead | `[TTF-2021]`, `[ETS-2021]`, `[IPCC-EF]` |
-| Consumer `PeakLoad` | 20,000 MW | NL system peak ~20 GW; annual load ≈117 TWh (2021) | `[CBS-EP]` |
-| Electrolyser `SpecificConsumption` | 1.5 MWh_e/MWh_H₂ | PEM efficiency ≈67% | `[IEA-H2]` |
-| Electrolyser `FixedCost_per_MW_Electrolyzer` | 130,000 €/MW-yr | ≈1.1 M€/MW installed (2020–21, ~100 MW), 8% WACC / 20 yr ⇒ ~112 k€ annuity + ~18 k€ fixed O&M | `[DEA-2020]`, `[IEA-H2]` |
+| `base_year` | 2025 | Calendar year of the CBS capacity and cost calibration; fuel/market anchor year 2024; weather files use labels 1..5 | `[CBS-RE]`, `[CBS-EP]` |
+| Solar `Capacity` | 25,881 MW | CBS installed solar PV at end-2025 nader voorlopig (25,881 MWp) | `[CBS-RE]` |
+| Wind `Capacity` | 11,782 MW | CBS installed wind (on+offshore) at end-2025 nader voorlopig | `[CBS-RE]` |
+| Solar `FixedCost_per_MW` | 95,000 €/MW-yr | ≈0.79 M€/MW CAPEX+FOM, 25 yr, 8% WACC ⇒ LCOE ≈50 €/MWh | `[IRENA-2024]` |
+| Wind `FixedCost_per_MW` | 185,000 €/MW-yr | ≈2.2 M€/MW (offshore-leaning) CAPEX+FOM ⇒ LCOE ≈62 €/MWh | `[IRENA-2024]` |
+| Conventional capacity | 14,040 / 1,800 / 2,160 MW | CCGT / coal / biomass — 78/10/12% of 18 GW fossil proxy; matches 2024 generation shares | `[CBS-EP]` |
+| Conventional flat SRMC at base gas | 83.3 / 85.4 / 89.8 €/MWh_e | CCGT / coal / biomass from `Fuel` block; merit order via market | `[TTF-2024]`, `[ETS-2024]`, `[IPCC-EF]` |
+| `Fuel.GasPrice` | 34.40 €/MWh_th | TTF 2024 annual average; anchor for gas-linked power and ammonia costs (§9.8) | `[TTF-2024]` |
+| `Fuel.CO2Price` | 64.79 €/tCO₂ | EU-ETS EUA 2024 annual average | `[ETS-2024]` |
+| Consumer `PeakLoad` | 19,500 MW | NL system peak 19.48 GW (ENTSO-E 2024); annual load ≈109 TWh (2024 net consumption) | `[CBS-EP]`, `[ENTSOE-PEAK-2024]` |
+| Electrolyser `SpecificConsumption` | 1.5 MWh_e/MWh_H₂ | PEM efficiency ≈67% LHV | `[IEA-H2]` |
+| Electrolyser `Capacity_Electrolyzer` (seed) | 800 MW_e | IEA-style electrical nameplate; implied H₂ = 800/1.5 = 533.3 MW_H2 ≈ 20% of NL NH₃ H₂ feed | `[PBL-2019]`, `[IEA-H2]` |
+| Electrolyser `FixedCost_per_MW_Electrolyzer` | 262,000 €/MW_e-yr | IEA 2160 USD/kWe × 0.92 €/USD = 1.987 M€/MW_e; CRF 8%/20 yr + 3% FOM | `[IEA-H2-2024]` |
+| Green offtaker `Capacity_EP_Out` (seed) | 400 MW_EP | Product nameplate ≈20% of NL ammonia; H₂ feed = 400/0.75 = 533.3 MW_H2 | `[PBL-2019]` |
+| Green offtaker `FixedCost_per_MW_EP_Out` | 158,000 €/MW_EP-yr | IEA 770 USD/(t NH₃/y) synthesis+ASU × 0.92 × 8760/5.167 = 1.201 M€/MW_EP; CRF+3% FOM | `[IEA-NH3-2024]` |
 | EP demand `Total_Demand` | 1,970 | ≈3 Mt NH₃/yr (Yara Sluiskil ~1.8 Mt + OCI Geleen ~1.2 Mt) ⇒ ~15.5 TWh/yr | `[PBL-2019]`, `[LHV]` |
-| EP `initial_price` | 118 €/MWh_EP | ADMM starting guess only (not a calibration target): derived grey MC 103.4 plus the cost of the GC mandate | `[H2EU-2023]`, `[LHV]` |
-| Green offtaker `Capacity_H2_In` (seed) | 533 MW_H₂ | ≈20% of NL ammonia nameplate via green/electrolysis route | `[PBL-2019]` |
+| EP `initial_price` | 100 €/MWh_EP | ADMM starting guess only (not a calibration target): derived grey MC 85.7 plus the cost of the GC mandate | `[H2EU-2023]`, `[LHV]` |
 | Green offtaker `Alpha`, Grey `gamma_NH3` | 0.75 | H₂↔EP conversion ≈70–80% Haber–Bosch LHV efficiency | `[H2EU-2023]` |
 | Grey offtaker `Capacity` | 1,570 MW_EP | ≈80% of NL ammonia nameplate (domestic conventional + ex-import share) | `[PBL-2019]` |
 | Grey offtaker `GasIntensity` | 1.720 MWh_th/MWh_EP | SMR route, 32 GJ_LHV per t NH₃ ÷ 5.167 MWh/t | `[FE-BAT]`, `[DECHEMA-2030]` |
 | Grey offtaker `CO2Intensity` | 0.348 tCO₂/MWh_EP | 1.8 tCO₂/t NH₃ (process + fuel) ÷ 5.167 MWh/t, charged in full | `[FE-BAT]` |
-| ⇒ derived grey MC at base gas | 103.4 €/MWh_EP (≈534 €/t) | 81.1 gas + 18.3 CO₂ + 4.0 O&M; sits at the bottom of the published grey LCOA range 534–891 €/t for gas at 40–80 €/MWh | `[H2EU-2023]`, `[TTF-2021]`, `[ETS-2021]` |
+| ⇒ derived grey MC at base gas | 85.7 €/MWh_EP (≈443 €/t) | 59.2 gas + 22.5 CO₂ + 4.0 O&M; consistent with 2024 NW Europe ammonia $528–581/t | `[H2EU-2023]`, `[TTF-2024]`, `[ETS-2024]`, `[OCI-NH3-2024]` |
 | GC mandate `gamma_GC` (in code) | 0.42 | EU RED III RFNBO-in-industry target (≥42% renewable H₂ by 2030) | `[RED-III]` |
-| GC demand `PeakLoad` | 18,000 MW_GC | Most NL consumption seeks green certification (~system load) | `[CBS-EP]` |
+| GC demand `PeakLoad` | 17,500 MW_GC | Most NL consumption seeks green certification (~system load) | `[CBS-EP]` |
 | GC demand `A_GC` | 10 €/MWh_GC | Max WTP ≈ recent EU GoO price peak (clears lower) | `[GoO]` |
 
 #### Engineering estimates and modeling choices (not direct NL measurements)
 
 These are physically reasonable but not pulled from a single NL statistic; flagged in `data.yaml` so they are not mistaken for empirical data:
 
-- **Green offtaker `ProcessingCost` = 12 €/MWh_EP (≈62 €/t)** and **`FixedCost_per_MW_EP_Out` = 120,000 €/MW-yr** (~1.2 M€/MW NH₃ synthesis plant) — engineering estimates for Haber–Bosch + air separation + compression.
-- **Electrolyser `OperationalCost` = 3 €/MWh_H₂** — variable O&M estimate.
+- **Green offtaker `ProcessingCost` = 12 €/MWh_EP (≈62 €/t)** — variable O&M for Haber–Bosch + air separation + compression (not the plant CAPEX).
+- **Electrolyser `OperationalCost` = 3 €/MWh_H₂** — variable O&M estimate (water, stack); fixed O&M is inside the IEA 3%-of-CAPEX annuity.
 - **Consumer `A_E` = 500 €/MWh, `B_E` = 0.0025; GC demand `B_GC` = 0.0005** — quadratic-utility shape parameters; chosen to keep electricity demand near-inelastic at the ~20 GW scale and the GC market well-scaled (not NL price observations).
 - **Importer `ImportCost` = 250 €/MWh_EP** — inactive (`Capacity = 0`); retained for re-enabling imports.
 - **Risk parameters `gamma` = 1.0 (risk-neutral default; set `0.5` for risk-averse runs), `beta` = 0.95; all `rho_initial`, tolerances, `max_iter`** — algorithmic/risk-preference settings, not NL data.
@@ -2079,7 +2210,7 @@ The candidate numbering above is internal to the selection script. The five winn
 | 4 | 2017 | **0.173** | 0.246 | 4.7% | 5.51 | 0.08 | High-wind / low-solar year |
 | 5 | 2018 | **0.193** | 0.239 | 4.4% | 5.57 | **0.22** | Hot high-solar year: best solar CF, by far the hottest summer |
 
-Label `1` is also the **reference** year: it anchors the NL calibration, and `data.yaml` capacities and costs are NL **2021** values (`General.base_year`). **Dunkelflaute** here means the share of **days** whose *daily-mean* wind CF is below 0.10 **and** daily-mean solar CF below 0.05 — a sustained low-renewable day, not an isolated calm hour. Exact figures, medoid days, and weights are written to `Input/weather_scenario_summary.json`.
+Label `1` is also the **reference** year: it anchors the NL calibration, and `data.yaml` capacities and costs are NL **2025** values (`General.base_year`). **Dunkelflaute** here means the share of **days** whose *daily-mean* wind CF is below 0.10 **and** daily-mean solar CF below 0.05 — a sustained low-renewable day, not an isolated calm hour. Exact figures, medoid days, and weights are written to `Input/weather_scenario_summary.json`.
 
 The set spans the two directions that matter for a VRES-plus-electrolysis system. The **wind/scarcity axis** runs from label 1 (benign: wind CF 0.28, dunkelflaute 3.0%) to label 2 (stressed: 0.19 and 8.2%) — a 32% swing in wind energy combined with nearly three times as many sustained low-renewable days, which is where an electrolyser's utilisation and a risk-averse agent's tail loss are decided. The **temperature axis** runs from label 2's cold winter to label 5's summer, and through the demand model below this moves the *level* of load, not just its shape, so the stressed weather year is also the high-demand year.
 
@@ -2093,10 +2224,10 @@ Hourly weather is fetched from the **[Open-Meteo Historical API](https://open-me
 | `wind_speed_100m` (km/h) | **WIND** | Standard turbine power curve (cut-in 3 m/s, rated 12 m/s, cut-out 25 m/s), cubic between cut-in and rated |
 | `temperature_2m` (°C) | **LOAD_E** | Heating/cooling degree-day model on an NL diurnal/seasonal shape (below) |
 
-**Common calibration across all years.** The raw ERA5-to-CF conversion is generic and does not reproduce the NL fleet's real capacity factors (turbine hub heights, PV orientation and losses, siting). Two multiplicative constants are therefore derived **once** by bisection on the reference year, so that *its* annual means hit the NL CBS 2021 fleet averages of **18% solar CF and 28% wind CF** `[CBS-RE]`:
+**Common calibration across all years.** The raw ERA5-to-CF conversion is generic and does not reproduce the NL fleet's real capacity factors (turbine hub heights, PV orientation and losses, siting). Two multiplicative constants are therefore derived **once** by bisection on the reference year, so that *its* annual means hit the NL CBS 2024 fleet averages of **18.2% solar CF and 28.0% wind CF** `[CBS-RE]`:
 
 $$
-m_{\mathrm{solar}} = 1.4523, \qquad m_{\mathrm{wind}} = 1.5711
+m_{\mathrm{solar}} = 1.4707, \qquad m_{\mathrm{wind}} = 1.5711
 $$
 
 and the **same two constants are then applied to all five years** (with a clamp to `[0, 1]`). This is the important methodological point: no year is individually rescaled to a target. Inter-year differences in the table above are genuine ERA5 weather differences seen through one fixed NL fleet, which is what a scenario set should represent. Rescaling each year to its own annual target would have erased the very spread the scenarios exist to capture — every year would have shown 18%/28% by construction, leaving only shape differences and no meaningful energy risk.
@@ -2127,7 +2258,7 @@ A multiplicative thermal factor (rather than an additive offset) means the tempe
 | Cooling sensitivity $a_{C}$ | 0.008 /°C | Low NL air-conditioning penetration `[BF-2008]` |
 | Weekend factor $f_{\mathrm{dow}}$ | 0.87 | NL weekend load ≈13% below weekday; applied on the **real calendar** weekday pattern of each source year `[ENTSOE-LOAD]` |
 | Seasonal amplitude $a_{\ell}$ | 0.05 | ±5% non-thermal seasonal term (lighting, activity), peaking mid-January |
-| Hour-of-day shape $s_{\mathrm{hod}}$ | base 0.58, morning bump +0.18 at 08:00, evening peak +0.30 at 19:00 | Amplitudes calibrated so the **reference year's load factor is 0.685**, matching NL 2021 (≈117 TWh against a ≈19.5 GW peak ⇒ 13.4/19.5 = 0.685) `[CBS-EP]`. A peakier shape understates annual energy for a given peak |
+| Hour-of-day shape $s_{\mathrm{hod}}$ | base 0.58, morning bump +0.18 at 08:00, evening peak +0.30 at 19:00 | Amplitudes calibrated so the **reference year's load factor is 0.636**, matching NL 2024 (≈108.5 TWh net consumption against a 19.48 GW peak) `[CBS-EP]`, `[ENTSOE-PEAK-2024]`. A peakier shape understates annual energy for a given peak |
 
 **Common normalisation.** All five years are divided by **one** shared constant — the maximum raw load across the whole scenario set — not by their own maxima. A per-year normalisation would force every year to peak at exactly 1.0 p.u. and silently delete the demand differences between them, which would defeat the purpose of coupling demand to weather at all. With the common divisor, the differences survive:
 
@@ -2138,6 +2269,8 @@ A multiplicative thermal factor (rather than an additive offset) means the tempe
 | 3 (2016) | 0.973 | 0.661 | 0.680 |
 | 4 (2017) | 0.979 | 0.659 | 0.673 |
 | 5 (2018, hot) | 0.987 | 0.660 | 0.669 |
+
+(Common load normaliser across scenarios: peak raw load / **1.1246** ⇒ cold year 2 peaks at 1.0 p.u.; `PeakLoad` in `data.yaml` = 19,500 MW scales this to absolute MW.)
 
 The cold year 2 sets the system peak and carries the highest mean load; the hot year 5 has a *lower* mean but a higher peak than the reference, because cooling load concentrates in summer afternoons. `PeakLoad` in `data.yaml` is therefore the system peak **across scenarios**, and milder years genuinely sit below it.
 
@@ -2293,10 +2426,10 @@ The gas price is an **explicit model input**, not a number baked into each agent
 
 ```yaml
 Fuel:
-  GasPrice:  47.15     # €/MWh_th — TTF 2021 annual average
-  CoalPrice: 12.40     # €/MWh_th — API2 2021 average
-  BiomassPrice: 30.00  # €/MWh_th — NW-Europe industrial wood pellet 2021
-  CO2Price:  52.64     # €/tCO₂ — EU-ETS EUA 2021 annual average
+  GasPrice:  34.40     # €/MWh_th — TTF 2024 annual average
+  CoalPrice: 12.54     # €/MWh_th — API2 2024 average
+  BiomassPrice: 33.00  # €/MWh_th — NW-Europe industrial wood pellet 2024
+  CO2Price:  64.79     # €/tCO₂ — EU-ETS EUA 2024 annual average
   GasEmissionFactor:     0.2016   # tCO₂/MWh_th
   CoalEmissionFactor:    0.3406
   BiomassEmissionFactor: 0.0
@@ -2304,7 +2437,7 @@ Fuel:
 
 Both gas-consuming agents derive their variable cost from it, so a single price shock moves power and ammonia **together and consistently** — which is the physically correct behaviour and was not true of the previous hard-coded costs.
 
-**Conventional generator** — each merit-order stage names a technology and its efficiency, and its short-run marginal cost is computed as
+**Conventional generator** — each flat plant (or legacy merit-order stage) names a technology and its efficiency, and its short-run marginal cost is computed as
 
 $$
 \mathrm{SRMC} \;=\; \frac{p_{\mathrm{fuel}}}{\eta} \;+\; \frac{\mathrm{EF}}{\eta}\, p_{\mathrm{CO_2}} \;+\; \mathrm{VOM}
@@ -2320,17 +2453,17 @@ with `GasIntensity = 1.720` MWh_th/MWh_EP (32 GJ_LHV per t NH₃ ÷ 5.167 MWh/t)
 
 Only **gas** carries the scenario multiplier. The +10%/+20% scenarios represent a gas-market shock, so coal, biomass, and the ETS price are held fixed — which also means the shock genuinely reorders the merit order rather than shifting it uniformly.
 
-| Scenario gas level | Gas price (€/MWh_th) | Coal stage | Biomass stage | CCGT stage | OCGT tail | Grey NH₃ MC |
+| Scenario gas level | Gas price (€/MWh_th) | CCGT | Coal | Biomass | OCGT (benchmark)* | Grey NH₃ MC |
 |---|---|---|---|---|---|---|
-| 1.00 × | 47.15 | 75.2 | 81.9 | **101.1** | 155.0 | **103.4** €/MWh_EP (534 €/t) |
-| 1.10 × | 51.86 | 75.2 | 81.9 | 109.2 | 167.4 | 111.5 €/MWh_EP (576 €/t) |
-| 1.20 × | 56.58 | 75.2 | 81.9 | 117.3 | 179.8 | 119.6 €/MWh_EP (618 €/t) |
+| 1.00 × | 34.40 | **83.3** | 85.4 | 89.8 | 127.9 | **85.7** €/MWh_EP (443 €/t) |
+| 1.10 × | 37.84 | **89.3** | 85.4 | 89.8 | 136.9 | 91.6 €/MWh_EP (473 €/t) |
+| 1.20 × | 41.28 | **95.2** | 85.4 | 89.8 | 146.0 | 97.6 €/MWh_EP (504 €/t) |
 
-(Power values in €/MWh_e.) Note the merit order **changes** across the grid: at 1.00 × gas the CCGT stage (101.1) sits above biomass (81.9) by 19 €/MWh, and by 1.20 × the gap widens to 35 €/MWh, so gas shocks push the cheap non-gas stages further into the money before the expensive gas tail sets price.
+(Power values in €/MWh_e.) *OCGT is not a separate agent; the column is the peaking SRMC used for contract `ng_elec` benchmarks in `contract_strike.jl`. At 1.00 × gas, CCGT is cheapest; at 1.10 × gas, CCGT exceeds coal (merit order inverts); at 1.20 ×, CCGT exceeds both coal and biomass.
 
-#### Why the 2021 anchor
+#### Why the 2024 fuel anchor
 
-The gas price is anchored to the **TTF 2021 annual average of 47.15 €/MWh_th**, consistent with `General.base_year = 2021` and with the ETS and fuel prices around it. This replaced an earlier inconsistency worth recording: the conventional generator's hard-coded stage costs implied TTF ≈ 47 €/MWh_th, while the grey offtaker's hard-coded 180 €/MWh_EP implied TTF ≈ 92 €/MWh_th — the two agents were effectively buying gas in different markets, roughly a factor of two apart, so a gas-price scenario could not have been defined coherently. Deriving both from one `Fuel` block removes that by construction: the resulting grey cost of 534 €/t NH₃ sits in the published 2021 grey-ammonia range (534–891 €/t for gas at 40–80 €/MWh) `[H2EU-2023]`, and the CCGT SRMC of ~101 €/MWh_e is consistent with observed 2021 NL day-ahead pricing.
+The gas price is anchored to the **TTF 2024 annual average of 34.40 €/MWh_th**, consistent with `General.base_year = 2025` (capacities) and with the ETS and fuel prices around it. Deriving both power and ammonia costs from one `Fuel` block keeps them coherent: the resulting grey cost of 443 €/t NH₃ sits near the 2024 NW Europe ammonia range ($528–581/t) `[OCI-NH3-2024]`, and the CCGT SRMC of ~83 €/MWh_e is a plausible gas-linked benchmark (2024 NL day-ahead averaged 77 €/MWh as VRES and imports often set price) `[NL-DA-2024]`.
 
 #### What this changes downstream
 
@@ -2338,11 +2471,12 @@ Because costs now vary by scenario, the affected parameters became **scenario-in
 
 | Parameter | Shape | Consumed by |
 |---|---|---|
-| `ConvStageBaseCost`, `ConvStageSlope` | `3 × nYears` | `build_power_agent.jl`, `solve_power_agent.jl`, `compute_agent_objective.jl`, `compute_social_risk_metrics.jl` |
-| `ConvFinalMarginalCost` | `nYears` | as above |
+| Conventional `MarginalCostByYear` | `nYears` | `build_power_agent.jl`, `solve_power_agent.jl`, `compute_agent_objective.jl`, `compute_social_risk_metrics.jl` |
+| `ConvStageBaseCost`, `ConvStageSlope` (legacy) | `3 × nYears` | as above, when `StageTechnologies` is set |
+| `ConvFinalMarginalCost` (legacy) | `nYears` | as above |
 | Grey offtaker `MarginalCostByYear` | `nYears` | `build_offtaker_agent.jl`, `solve_offtaker_agent.jl`, `compute_agent_objective.jl`, `compute_social_risk_metrics.jl` |
 
-The legacy scalar forms (`StageBaseCosts`, `FinalMarginalCost`, a scalar `MarginalCost`) are still honoured if the derived inputs are absent, so older `data.yaml` files keep working.
+Flat `Technology` plants and legacy staged stacks can coexist in one model. The legacy scalar forms (`StageBaseCosts`, `FinalMarginalCost`, a scalar `MarginalCost`) are still honoured if the derived inputs are absent.
 
 #### Choosing `beta` with 15 scenarios
 
@@ -2459,8 +2593,10 @@ Now/
 │   ├── Capacity_Consensus.csv        # Per-iteration capacity equality split (§6.4)
 │   ├── Offtaker_GC_Diagnostics.csv   # GC compliance per offtaker
 │   ├── H2_Producer_Diagnostics.csv   # H₂ GC-to-production ratio
-│   ├── Risk_Metrics.csv              # Welfare / CVaR summary vs SP benchmark
-│   ├── Social_Welfare_Per_Year.csv   # Per-scenario welfare and loss
+│   ├── Risk_Metrics.csv              # Welfare / CVaR summary vs SP + demand/rest split
+│   ├── Social_Welfare_Per_Year.csv   # Per-scenario welfare, loss, demand, ex-demand
+│   ├── Welfare_By_Group_Per_Year.csv # Planner welfare by group (no transfers)
+│   ├── Welfare_By_Agent_Per_Year.csv
 │   ├── Private_CVaR_By_Agent.csv     # Per-agent private CVaR (written only when γ < 1)
 │   └── TimerOutput.yaml              # Profiling data
 │
@@ -2468,7 +2604,7 @@ Now/
 ├── me_top_results/              # Output from me_top.jl
 ├── me_sop_results/              # Output from me_sop.jl
 │   ├── ADMM_Convergence.csv          # Same as market_exposure + PPA/HPA energy + shared-cap columns
-│   ├── ADMM_Diagnostics.csv          # Same + PPA/HPA + cap-consensus diagnostics
+│   ├── ADMM_Diagnostics.csv          # Same + PPA/HPA energy + shared-C motion
 │   ├── Electricity_Market_History.csv
 │   ├── Hydrogen_Market_History.csv
 │   ├── Electricity_GC_Market_History.csv
@@ -2479,6 +2615,8 @@ Now/
 │   ├── Capacity_Consensus.csv
 │   ├── Risk_Metrics.csv
 │   ├── Social_Welfare_Per_Year.csv
+│   ├── Welfare_By_Group_Per_Year.csv
+│   ├── Welfare_By_Agent_Per_Year.csv
 │   ├── PPAs.csv                      # Per-VRES PPA summary
 │   ├── HPAs.csv                      # Per-GreenProducer HPA summary
 │   └── Green_Agents_Detail.csv       # Detailed PPA breakdown for VRES and GreenProducer
@@ -2493,7 +2631,9 @@ Now/
     ├── SP_Primal_Quantities.csv      # Full primal allocation per (jy, jd, jh)
     ├── Agent_Objectives_Per_Timestep.csv
     ├── Risk_Metrics.csv              # Written by compute_social_risk_metrics.jl
-    └── Social_Welfare_Per_Year.csv   # Written by compute_social_risk_metrics.jl
+    ├── Social_Welfare_Per_Year.csv
+    ├── Welfare_By_Group_Per_Year.csv
+    └── Welfare_By_Agent_Per_Year.csv
 ```
 
 ---
@@ -2516,7 +2656,7 @@ Now/
 |---|---|
 | `define_scenarios.jl` | `build_scenario_grid` expands the `Scenarios` block into the flat index `jy = 1..nYears` with lookups `years[jy]` (weather file label) and `gas_multiplier[jy]`. `fuel_price_ef` and `thermal_srmc` turn the `Fuel` block into per-scenario commodity prices and thermal SRMCs; `describe_scenario_grid` prints the grid at start-up. |
 | `define_common_parameters.jl` | Creates `mod.ext` dictionaries (sets, parameters, timeseries, variables, constraints, expressions). Fills JH/JD/JY, W, P, γ, β. Determines market participation from agent type. Pre-allocates ADMM placeholder arrays. |
-| `define_power_parameters.jl` | VRES: capacity, AF profile. Conventional: capacity, AF=1, 3-stage cost curve (`ConvStageCap`, `ConvStageBaseCost`, `ConvStageSlope`) where the base costs and slopes are **`3 × nYears`** matrices derived per scenario from `StageTechnologies` + the `Fuel` block (legacy absolute stage costs still accepted). Consumer: PeakLoad, LOAD_E profile, A_E, B_E. |
+| `define_power_parameters.jl` | VRES: capacity, AF profile. Conventional: capacity, AF=1; flat plant via `Technology` → `MarginalCostByYear`, or legacy 3-stage cost curve (`ConvStageCap`, `ConvStageBaseCost`, `ConvStageSlope`) from `StageTechnologies` + `Fuel`. Consumer: PeakLoad, LOAD_E profile, A_E, B_E. |
 | `define_H2_parameters.jl` | Electrolyzer: Capacity_Electrolyzer, Capacity_H2_Output, SpecificConsumption, OperationalCost, η_elec_H2. |
 | `define_offtaker_parameters.jl` | Copies all keys from agent block; sets gamma_GC = 0.42 (regulatory mandate). For the grey offtaker, derives `MarginalCostByYear` (length `nYears`) from `GasIntensity`, `CO2Intensity`, `VariableOM`, and the `Fuel` block; the scalar `MarginalCost` is retained at the base-scenario value for backward compatibility. |
 | `define_elec_GC_demand_parameters.jl` | PeakLoad, Load_Column, A_GC, B_GC, LOAD_GC timeseries. |
@@ -2542,7 +2682,7 @@ Now/
 
 | File | Role |
 |---|---|
-| `solve_power_agent.jl` | Rebuilds objective with iteration-specific λ, ḡ, ρ. For VRES: recomputes loss expressions with iteration-specific λ, deletes and re-adds CVaR shortfall/linking constraints. For conventional: applies the 3-stage convex variable cost using the **scenario-indexed** `stage_base[s, jy]` / `stage_slope[s, jy]` (single linear `MarginalCost` only if stage inputs are absent). Calls `optimize!`. |
+| `solve_power_agent.jl` | Rebuilds objective with iteration-specific λ, ḡ, ρ. For VRES: recomputes loss expressions with iteration-specific λ, deletes and re-adds CVaR shortfall/linking constraints. For conventional: flat `MarginalCostByYear[jy]×g` or legacy 3-stage convex cost using scenario-indexed `stage_base[s, jy]` / `stage_slope[s, jy]`. Calls `optimize!`. |
 | `solve_H2_agent.jl` | Rebuilds objective with iteration-specific λ, ḡ, ρ. Recomputes loss expressions with iteration-specific λ (4-market), deletes and re-adds CVaR shortfall/linking constraints. Calls `optimize!`. |
 | `solve_offtaker_agent.jl` | Rebuilds objective for green/grey/importer. For GreenOfftaker: recomputes loss expressions with iteration-specific λ, deletes and re-adds CVaR shortfall/linking constraints. Calls `optimize!`. |
 | `solve_elec_GC_demand_agent.jl` | Rebuilds utility − expenditure + ADMM penalty; calls `optimize!`. |
@@ -2565,7 +2705,7 @@ Now/
 |---|---|
 | `save_results.jl` | Writes: ADMM_Convergence.csv, ADMM_Diagnostics.csv, Capacity_Consensus.csv, per-market history CSVs, Agent_Summary.csv, Agent_Objectives_Per_Timestep.csv, Offtaker_GC_Diagnostics.csv, H2_Producer_Diagnostics.csv, Market_Prices.csv. |
 | `save_results_contracts.jl` | Writes the same major ADMM outputs as save_results (with PPA/HPA columns) plus: PPAs.csv, HPAs.csv, Green_Agents_Detail.csv. Agent_Summary matches market_exposure structure (no explicit contract columns). |
-| `compute_social_risk_metrics.jl` | Post-processing: social CVaR, $\mathbb{E}[\mathrm{SW}]$, private CVaR sum, SP comparison; writes Risk_Metrics.csv. |
+| `compute_social_risk_metrics.jl` | Post-processing: social CVaR, \(\mathbb{E}[\mathrm{SW}]\), demand vs ex-demand split, private CVaR sum, SP comparison; writes Risk_Metrics.csv and welfare decomposition CSVs. |
 | `save_social_planner_results.jl` | Called after the direct QCP solve, with duals available. Writes: Market_Prices.csv, SP_Primal_Quantities.csv, SP_Capacities.csv, Agent_Summary.csv, Agent_Objectives_Per_Timestep.csv. (Risk_Metrics.csv and Social_Welfare_Per_Year.csv are written separately by `compute_social_risk_metrics.jl`, which also prints the risk summary.) |
 
 ---
@@ -2585,14 +2725,16 @@ Now/
 | `Market_Prices.csv` | Final ADMM prices $\lambda$ for all five markets, one row per (jy, jd, jh). Same schema as the social planner's file (§12.3), so the two can be diffed directly. |
 | `Offtaker_GC_Diagnostics.csv` | Columns: `AgentID`, `Type`, `EP_total`, `H2_in_total` (H₂ basis the mandate is measured on: bought H₂ for green, `ep/γ_NH3` for grey), `H2_GC_total`, `GC_share` (= GCs / H₂ basis), `GC_mandate` (= `γ_GC`), `GC_slack` (= share − mandate; > 0 ⇒ compliant). |
 | `H2_Producer_Diagnostics.csv` | Columns: `AgentID`, `H2_total`, `H2_GC_total`, `GC_per_H2`. |
-| `Risk_Metrics.csv` | `expected_social_welfare`, `social_CVaR`, `sum_private_CVaR`, gap vs SP — §7.6. |
-| `Social_Welfare_Per_Year.csv` | Per-year aggregate welfare and loss at the ADMM allocation. |
+| `Risk_Metrics.csv` | `expected_social_welfare`, `social_CVaR`, `sum_private_CVaR`, gap vs SP, demand vs ex-demand split — §7.6. |
+| `Social_Welfare_Per_Year.csv` | Per-year aggregate welfare, loss, `welfare_demand`, `welfare_ex_demand`. |
+| `Welfare_By_Group_Per_Year.csv` | Per-year planner welfare by group (elec/GC demand vs VRES, conventional, H₂, offtakers). |
+| `Welfare_By_Agent_Per_Year.csv` | Per-year planner welfare by agent id. |
 | `Private_CVaR_By_Agent.csv` | Per-agent private CVaR (VRES, electrolyzer, green offtaker) when $\gamma<1$. |
 | `TimerOutput.yaml` | Profiling: time spent in imbalances, residuals, capacity dual update, price updates, solve, etc. |
 
 ### 12.2 ME contract results (`me_pap_results/`, `me_top_results/`, `me_sop_results/`)
 
-The ME contract entry points produce the same major ADMM outputs as market_exposure (ADMM_Convergence, ADMM_Diagnostics, `Capacity_Consensus.csv`, 5× Market_History, Agent_Summary, Market_Prices, Risk_Metrics, Social_Welfare_Per_Year), with additional PPA/HPA energy columns and **shared-cap alignment** columns (`ppa_cap_*`, `hpa_cap_*`: $|C - q^{\mathrm{peak}}|$ and $|C^k - C^{k-1}|$) in convergence and diagnostics. Per-agent **investment** capacity columns and `Capacity_Consensus.csv` follow the equality-split structure in §6.4. Two ME-only files are **not** written by the contracts saver: `Offtaker_GC_Diagnostics.csv` and `H2_Producer_Diagnostics.csv`. Additional contract outputs:
+The ME contract entry points produce the same major ADMM outputs as market_exposure (ADMM_Convergence, ADMM_Diagnostics, `Capacity_Consensus.csv`, 5× Market_History, Agent_Summary, Market_Prices, Risk_Metrics, Social_Welfare_Per_Year, Welfare_By_Group_Per_Year, Welfare_By_Agent_Per_Year), with additional PPA/HPA energy columns and **shared-cap alignment** columns (`ppa_cap_*`, `hpa_cap_*`: $|C - q^{\mathrm{peak}}|$ and $|C^k - C^{k-1}|$) in convergence and diagnostics. Per-agent **investment** capacity columns and `Capacity_Consensus.csv` follow the equality-split structure in §6.4. Two ME-only files are **not** written by the contracts saver: `Offtaker_GC_Diagnostics.csv` and `H2_Producer_Diagnostics.csv`. Additional contract outputs:
 
 | File | Contents |
 |---|---|
@@ -2607,8 +2749,10 @@ Outputs from the **complete risk trading** benchmark (`social_planner.jl`; §4.8
 | File | Contents |
 |---|---|
 | `Market_Prices.csv` | Columns: `Time`, `Elec_Price`, `H2_Price`, `Elec_GC_Price`, `H2_GC_Price`, `EP_Price`. One row per (jy, jd, jh) timestep. Prices = balance-constraint duals scaled per §7.2: `dual / (W[jd,jy] × μ[jy])`, where `μ[jy]` is the effective scenario weight from the epigraph dual (equals `P[jy]` at $\gamma=1$; includes CVaR tail weight at $\gamma<1$). Expected marginal social values at $\gamma=1$; **risk-adjusted** social shadow prices at $\gamma<1$. |
-| `Risk_Metrics.csv` | **Long format**: columns `Metric`, `Value`, `Unit`, one row per metric (expected social welfare, social CVaR, recomputed ex-post CVaR, $\alpha$, $\gamma$, $\beta$, and for ADMM the gap vs SP). See §7.6. |
-| `Social_Welfare_Per_Year.csv` | One row per scenario (15 rows on the default grid). Columns: `case`, `scenario_year`, `probability`, `social_welfare`, `social_loss`. |
+| `Risk_Metrics.csv` | **Long format**: columns `Metric`, `Value`, `Unit`, including demand vs ex-demand split. See §7.6. |
+| `Social_Welfare_Per_Year.csv` | One row per scenario. Columns: `case`, `scenario_year`, `probability`, `social_welfare`, `social_loss`, `welfare_demand`, `welfare_ex_demand`. |
+| `Welfare_By_Group_Per_Year.csv` | Per-year planner welfare by group. |
+| `Welfare_By_Agent_Per_Year.csv` | Per-year planner welfare by agent. |
 | `Agent_Summary.csv` | Identical schema to the ME file — see §12.1. |
 | `SP_Capacities.csv` | Long format: `AgentID`, `jy`, `cap`. One row per capacity-owning agent per scenario. Because capacity is non-anticipative, `cap` is constant across `jy` for a given agent; the per-`jy` rows exist so the file can be joined against scenario-indexed results. |
 | `SP_Primal_Quantities.csv` | The full primal allocation, one row per (jy, jd, jh) slot — 2,880 rows on the default grid ($24 \times 8 \times 15$). Columns: `Time`, `jy`, `jd`, `jh`, plus one `<AgentID>_<market>` column for every agent–market pair. |
@@ -2706,23 +2850,34 @@ data.yaml  ──→  define_common_parameters!  ──→  mod.ext[:parameters]
 
 These source keys are referenced inline in `Data/data.yaml` (tag `[NL]`) and in the §9.6 calibration tables.
 
-- **`[CBS-RE]`** — Statistics Netherlands (CBS), *Renewable electricity; production and capacity* (table 82610ENG). Installed capacity end-2021: **solar PV 14,823 MWp, wind 7,700 MW**. [cbs.nl/en-gb/figures/detail/82610ENG](https://www.cbs.nl/en-gb/figures/detail/82610ENG)
-- **`[CBS-EP]`** — CBS, *Electricity; production and means of production* + NL electricity-sector statistics. NL **2021 consumption ≈117 TWh, peak demand ~20 GW**, fossil generation ≈80% gas, dispatchable fossil fleet on the order of ~16–24 GW. [cbs.nl/en-gb/figures/detail/37823eng](https://www.cbs.nl/en-gb/figures/detail/37823eng); overview: [Electricity sector in the Netherlands (Wikipedia)](https://en.wikipedia.org/wiki/Electricity_sector_in_the_Netherlands)
-- **`[TNO-2026]`** — TNO scenario study (COMPETES-TNO), Dutch dispatchable (gas-fired) capacity reference figures (~14.7 GW gas in the 2030 reference, used to corroborate the ~16 GW dispatchable proxy). [publications.tno.nl/publication/34645515](https://publications.tno.nl/publication/34645515/fLCICwBT/TNO-2026-R10080.pdf)
+- **`[CBS-RE]`** — Statistics Netherlands (CBS), *Renewable electricity; production and capacity* (table 82610ENG). Installed capacity end-2025 nader voorlopig: **solar PV 25,881 MWp, wind 11,782 MW**; 2024 normalised fleet CFs **18.24% solar, 28.01% wind**. [cbs.nl/en-gb/figures/detail/82610ENG](https://www.cbs.nl/en-gb/figures/detail/82610ENG); longread [Hernieuwbare energie in Nederland 2024](https://www.cbs.nl/nl-nl/longread/rapportages/2025/hernieuwbare-energie-in-nederland-2024/4-windenergie)
+- **`[CBS-EP]`** — CBS, *Electricity; production and means of production* (table 37823ENG) + *Electricity and heat by energy commodity* (80030ENG). NL **2024 net end-user consumption ≈108.5 TWh**; **2024 fossil generation ≈76% gas, 13% coal, 11% biomass**; central gas-fired electric capacity **≈17.9 GW**. [cbs.nl/en-gb/figures/detail/37823eng](https://www.cbs.nl/en-gb/figures/detail/37823eng); [cbs.nl/en-gb/figures/detail/80030eng](https://www.cbs.nl/en-gb/figures/detail/80030eng)
+- **`[ENTSOE-PEAK-2024]`** — ENTSO-E *Statistical Factsheet 2024*: NL highest hourly load **19,477 MW** on 8 Jan 2024 16:00–17:00 UTC. [ENTSO-E Statistical Factsheet 2024](https://eepublicdownloads.blob.core.windows.net/public-cdn-container/clean-documents/Publications/Statistics/Factsheet/entsoe_sfs2024_web.pdf)
+- **`[NL-DA-2024]`** — NL EPEX day-ahead annual average **77.29 €/MWh** (2024). [energy-charts.info NL prices](https://energy-charts.info/charts/price_average/chart.htm?c=NL&interval=year&year=2024); [Nationaal Energie Dashboard jaaroverzicht 2024](https://ned.nl/nl/achtergrond/jaaroverzicht-2024)
+- **`[TTF-2024]`** — Dutch TTF natural-gas front-month futures: **2024 annual average ≈34.4 €/MWh_th** (Energy-Charts 34.39; AleaSoft ICE 34.65). Anchor for `Fuel.GasPrice = 34.40`.
+- **`[ETS-2024]`** — EU ETS EUA front-year futures: **2024 average ≈64.8 €/tCO₂** (Energy-Charts 64.79; Veyt 66.5). Anchor for `Fuel.CO2Price = 64.79`.
+- **`[API2-2024]`** — ARA (API2) steam-coal benchmark: **2024 contract average ≈102 €/t** (TÜV/Mainova certification of ICE API2 month futures) ⇒ ≈12.5 €/MWh_th at 8.14 MWh_th/t.
+- **`[PELLET-2024]`** — NW-European industrial wood-pellet (I2) CIF ARA: **≈156 €/t** end-Q1 2024 (RBCN Biomass Market Update) ⇒ ≈33 €/MWh_th at 4.72 MWh_th/t (17 GJ/t).
+- **`[IRENA-2024]`** — IRENA, *Renewable Power Generation Costs in 2024* (published 2025). Global utility-scale solar LCOE USD 0.043/kWh; EU offshore wind ~USD 0.080/kWh; NL solar LCOE range ≈45–58 €/MWh (third-party synthesis). Basis for updated VRES fixed costs. [irena.org/Digital-Report/Renewable-Power-Generation-Costs-in-2024](https://www.irena.org/Digital-Report/Renewable-Power-Generation-Costs-in-2024)
+- **`[IEA-H2-2024]`** — IEA, *Global Hydrogen Review 2024* Assumptions annex: water electrolysis installed CAPEX **2160 USD/kWe** (global average 2023; China 1100), annual OPEX **3% of CAPEX**, efficiency 66% LHV. Basis for `FixedCost_per_MW_Electrolyzer = 262 k€/MW_e-yr` (2160 USD/kWe × 0.92 €/USD; CRF 8%/20 yr + 3% FOM). Nameplate convention is **electrical input**. [IEA GHR 2024 Assumptions annex](https://iea.blob.core.windows.net/assets/36017d2f-747b-4993-b06d-33209fe143fa/GHR24AssumptionsAnnex.pdf)
+- **`[IEA-NH3-2024]`** — IEA (via PtX Hub *Power-to-Ammonia*, 2025): green-ammonia **synthesis loop + air separation** CAPEX **770 USD/(t NH₃/y)** in 2023, **excluding** the electrolyser. Converted at 5.167 MWh/t and 8760 h ⇒ 1.201 M€/MW_EP; CRF+3% FOM ⇒ 158 k€/MW_EP-yr. Ammonia plant nameplate is **product output**. [ptx-hub.org Power-to-Ammonia](https://ptx-hub.org/wp-content/uploads/2025/05/250425_Paper-Ammoniak_V2-2.pdf)
+- **`[OCI-NH3-2024]`** — OCI Global H2/FY 2024 results: NW Europe ammonia **$528–581/t** (FY avg $528; H2 $581). Sanity check for derived grey MC ≈443 €/t at 2024 fuel prices.
+- **`[Yara-NL]`** — Yara Nederland: Sluiskil ammonia production **≈1.8 Mt/yr**. [yara.nl productie-eenheid Sluiskil](https://www.yara.nl/over-yara/yara-in-de-benelux/yara-sluiskil/over-yara-sluiskil/productie-eenheid-sluiskil/)
+- **`[TNO-2026]`** — TNO scenario study (COMPETES-TNO), Dutch dispatchable (gas-fired) capacity reference figures (~14.7 GW gas in the 2030 reference). [publications.tno.nl/publication/34645515](https://publications.tno.nl/publication/34645515/fLCICwBT/TNO-2026-R10080.pdf)
 - **`[PBL-2019]`** — PBL/ECN, *Decarbonisation options for the Dutch fertiliser industry*, 2019. NL ammonia capacity: **Yara Sluiskil ≈1.8 Mt/yr + OCI Nitrogen Geleen ≈1.2 Mt/yr ≈ 3 Mt NH₃/yr**. [pbl.nl PDF](https://www.pbl.nl/uploads/default/downloads/pbl-2019-decarbonisation-options-for-the-dutch-fertiliser-industry_3657.pdf)
 - **`[H2EU-2023]`** — Hydrogen Europe, *Clean Ammonia Report*, 2023. **Grey ammonia LCOA ≈534–891 €/t** (gas 40–80 €/MWh, CO₂ 75 €/t; range up to ~1,069 €/t at gas 110 €/MWh); green ammonia ≈2–6× grey; Haber–Bosch H₂↔NH₃ efficiency. [hydrogeneurope.eu PDF](https://hydrogeneurope.eu/wp-content/uploads/2023/03/2023.03_H2Europe_Clean_Ammonia_Report_DIGITAL_FINAL.pdf)
 - **`[IEA-H2]`** — IEA, *Global Hydrogen Review* / electrolyser technology briefs. PEM electrolyser efficiency ≈67% (≈1.5 MWh_e/MWh_H₂); installed CAPEX in the ~1.0–1.5 M€/MW range in the early 2020s (noting CAPEX rose ~15% in 2023 vs 2021). [iea.org/reports/global-hydrogen-review-2023](https://www.iea.org/reports/global-hydrogen-review-2023)
 - **`[DEA-2020]`** — Danish Energy Agency, *Technology Data for Renewable Fuels* (electrolysers). 100 MW alkaline installed CAPEX ≈1,200 €/kW (2020); corroborated by Fraunhofer ISE (2021): PEM ≈718 €/kW at 100 MW to ≈978 €/kW at 5 MW, fixed O&M ≈15–20 €/kW·yr. Basis for the ~130 k€/MW-yr annualised electrolyser fixed cost. [ens.dk technology data](https://ens.dk/en/our-services/technology-catalogues/technology-data-renewable-fuels)
-- **`[IRENA-2022]`** — IRENA, *Renewable Power Generation Costs*, 2022. Utility solar and on/offshore wind CAPEX and LCOE ranges used for the VRES fixed costs. [irena.org/publications](https://www.irena.org/publications/2023/Aug/Renewable-Power-Generation-Costs-in-2022)
-- **`[TTF-2021]`** — Dutch TTF natural-gas day-ahead: **2021 annual average ≈47 €/MWh_th** (a year of two halves — roughly 20 €/MWh in H1 escalating past 100 €/MWh in Q4). The annual average is the anchor for `Fuel.GasPrice = 47.15`, consistent with `base_year = 2021`; the +10%/+20% scenarios probe the upside without leaving the historically observed band.
-- **`[ETS-2021]`** — EU ETS CO₂ allowance price, 2021 average ≈53 €/tCO₂; anchor for `Fuel.CO2Price = 52.64`, used for both conventional SRMC and the grey-ammonia CO₂ cost.
-- **`[API2-2021]`** — ARA (API2) steam-coal front-year benchmark, 2021 average ≈121 €/t ⇒ ≈12.4 €/MWh_th at 8.14 MWh_th/t; anchor for `Fuel.CoalPrice`.
-- **`[PELLET-2021]`** — NW-European industrial wood-pellet contract prices, ≈150–170 €/t in 2021 ⇒ ≈30 €/MWh_th; anchor for `Fuel.BiomassPrice`.
+- **`[IRENA-2022]`** — IRENA, *Renewable Power Generation Costs*, 2022 (superseded for VRES fixed costs by `[IRENA-2024]`). [irena.org/publications](https://www.irena.org/publications/2023/Aug/Renewable-Power-Generation-Costs-in-2022)
+- **`[TTF-2021]`** — Dutch TTF 2021 annual average ≈47 €/MWh_th (historical anchor, superseded by `[TTF-2024]`).
+- **`[ETS-2021]`** — EU ETS 2021 average ≈53 €/tCO₂ (historical anchor, superseded by `[ETS-2024]`).
+- **`[API2-2021]`** — API2 2021 average ≈121 €/t (historical anchor, superseded by `[API2-2024]`).
+- **`[PELLET-2021]`** — NW-European industrial wood-pellet ≈150–170 €/t in 2021 (historical anchor, superseded by `[PELLET-2024]`).
+- **`[IHS-NH3-2021]`** — Ammonia CFR NW Europe 2021 average ≈557 $/t (historical sanity check, superseded by `[OCI-NH3-2024]`).
 - **`[IPCC-EF]`** — IPCC 2006 Guidelines, default stationary-combustion emission factors: natural gas 56.1 kg CO₂/GJ ⇒ **0.2016 tCO₂/MWh_th**; hard coal 94.6 kg CO₂/GJ ⇒ **0.3406 tCO₂/MWh_th**; biomass ETS zero-rated. [ipcc-nggip.iges.or.jp](https://www.ipcc-nggip.iges.or.jp/public/2006gl/vol2.html)
 - **`[IEA-WEO]`** — IEA *World Energy Outlook* / power-plant technology assumptions: modern CCGT net LHV efficiency ≈58%, OCGT peaker ≈38%, hard-coal steam ≈42%; used for the conventional stage efficiencies.
 - **`[FE-BAT]`** — European Commission JRC, *BAT Reference Document for the Manufacture of Large Volume Inorganic Chemicals — Ammonia*: modern SMR ammonia plants consume ≈32 GJ_LHV natural gas per tonne NH₃ and emit ≈1.8 tCO₂/t NH₃ (process plus fuel). Basis for `GasIntensity` and `CO2Intensity`.
 - **`[DECHEMA-2030]`** — DECHEMA, *Technology Study: Low Carbon Energy and Feedstock for the European Chemical Industry*: corroborates the 30–34 GJ/t NH₃ SMR gas-intensity range.
-- **`[IHS-NH3-2021]`** — Ammonia CFR NW Europe market assessments: 2021 average ≈557 $/t (≈471 €/t). Used as a sanity check that the derived grey marginal cost of ≈534 €/t is a plausible cost floor relative to observed 2021 ammonia pricing.
 - **`[RED-III]`** — Directive (EU) 2023/2413 (RED III): ≥42% of hydrogen used in industry must be renewable/RFNBO by 2030 → `gamma_GC = 0.42` mandate. [eur-lex.europa.eu](https://eur-lex.europa.eu/eli/dir/2023/2413/oj)
 - **`[GoO]`** — European Guarantees-of-Origin (GoO/CertiQ) market prices: historically <2 €/MWh, rising to ~5–9 €/MWh in 2022–2023; used for the GC demand WTP intercept.
 - **`[LHV]`** — Ammonia lower heating value 18.6 MJ/kg ⇒ **5.167 MWh per tonne NH₃**, the conversion constant for all €/t ↔ €/MWh_EP and Mt ↔ TWh calculations.

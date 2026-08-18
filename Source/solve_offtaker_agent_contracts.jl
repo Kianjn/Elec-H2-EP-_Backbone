@@ -84,6 +84,7 @@ function solve_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
         sum(ρ_hpa[v]/2 * W[jd, jy] * ((-h2_hpa_from[v][jh, jd, jy]) - g_bar_hpa[v][jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         for v in hpa_h2
     )
+    obj_hpa_cap = sum(ρ_hpa_cap[v]/2 * ((-hpa_cap[v]) - g_bar_hpa_cap[v])^2 for v in hpa_h2)
     mod.ext[:objective] = @objective(mod, Min,
         gamma_G * (F_cap * cap_EP_y + sum(P[jy] * loss_G[jy] for jy in JY))
         + (1 - gamma_G) * cvar_G
@@ -91,20 +92,21 @@ function solve_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
         + sum(ρ_H2_GC/2 * W[jd, jy] * ((-q_h2gc[jh, jd, jy]) - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_EP/2 * W[jd, jy] * (ep[jh, jd, jy] - g_bar_EP[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + obj_hpa
+        + obj_hpa_cap
+        + sum(W[jd, jy] * sum(λ_hpa[v][jh, jd, jy] * h2_hpa_from[v][jh, jd, jy] for v in hpa_h2)
+              for jh in JH, jd in JD, jy in JY)
         + cap_pen
     )
 
     for jy in JY
         delete(mod, mod.ext[:constraints][:CVaR_Green_shortfall][jy])
     end
-    delete(mod, mod.ext[:constraints][:CVaR_Green_link])
+    # CVaR linking constraint does not depend on λ; keep it.
 
     mod.ext[:constraints][:CVaR_Green_shortfall] = @constraint(mod, [jy in JY], u_G[jy] >= loss_total[jy] - alpha_G)
-    one_minus_beta = max(1e-6, 1.0 - beta_conf)
-    mod.ext[:constraints][:CVaR_Green_link] = @constraint(mod,
-        cvar_G >= alpha_G + (1 / one_minus_beta) * sum(P[jy] * u_G[jy] for jy in JY)
-    )
 
+    snapshot_primal_starts!(mod)
     optimize!(mod)
+    Base.invokelatest(ensure_agent_solution!, mod, m)
     return nothing
 end

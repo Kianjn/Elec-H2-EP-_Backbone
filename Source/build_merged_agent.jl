@@ -16,7 +16,7 @@ function _build_green_h2_chain!(m::String, mod::Model)
     proc_cost = get(p, :ProcessingCost, 0.0)
     alpha = get(p, :Alpha, 1.0)
     gamma_gc = get(p, :gamma_GC, 0.42)
-    F_h2 = get(p, :FixedCost_per_MW_Electrolyzer, 0.0)
+    F_h2 = electrolyzer_h2_annuity(p)
     F_ep = get(p, :FixedCost_per_MW_EP_Out, 0.0)
     beta_conf = get(p, :β, 0.95)
     P = p[:P]
@@ -67,8 +67,8 @@ function _build_green_h2_chain!(m::String, mod::Model)
     g_bar_H2_GC = p[:g_bar_H2_GC]
     ρ_H2_GC = p[:ρ_H2_GC]
 
-    alpha_c = mod.ext[:variables][:alpha_coalition] = @variable(mod, lower_bound=0, base_name="alpha_coalition_$(m)")
-    cvar_c = mod.ext[:variables][:CVaR_coalition] = @variable(mod, lower_bound=0, base_name="CVaR_coalition_$(m)")
+    alpha_c = mod.ext[:variables][:alpha_coalition] = @variable(mod, base_name="alpha_coalition_$(m)")
+    cvar_c = mod.ext[:variables][:CVaR_coalition] = @variable(mod, base_name="CVaR_coalition_$(m)")
     u_c = mod.ext[:variables][:u_coalition] = @variable(mod, [jy in JY], lower_bound=0, base_name="u_coalition_$(m)")
 
     loss_op = Dict{Int, JuMP.AffExpr}()

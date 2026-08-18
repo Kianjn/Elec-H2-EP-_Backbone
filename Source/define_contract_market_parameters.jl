@@ -42,11 +42,12 @@ function define_contract_market_parameters!(market::Dict, hpa_market::Dict, data
         merge(data["General"], data["ADMM"], Dict("initial_price" => 60.0, "rho_initial" => 0.5))
 
     market["name"] = "Bilateral_PPA"
-    market["volume_mode"] = "pap"
+    market["volume_mode"] = "sop"
     market["price_structure"] = "fixed"
     market["price_benchmark"] = "negotiated"
     market["initial_price"] = get(ppa_data, "initial_price", 60.0)
     market["rho_initial"] = get(ppa_data, "rho_initial", 0.5)
+    market["contract_warmstart_from_spot"] = false
 
     n_ts = data["General"]["nTimesteps"]
     n_rd = data["General"]["nReprDays"]
@@ -72,7 +73,9 @@ function define_contract_market_parameters!(market::Dict, hpa_market::Dict, data
         merge(data["General"], data["ADMM"], Dict("initial_price" => 80.0, "rho_initial" => 0.5))
 
     hpa_market["name"] = "Hydrogen_Bilateral_HPA"
-    hpa_market["volume_mode"] = String(get(agents, :hpa_volume_mode, "pap"))
+    raw_mode = lowercase(String(get(agents, :hpa_volume_mode, "sop")))
+    hpa_market["volume_mode"] = raw_mode == "pap" ? "sop" : raw_mode
+    hpa_market["volume_mode"] in ("sop", "top") || error("Unsupported hpa_volume_mode=$(raw_mode). Use sop or top.")
     hpa_market["price_structure"] = String(get(hpa_data, "price_structure", "fixed"))
     hpa_market["price_benchmark"] = lowercase(String(get(hpa_data, "price_benchmark", "negotiated")))
     hpa_market["initial_price"] = get(hpa_data, "initial_price", 80.0)

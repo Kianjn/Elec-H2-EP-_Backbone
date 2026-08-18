@@ -138,8 +138,10 @@ function define_results_contracts!(admm_data::Dict, results::Dict, ADMM::Dict, a
     )
     hpa_market["hpa_h2"] = hpa_h2
 
-    # Warm-start contract clearing prices from SP spot prices when available.
-    if haskey(results, "warmstart") && get(results["warmstart"], "λ", false)
+    # Optional warm-start of contract clearing prices from SP spot prices.
+    # Default is OFF so contract pools start from zero unless explicitly enabled.
+    warmstart_contract_from_spot = get(get(results, "markets", Dict()), "contract_warmstart_from_spot", false)
+    if warmstart_contract_from_spot && haskey(results, "warmstart") && get(results["warmstart"], "λ", false)
         if haskey(results["λ"], "elec") && !isempty(results["λ"]["elec"])
             elec_λ = results["λ"]["elec"][end]
             for vres_id in ppa_vres
@@ -158,6 +160,10 @@ function define_results_contracts!(admm_data::Dict, results::Dict, ADMM::Dict, a
         include(joinpath(@__DIR__, "contract_strike.jl"))
     end
     init_contract_strike_state!(ADMM, admm_data, ppa_market, hpa_market)
+    if !isdefined(@__MODULE__, :init_shared_contract_capacity!)
+        include(joinpath(@__DIR__, "contract_capacity.jl"))
+    end
+    init_shared_contract_capacity!(ADMM, results, ppa_market, hpa_market, admm_data)
 
     return results, ADMM
 end

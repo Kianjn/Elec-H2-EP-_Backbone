@@ -7,8 +7,8 @@ here = @__DIR__
 cache = joinpath(here, "weather_cache")
 
 const REF_YEAR = 2015
-const SOLAR_TARGET = 0.18
-const WIND_TARGET  = 0.28
+const SOLAR_TARGET = 0.182  # CBS 2024 normalised fleet solar CF [CBS-RE]
+const WIND_TARGET  = 0.280  # CBS 2024 normalised fleet wind CF [CBS-RE]
 
 src = Dict(1=>2015,2=>2010,3=>2012,4=>2013,5=>2014,6=>2016,7=>2017,8=>2018,9=>2019,10=>2011)
 labels = 1:10

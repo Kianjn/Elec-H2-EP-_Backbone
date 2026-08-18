@@ -54,7 +54,7 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
     hpa_cap    = mod.ext[:variables][:hpa_cap]
 
     gamma     = get(mod.ext[:parameters], :γ, 1.0)
-    F_cap     = get(mod.ext[:parameters], :FixedCost_per_MW_Electrolyzer, 0.0)
+    F_cap     = electrolyzer_h2_annuity(mod.ext[:parameters])
     alpha_H2  = mod.ext[:variables][:alpha_H2]
     cvar_H2   = mod.ext[:variables][:CVaR_H2]
     u_H2      = mod.ext[:variables][:u_H2]
@@ -70,7 +70,7 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
                 λ_elec[jh, jd, jy]       * e_in_pool[jh, jd, jy]
                 + λ_elec_GC[jh, jd, jy]  * q_elec_gc[jh, jd, jy]
                 + op_cost * h2_out[jh, jd, jy]
-                - λ_H2[jh, jd, jy]       * (h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy])
+                - λ_H2[jh, jd, jy]       * h2_out[jh, jd, jy]
                 - λ_H2_GC[jh, jd, jy]   * q_h2gc[jh, jd, jy]
             ) for jh in JH, jd in JD)
             + sum_ppa_buyer_cost_jy(mod, ppa_vres, jy, W, JH, JD)
@@ -84,7 +84,9 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
         sum(ρ_ppa[v]/2 * W[jd, jy] * ((-g_ppa_from[v][jh, jd, jy]) - g_bar_ppa[v][jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         for v in ppa_vres
     )
+    obj_ppa_cap = sum(ρ_ppa_cap[v]/2 * ((-ppa_cap[v]) - g_bar_ppa_cap[v])^2 for v in ppa_vres)
     obj_hpa = sum(ρ_hpa/2 * W[jd, jy] * (h2_hpa[jh, jd, jy] - g_bar_hpa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+    obj_hpa_cap = ρ_hpa_cap/2 * (hpa_cap - g_bar_hpa_cap)^2
 
     z_cap   = get(mod.ext[:parameters], :z_cap, 0.0)
     λ_cap   = get(mod.ext[:parameters], :λ_cap, 0.0)
@@ -97,24 +99,28 @@ function solve_H2_agent_contracts!(m::String, mod::Model, H2_market::Dict, H2_GC
         + (1 - gamma) * cvar_H2
         + sum(ρ_elec/2 * W[jd, jy] * ((-e_in_pool[jh, jd, jy])      - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * ((-q_elec_gc[jh, jd, jy]) - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
-        + sum(ρ_H2/2 * W[jd, jy] * ((h2_out[jh, jd, jy] - h2_hpa[jh, jd, jy]) - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+        + sum(ρ_H2/2 * W[jd, jy] * (h2_out[jh, jd, jy] - g_bar_H2[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_H2_GC/2 * W[jd, jy] * (q_h2gc[jh, jd, jy]      - g_bar_H2_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + obj_ppa
+        + obj_ppa_cap
         + obj_hpa
+        + obj_hpa_cap
+        + sum(W[jd, jy] * sum(λ_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
+              for jh in JH, jd in JD, jy in JY)
+        - sum(W[jd, jy] * λ_hpa[jh, jd, jy] * h2_hpa[jh, jd, jy] for jh in JH, jd in JD, jy in JY)
         + cap_pen
     )
 
     for jy in JY
         delete(mod, mod.ext[:constraints][:CVaR_H2_shortfall][jy])
     end
-    delete(mod, mod.ext[:constraints][:CVaR_H2_link])
+    # CVaR linking constraint does not depend on λ; keep it.
 
     mod.ext[:constraints][:CVaR_H2_shortfall] = @constraint(mod, [jy in JY],
         u_H2[jy] >= loss_total[jy] - alpha_H2)
-    one_minus_beta = max(1e-6, 1.0 - beta_conf)
-    mod.ext[:constraints][:CVaR_H2_link] = @constraint(mod,
-        cvar_H2 >= alpha_H2 + (1 / one_minus_beta) * sum(P[jy] * u_H2[jy] for jy in JY))
 
+    snapshot_primal_starts!(mod)
     optimize!(mod)
+    Base.invokelatest(ensure_agent_solution!, mod, m)
     return nothing
 end

@@ -6,11 +6,10 @@
  #   Builds the GreenOfftaker model for me_pap.jl, me_top.jl, me_sop.jl with HPA
  #   buy-side variables in addition to the standard H2/H2_GC/EP markets.
  #
- # HPA (pay-as-produced, bundled H2 + H2_GC equivalent):
- #   - GreenOfftaker receives h2_hpa_from[h2_id] from each GreenProducer h2_id.
-#   - Payment is K_hpa[h2_id] × h2_hpa_from[h2_id].
- #   - Contract flow is capped by hpa_cap[h2_id].
- #   - HPA-delivered H2 contributes to green-backing (bundled certificate logic).
+# HPA (pay-as-produced CfD, bundled H2 + H2_GC):
+#   - GreenOfftaker receives hedge h2_hpa_from[h2_id] from each GreenProducer.
+#   - Payment is (K − λ_H2 − λ_H2_GC) × h2_hpa_from (plus ToP if that mode).
+#   - Contract flow is capped by hpa_cap[h2_id] and treated as hedge quantity.
  #
  # NOTE:
  #   Non-GreenOfftaker agents delegate to build_offtaker_agent! unchanged.
@@ -77,32 +76,32 @@ function build_offtaker_agent_contracts!(m::String, mod::Model, EP_market::Dict,
     mod.ext[:expressions][:g_net_EP] = @expression(mod, ep)
     mod.ext[:expressions][:g_net_hpa_from] = h2_hpa_from
 
-    h2_hpa_total = sum(h2_hpa_from[v] for v in hpa_h2)
     mod.ext[:constraints][:ep_from_h2] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
-        ep[jh, jd, jy] == alpha * (h2_in_pool[jh, jd, jy] + sum(h2_hpa_from[v][jh, jd, jy] for v in hpa_h2)))
+        ep[jh, jd, jy] == alpha * h2_in_pool[jh, jd, jy])
     mod.ext[:constraints][:cap_ep] = @constraint(mod, [jh in JH, jd in JD, jy in JY], ep[jh, jd, jy] <= cap_EP_y)
     mod.ext[:constraints][:gc_cap] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
-        q_h2gc[jh, jd, jy] <= h2_in_pool[jh, jd, jy] + sum(h2_hpa_from[v][jh, jd, jy] for v in hpa_h2))
+        q_h2gc[jh, jd, jy] <= h2_in_pool[jh, jd, jy])
     mod.ext[:constraints][:gc_mandate_yearly] = @constraint(mod, [jy in JY],
-        sum(W[jd, jy] * q_h2gc[jh, jd, jy] for jh in JH, jd in JD)
-        + sum(W[jd, jy] * h2_hpa_from[v][jh, jd, jy] for v in hpa_h2, jh in JH, jd in JD)
-        >= gamma_GC * (
-            sum(W[jd, jy] * h2_in_pool[jh, jd, jy] for jh in JH, jd in JD)
-            + sum(W[jd, jy] * h2_hpa_from[v][jh, jd, jy] for v in hpa_h2, jh in JH, jd in JD)
-        )
+        sum(W[jd, jy] * q_h2gc[jh, jd, jy] for jh in JH, jd in JD) >=
+        gamma_GC * sum(W[jd, jy] * h2_in_pool[jh, jd, jy] for jh in JH, jd in JD)
     )
     for v in hpa_h2
         mod.ext[:constraints][Symbol("hpa_cap_limit_", v)] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
             h2_hpa_from[v][jh, jd, jy] <= hpa_cap[v])
+        mod.ext[:constraints][Symbol("hpa_phys_bound_", v)] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
+            h2_hpa_from[v][jh, jd, jy] <= h2_in_pool[jh, jd, jy])
         # Cannot contract for more H₂ than the ammonia plant can absorb (MW_H2).
         mod.ext[:constraints][Symbol("hpa_cap_ep_limit_", v)] = @constraint(mod, hpa_cap[v] <= cap_EP_y / alpha)
     end
 
-    mod.ext[:parameters][:hpa_volume_mode] = String(get(mod.ext[:parameters], :hpa_volume_mode, "pap"))
+    raw_mode = lowercase(String(get(mod.ext[:parameters], :hpa_volume_mode, "sop")))
+    mode = raw_mode == "pap" ? "sop" : raw_mode
+    mode in ("sop", "top") || error("Unsupported hpa_volume_mode=$(raw_mode). Use sop or top.")
+    mod.ext[:parameters][:hpa_volume_mode] = mode
     add_hpa_volume_variables!(mod; role=:buyer)
 
-    alpha_G = mod.ext[:variables][:alpha_GreenOfftaker] = @variable(mod, lower_bound = 0, base_name = "alpha_GreenOfftaker_$(m)")
-    cvar_G = mod.ext[:variables][:CVaR_GreenOfftaker] = @variable(mod, lower_bound = 0, base_name = "CVaR_GreenOfftaker_$(m)")
+    alpha_G = mod.ext[:variables][:alpha_GreenOfftaker] = @variable(mod, base_name = "alpha_GreenOfftaker_$(m)")
+    cvar_G = mod.ext[:variables][:CVaR_GreenOfftaker] = @variable(mod, base_name = "CVaR_GreenOfftaker_$(m)")
     u_G = mod.ext[:variables][:u_GreenOfftaker] = @variable(mod, [jy in JY], lower_bound = 0, base_name = "u_GreenOfftaker_$(m)")
 
     loss_G = Dict{Int,JuMP.AffExpr}()

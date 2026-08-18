@@ -1,5 +1,0 @@
-Agent,Type,CVaR_private,alpha_private
-Gen_VRES_Solar,VRES,2.343943448945255e9,0.0
-Gen_VRES_Wind,VRES,2.3065361475453315e9,0.0
-Prod_H2_Green,GreenProducer,2.6191756049846348e8,0.0
-Offtaker_Green,GreenOfftaker,1.3066223808513889e8,NaN

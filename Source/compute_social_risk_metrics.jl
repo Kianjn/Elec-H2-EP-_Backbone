@@ -58,8 +58,8 @@ function _agent_welfare_per_year(m::Model, agents::Dict; JH, JD, JY, W)
         C = get(p, :MarginalCost, 0.0)
         F_cap = get(p, :FixedCost_per_MW, 0.0)
         cap = vars[:cap_VRES]
-        gen_at = if haskey(vars, :g_EOM) && haskey(vars, :g_ppa)
-            (jh, jd, jy) -> value(vars[:g_EOM][jh, jd, jy]) + value(vars[:g_ppa][jh, jd, jy])
+        gen_at = if haskey(vars, :g_EOM)
+            (jh, jd, jy) -> value(vars[:g_EOM][jh, jd, jy])
         else
             g = vars[:g]
             (jh, jd, jy) -> value(g[jh, jd, jy])
@@ -83,16 +83,18 @@ function _agent_welfare_per_year(m::Model, agents::Dict; JH, JD, JY, W)
                 wy[jy] = -cost
             end
         else
+            MC_y = get(p, :MarginalCostByYear, nothing)
             C = get(p, :MarginalCost, 0.0)
             g = vars[:g]
             for jy in JY
-                wy[jy] = -sum(Wd[jy][jd] * C * value(g[jh, jd, jy]) for jh in JH, jd in JD)
+                mc_jy = MC_y === nothing ? C : MC_y[jy]
+                wy[jy] = -sum(Wd[jy][jd] * mc_jy * value(g[jh, jd, jy]) for jh in JH, jd in JD)
             end
         end
 
     elseif atype == "GreenProducer"
         C_H = get(p, :MarginalCost, get(p, :OperationalCost, 0.0))
-        F_cap = get(p, :FixedCost_per_MW_Electrolyzer, 0.0)
+        F_cap = electrolyzer_h2_annuity(p)
         cap = vars[:cap_H2_y]
         h = vars[:h2_out]
         for jy in JY
@@ -131,6 +133,33 @@ function _agent_welfare_per_year(m::Model, agents::Dict; JH, JD, JY, W)
             wy[jy] = -sum(Wd[jy][jd] * C_proc * value(ep[jh, jd, jy]) for jh in JH, jd in JD)
         end
 
+    elseif atype in ("GreenH2Coalition", "GreenCoalition")
+        # Real-resource surplus of the merged chain (no λ transfers): −OPEX − CAPEX.
+        op_cost = get(p, :OperationalCost, 0.0)
+        proc_cost = get(p, :ProcessingCost, 0.0)
+        F_h2 = electrolyzer_h2_annuity(p)
+        F_ep = get(p, :FixedCost_per_MW_EP_Out, 0.0)
+        h2 = vars[:h2]
+        ep = vars[:ep]
+        cap_h2 = vars[:cap_H2_y]
+        cap_ep = vars[:cap_EP_y]
+        g_vres = get(vars, :g_vres, Dict())
+        cap_vres = get(vars, :cap_vres, Dict())
+        units = get(p, :vres_units, ())
+        for jy in JY
+            cost = sum(Wd[jy][jd] * (op_cost * value(h2[jh, jd, jy]) +
+                                     proc_cost * value(ep[jh, jd, jy])) for jh in JH, jd in JD)
+            cost += F_h2 * value(cap_h2) + F_ep * value(cap_ep)
+            for u in units
+                g = get(g_vres, u.label, nothing)
+                cap = get(cap_vres, u.label, nothing)
+                g === nothing && continue
+                cost += sum(Wd[jy][jd] * u.MarginalCost * value(g[jh, jd, jy]) for jh in JH, jd in JD)
+                cap !== nothing && (cost += u.FixedCost_per_MW * value(cap))
+            end
+            wy[jy] = -cost
+        end
+
     elseif haskey(vars, :d_gc)
         A_GC = get(p, :A_GC, 0.0)
         B_GC = get(p, :B_GC, 0.5)
@@ -142,6 +171,124 @@ function _agent_welfare_per_year(m::Model, agents::Dict; JH, JD, JY, W)
     end
 
     return wy
+end
+
+"""Planner-welfare role: demand utility vs real-resource surplus (costs)."""
+function _welfare_role(atype::AbstractString, vars)
+    if atype == "Consumer"
+        return (group = "elec_demand", is_demand = true)
+    elseif atype == "GC_Demand" || haskey(vars, :d_gc)
+        return (group = "gc_demand", is_demand = true)
+    elseif atype == "EP_Demand"
+        return (group = "ep_demand", is_demand = true)
+    elseif haskey(vars, :d_H) && atype != "GreenProducer"
+        return (group = "h2_demand", is_demand = true)
+    elseif atype == "VRES"
+        return (group = "vres", is_demand = false)
+    elseif atype == "Conventional"
+        return (group = "conventional", is_demand = false)
+    elseif atype == "GreenProducer"
+        return (group = "h2_producer", is_demand = false)
+    elseif atype == "GreenOfftaker"
+        return (group = "offtaker_green", is_demand = false)
+    elseif atype == "GreyOfftaker"
+        return (group = "offtaker_grey", is_demand = false)
+    elseif atype == "EPImporter"
+        return (group = "offtaker_import", is_demand = false)
+    elseif atype == "GreenH2Coalition"
+        return (group = "green_h2_coalition", is_demand = false)
+    elseif atype == "GreenCoalition"
+        return (group = "green_coalition", is_demand = false)
+    else
+        return (group = "other", is_demand = false)
+    end
+end
+
+function _empty_wy(JY)
+    Dict{Int, Float64}(jy => 0.0 for jy in JY)
+end
+
+"""
+Per-agent planner welfare (no transfers). `planner_wpy` is used for the
+centralised SP (mdict is not solved). ADMM fills `wy` from mdict values.
+"""
+function collect_agent_welfare_table(mdict::Dict, agents::Dict, JY;
+                                     planner_wpy::Union{Nothing, Dict}=nothing)
+    ref = mdict[agents[:all][1]]
+    JH = collect(ref.ext[:sets][:JH])
+    JD = collect(ref.ext[:sets][:JD])
+    W = ref.ext[:parameters][:W]
+    ids = planner_wpy === nothing ? collect(agents[:all]) : collect(keys(planner_wpy))
+    rows = NamedTuple[]
+    for id in ids
+        haskey(mdict, id) || continue
+        m = mdict[id]
+        atype = String(get(m.ext[:parameters], :Type, ""))
+        vars = m.ext[:variables]
+        role = _welfare_role(atype, vars)
+        wy = _empty_wy(JY)
+        if planner_wpy !== nothing && haskey(planner_wpy, id)
+            for jy in JY
+                wy[jy] = Float64(value(planner_wpy[id][jy]))
+            end
+        else
+            computed = _agent_welfare_per_year(m, agents; JH=JH, JD=JD, JY=JY, W=W)
+            for (jy, w) in computed
+                wy[jy] = Float64(w)
+            end
+        end
+        push!(rows, (
+            agent = id,
+            type = atype,
+            group = role.group,
+            is_demand = role.is_demand,
+            welfare_per_year = wy,
+        ))
+    end
+    return rows
+end
+
+function summarize_welfare_decomposition(agent_rows, JY, P::AbstractVector{<:Real}, beta::Real)
+    n = length(JY)
+    demand_y = zeros(n)
+    rest_y = zeros(n)
+    total_y = zeros(n)
+    group_y = Dict{String, Vector{Float64}}()
+    group_is_demand = Dict{String, Bool}()
+    for r in agent_rows
+        haskey(group_y, r.group) || (group_y[r.group] = zeros(n))
+        group_is_demand[r.group] = r.is_demand
+        for (i, jy) in enumerate(JY)
+            w = get(r.welfare_per_year, jy, 0.0)
+            total_y[i] += w
+            group_y[r.group][i] += w
+            if r.is_demand
+                demand_y[i] += w
+            else
+                rest_y[i] += w
+            end
+        end
+    end
+    expected_total = sum(P[i] * total_y[i] for i in 1:n)
+    expected_demand = sum(P[i] * demand_y[i] for i in 1:n)
+    expected_rest = sum(P[i] * rest_y[i] for i in 1:n)
+    share = abs(expected_total) > 1e-12 ? expected_demand / expected_total : NaN
+    cvar_rest, _, _ = empirical_cvar(-rest_y, P, beta)
+    group_expected = Dict(g => sum(P[i] * v[i] for i in 1:n) for (g, v) in group_y)
+    return (
+        welfare_demand_per_year = demand_y,
+        welfare_ex_demand_per_year = rest_y,
+        expected_welfare_demand = expected_demand,
+        expected_welfare_ex_demand = expected_rest,
+        share_demand_of_E_SW = share,
+        welfare_ex_demand_CVaR = cvar_rest,
+        welfare_ex_demand_min = minimum(rest_y),
+        welfare_ex_demand_spread = maximum(rest_y) - minimum(rest_y),
+        group_welfare_per_year = group_y,
+        group_is_demand = group_is_demand,
+        group_expected = group_expected,
+        agent_rows = agent_rows,
+    )
 end
 
 function aggregate_social_welfare_per_year(mdict::Dict, agents::Dict)
@@ -177,7 +324,7 @@ function extract_private_cvar_by_agent(mdict::Dict, agents::Dict)
             alpha_val = haskey(vars, :alpha_H2) ? value(vars[:alpha_H2]) : NaN
         elseif t == "GreenOfftaker" && haskey(vars, :CVaR_GreenOfftaker)
             cvar_val = value(vars[:CVaR_GreenOfftaker])
-            alpha_val = haskey(vars, :alpha_G) ? value(vars[:alpha_G]) : NaN
+            alpha_val = haskey(vars, :alpha_GreenOfftaker) ? value(vars[:alpha_GreenOfftaker]) : NaN
         elseif t in ("GreenH2Coalition", "GreenCoalition") && haskey(vars, :CVaR_coalition)
             cvar_val = value(vars[:CVaR_coalition])
             alpha_val = haskey(vars, :alpha_coalition) ? value(vars[:alpha_coalition]) : NaN
@@ -241,6 +388,10 @@ function extract_sp_risk_metrics(planner::Model, planner_state::Dict, mdict::Dic
         risk_adj_obj = gamma * expected_welfare - (1 - gamma) * cvar_model
     end
 
+    agent_rows = collect_agent_welfare_table(mdict, agents, JY;
+        planner_wpy = get(planner_state, :agent_welfare_per_year, nothing))
+    decomp = summarize_welfare_decomposition(agent_rows, JY, P, beta)
+
     return (
         case = "social_planner",
         gamma = gamma,
@@ -255,6 +406,7 @@ function extract_sp_risk_metrics(planner::Model, planner_state::Dict, mdict::Dic
         risk_adjusted_objective = risk_adj_obj,
         social_CVaR_gap_vs_SP = 0.0,
         private_cvar_rows = NamedTuple[],
+        decomp...,
     )
 end
 
@@ -277,6 +429,9 @@ function extract_admm_risk_metrics(mdict::Dict, agents::Dict, case_label::String
     sp_cvar = load_sp_social_cvar_benchmark(project_root)
     gap = sp_cvar === nothing ? NaN : (cvar_expost - sp_cvar)
 
+    agent_rows = collect_agent_welfare_table(mdict, agents, JY)
+    decomp = summarize_welfare_decomposition(agent_rows, JY, P, beta)
+
     return (
         case = case_label,
         gamma = gamma,
@@ -291,26 +446,84 @@ function extract_admm_risk_metrics(mdict::Dict, agents::Dict, case_label::String
         risk_adjusted_objective = NaN,
         social_CVaR_gap_vs_SP = gap,
         private_cvar_rows = priv,
+        decomp...,
     )
 end
 
 function _risk_metrics_table(metrics::NamedTuple)
     sp_bench = metrics.case == "social_planner" ? metrics.social_CVaR :
         (isfinite(metrics.social_CVaR_gap_vs_SP) ? metrics.social_CVaR - metrics.social_CVaR_gap_vs_SP : NaN)
-    DataFrame(
-        Metric = String[
-            "case", "gamma", "beta", "expected_social_welfare", "social_CVaR", "alpha_social",
-            "social_CVaR_recomputed", "sum_private_CVaR", "risk_adjusted_objective",
-            "social_CVaR_gap_vs_SP", "SP_social_CVaR_benchmark",
-        ],
-        Value = [
-            metrics.case, metrics.gamma, metrics.beta, metrics.expected_social_welfare,
-            metrics.social_CVaR, metrics.alpha_social, metrics.social_CVaR_recomputed,
-            metrics.sum_private_CVaR, metrics.risk_adjusted_objective,
-            metrics.social_CVaR_gap_vs_SP, sp_bench,
-        ],
-        Unit = String["-", "-", "-", "EUR", "EUR", "EUR", "EUR", "EUR", "EUR", "EUR", "EUR"],
-    )
+    names = String[
+        "case", "gamma", "beta", "expected_social_welfare", "social_CVaR", "alpha_social",
+        "social_CVaR_recomputed", "sum_private_CVaR", "risk_adjusted_objective",
+        "social_CVaR_gap_vs_SP", "SP_social_CVaR_benchmark",
+        "expected_welfare_demand", "expected_welfare_ex_demand", "share_demand_of_E_SW",
+        "welfare_ex_demand_CVaR", "welfare_ex_demand_min", "welfare_ex_demand_spread",
+    ]
+    vals = Any[
+        metrics.case, metrics.gamma, metrics.beta, metrics.expected_social_welfare,
+        metrics.social_CVaR, metrics.alpha_social, metrics.social_CVaR_recomputed,
+        metrics.sum_private_CVaR, metrics.risk_adjusted_objective,
+        metrics.social_CVaR_gap_vs_SP, sp_bench,
+        metrics.expected_welfare_demand, metrics.expected_welfare_ex_demand,
+        metrics.share_demand_of_E_SW, metrics.welfare_ex_demand_CVaR,
+        metrics.welfare_ex_demand_min, metrics.welfare_ex_demand_spread,
+    ]
+    units = String["-", "-", "-", "EUR", "EUR", "EUR", "EUR", "EUR", "EUR", "EUR", "EUR",
+                   "EUR", "EUR", "-", "EUR", "EUR", "EUR"]
+    if hasproperty(metrics, :group_expected)
+        for g in sort(collect(keys(metrics.group_expected)))
+            push!(names, "expected_welfare_group_" * g)
+            push!(vals, metrics.group_expected[g])
+            push!(units, "EUR")
+        end
+    end
+    DataFrame(Metric = names, Value = vals, Unit = units)
+end
+
+function _write_welfare_decomposition_csvs!(metrics::NamedTuple, JY, P, results_dir::String)
+    n = length(JY)
+    CSV.write(joinpath(results_dir, "Social_Welfare_Per_Year.csv"),
+        DataFrame(case=fill(metrics.case, n), scenario_year=JY, probability=P,
+                  social_welfare=metrics.social_welfare_per_year,
+                  social_loss=metrics.social_loss_per_year,
+                  welfare_demand=metrics.welfare_demand_per_year,
+                  welfare_ex_demand=metrics.welfare_ex_demand_per_year))
+
+    agent_year_rows = NamedTuple[]
+    for r in metrics.agent_rows
+        for (i, jy) in enumerate(JY)
+            push!(agent_year_rows, (
+                case = metrics.case,
+                agent = r.agent,
+                type = r.type,
+                group = r.group,
+                is_demand = r.is_demand,
+                scenario_year = jy,
+                probability = P[i],
+                welfare = get(r.welfare_per_year, jy, 0.0),
+            ))
+        end
+    end
+    CSV.write(joinpath(results_dir, "Welfare_By_Agent_Per_Year.csv"), DataFrame(agent_year_rows))
+
+    group_year_rows = NamedTuple[]
+    for g in sort(collect(keys(metrics.group_welfare_per_year)))
+        vec = metrics.group_welfare_per_year[g]
+        is_d = get(metrics.group_is_demand, g, false)
+        for (i, jy) in enumerate(JY)
+            push!(group_year_rows, (
+                case = metrics.case,
+                group = g,
+                is_demand = is_d,
+                scenario_year = jy,
+                probability = P[i],
+                welfare = vec[i],
+            ))
+        end
+    end
+    CSV.write(joinpath(results_dir, "Welfare_By_Group_Per_Year.csv"), DataFrame(group_year_rows))
+    return nothing
 end
 
 function write_sp_risk_outputs!(planner::Model, planner_state::Dict, mdict::Dict,
@@ -319,10 +532,7 @@ function write_sp_risk_outputs!(planner::Model, planner_state::Dict, mdict::Dict
     CSV.write(joinpath(results_folder, "Risk_Metrics.csv"), _risk_metrics_table(metrics))
     JY = collect(planner_state[:JY])
     P = [mdict[agents[:all][1]].ext[:parameters][:P][jy] for jy in JY]
-    CSV.write(joinpath(results_folder, "Social_Welfare_Per_Year.csv"),
-        DataFrame(case=fill(metrics.case, length(JY)), scenario_year=JY, probability=P,
-                  social_welfare=metrics.social_welfare_per_year,
-                  social_loss=metrics.social_loss_per_year))
+    _write_welfare_decomposition_csvs!(metrics, JY, P, results_folder)
     return metrics
 end
 
@@ -334,10 +544,7 @@ function write_admm_risk_outputs!(mdict::Dict, agents::Dict, results_dir::String
     ref = mdict[agents[:all][1]]
     JY = collect(ref.ext[:sets][:JY])
     P = Float64[ref.ext[:parameters][:P][jy] for jy in JY]
-    CSV.write(joinpath(results_dir, "Social_Welfare_Per_Year.csv"),
-        DataFrame(case=fill(metrics.case, length(JY)), scenario_year=JY, probability=P,
-                  social_welfare=metrics.social_welfare_per_year,
-                  social_loss=metrics.social_loss_per_year))
+    _write_welfare_decomposition_csvs!(metrics, JY, P, results_dir)
     if !isempty(metrics.private_cvar_rows)
         CSV.write(joinpath(results_dir, "Private_CVaR_By_Agent.csv"),
             DataFrame(
@@ -373,9 +580,16 @@ function print_risk_metrics_summary!(metrics::NamedTuple; title::String = "Risk 
     @printf("  beta:                    %.4f  (tail = worst %.0f%% of scenario years)\n",
             metrics.beta, tail_pct)
     @printf("  E[social welfare]:            %10.3f bn EUR\n", metrics.expected_social_welfare / 1e9)
+    @printf("    demand utility:             %10.3f bn EUR  (%.1f%% of net SW)\n",
+            metrics.expected_welfare_demand / 1e9, 100 * metrics.share_demand_of_E_SW)
+    @printf("    ex-demand (rest):           %10.3f bn EUR\n", metrics.expected_welfare_ex_demand / 1e9)
     @printf("  Tail welfare (CVaR):          %10.3f bn EUR  (higher = safer tail)\n", tail_welfare / 1e9)
     @printf("  Min scenario welfare:         %10.3f bn EUR\n", min_sw / 1e9)
     @printf("  Welfare spread (max−min):     %10.3f bn EUR\n", spread / 1e9)
+    @printf("  E[ex-demand] spread:          %10.3f bn EUR  (max−min of rest)\n",
+            metrics.welfare_ex_demand_spread / 1e9)
+    @printf("  Tail of ex-demand:            %10.3f bn EUR  (ex-post; not in the objective)\n",
+            -metrics.welfare_ex_demand_CVaR / 1e9)
 
     if metrics.case == "social_planner"
         @printf("  Risk-adjusted objective:        %10.3f bn EUR\n", metrics.risk_adjusted_objective / 1e9)

@@ -30,7 +30,7 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     op_cost  = mod.ext[:parameters][:OperationalCost]        # operating cost (EUR/MWh_H2)
     # Annualised fixed investment cost per MW of electrolyser capacity (€/MW_elec-year).
     # Default 0.0 preserves original behaviour if not provided.
-    F_cap = get(mod.ext[:parameters], :FixedCost_per_MW_Electrolyzer, 0.0)
+    F_cap = electrolyzer_h2_annuity(mod.ext[:parameters])
     # Risk parameters (CVaR skeleton; γ = 0 ⇒ risk-neutral by default).
     gamma = get(mod.ext[:parameters], :γ, 1.0)
     beta_conf = get(mod.ext[:parameters], :β, 0.95)   # confidence level β
@@ -114,8 +114,9 @@ function build_H2_agent!(m::String, mod::Model, H2_market::Dict, H2_GC_market::D
     # ── Risk variables (agent-level CVaR) ───────────────────────────────────
     # α_H2: VaR proxy; CVaR_H2: Conditional Value-at-Risk of loss;
     # u_H2[jy]: shortfall per scenario year.
-    alpha_H2 = mod.ext[:variables][:alpha_H2] = @variable(mod, lower_bound = 0, base_name = "alpha_H2_$(m)")
-    cvar_H2  = mod.ext[:variables][:CVaR_H2]  = @variable(mod, lower_bound = 0, base_name = "CVaR_H2_$(m)")
+    # α and CVaR unbounded: losses (cost − revenue) can be negative.
+    alpha_H2 = mod.ext[:variables][:alpha_H2] = @variable(mod, base_name = "alpha_H2_$(m)")
+    cvar_H2  = mod.ext[:variables][:CVaR_H2]  = @variable(mod, base_name = "CVaR_H2_$(m)")
     u_H2     = mod.ext[:variables][:u_H2]     = @variable(mod, [jy in JY], lower_bound = 0, base_name = "u_H2_$(m)")
 
     # Per-year economic loss (cost − revenue) excluding ADMM penalties.
@@ -205,7 +206,7 @@ function add_H2_agent_to_planner!(planner::Model, id::String, mod::Model,
     H_bar = p[:Capacity_H2_Output]
     η = 1.0 / p[:SpecificConsumption]
     C_H = p[:OperationalCost]
-    F_cap = get(p, :FixedCost_per_MW_Electrolyzer, 0.0)
+    F_cap = electrolyzer_h2_annuity(p)
 
     e_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="e_buy_$(id)")
     gc_e_buy = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="gc_e_buy_$(id)")

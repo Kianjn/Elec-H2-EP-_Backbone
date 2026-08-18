@@ -79,6 +79,7 @@ run_general = merge(gen, Dict(
 data_run = copy(data)
 data_run["General"] = run_general
 describe_scenario_grid(scen)
+describe_risk_parameters(data, n_years)
 
 for y in unique(values(years))
     ts[y] = CSV.read(joinpath(home_dir, "Input", "timeseries_$(y).csv"), DataFrame)

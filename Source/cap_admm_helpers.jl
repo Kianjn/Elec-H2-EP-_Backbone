@@ -21,6 +21,155 @@ function _cap_z_push!(hist::Vector{Vector{Float64}}, val)
     return hist
 end
 
+"""Apply numerically robust Gurobi defaults for ADMM agent QPs."""
+function configure_gurobi_agent!(mod::Model)
+    set_silent(mod)
+    set_optimizer_attribute(mod, "NumericFocus", 1)
+    set_optimizer_attribute(mod, "BarHomogeneous", 1)
+    set_optimizer_attribute(mod, "ScaleFlag", 2)
+    return nothing
+end
+
+"""Rebuild a clean Gurobi backend (clears stale deleted CVaR rows / KKT ill-conditioning)."""
+function reset_gurobi_optimizer!(mod::Model)
+    if isdefined(Main, :GUROBI_ENV)
+        set_optimizer(mod, () -> Gurobi.Optimizer(Main.GUROBI_ENV))
+    else
+        set_optimizer(mod, Gurobi.Optimizer)
+    end
+    configure_gurobi_agent!(mod)
+    return nothing
+end
+
+"""Copy the last successful primal into MIP/QP starts for the next solve."""
+function snapshot_primal_starts!(mod::Model)
+    has_values(mod) || return nothing
+    for v in all_variables(mod)
+        val = value(v)
+        isfinite(val) && set_start_value(v, val)
+    end
+    return nothing
+end
+
+function _gurobi_optimize_with!(mod::Model, attrs::Pair...)
+    for (k, v) in attrs
+        set_optimizer_attribute(mod, k, v)
+    end
+    optimize!(mod)
+    return has_values(mod)
+end
+
+"""Retry a failed agent QP. Returns `true` if a primal exists; never throws."""
+function ensure_agent_solution!(mod::Model, m::String)
+    has_values(mod) && return true
+    st = termination_status(mod)
+
+    if st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.DUAL_INFEASIBLE
+        _gurobi_optimize_with!(mod, "DualReductions" => 0) && return true
+    end
+
+    # A new Gurobi model is the most reliable recovery after hundreds of
+    # objective rebuilds / CVaR delete-and-readd cycles.
+    reset_gurobi_optimizer!(mod)
+    snapshot_primal_starts!(mod)
+    _gurobi_optimize_with!(mod, "NumericFocus" => 3, "BarHomogeneous" => 1,
+            "ScaleFlag" => 2, "DualReductions" => 0) && return true
+    _gurobi_optimize_with!(mod, "Method" => 2, "Crossover" => 0,
+            "BarConvTol" => 1e-4, "FeasibilityTol" => 1e-5, "Presolve" => 0) && return true
+    @warn "Agent $(m) has no primal after Gurobi retries " *
+          "(termination=$(termination_status(mod)), primal=$(primal_status(mod))). " *
+          "Reusing the previous ADMM iterate."
+    return false
+end
+
+"""Duplicate the last stored quantities for `m` so ADMM can continue without `value()`."""
+function repeat_last_agent_quantities!(results::Dict, m::String, mod::Model)
+    function take!(hist)
+        hist isa AbstractVector || return false
+        isempty(hist) && return false
+        v = hist[end]
+        push!(hist, v isa Number ? v : (v isa AbstractArray ? copy(v) : deepcopy(v)))
+        return true
+    end
+    ok = true
+    p = mod.ext[:parameters]
+    get(p, :in_elec_market, false) && (ok &= take!(get(results["g"], m, nothing)))
+    get(p, :in_H2_market, false) && (ok &= take!(get(results["h2"], m, nothing)))
+    get(p, :in_elec_GC_market, false) && (ok &= take!(get(results["elec_GC"], m, nothing)))
+    get(p, :in_H2_GC_market, false) && (ok &= take!(get(results["H2_GC"], m, nothing)))
+    get(p, :in_EP_market, false) && (ok &= take!(get(results["EP"], m, nothing)))
+    atype = String(get(p, :Type, ""))
+    if get(p, :in_ppa_market, false)
+        if atype == "VRES"
+            ok &= take!(get(results["ppa"], m, nothing))
+            ok &= take!(get(results["ppa_cap"], m, nothing))
+        elseif haskey(results, "ppa_from") && haskey(results["ppa_from"], m)
+            for vres_id in keys(results["ppa_from"][m])
+                ok &= take!(results["ppa_from"][m][vres_id])
+                ok &= take!(results["ppa_cap_from"][m][vres_id])
+            end
+        end
+    end
+    if get(p, :in_hpa_market, false)
+        if atype == "GreenProducer"
+            ok &= take!(get(results["hpa"], m, nothing))
+            ok &= take!(get(results["hpa_cap"], m, nothing))
+        elseif atype == "GreenOfftaker" && haskey(results, "hpa_from") && haskey(results["hpa_from"], m)
+            for h2_id in keys(results["hpa_from"][m])
+                ok &= take!(results["hpa_from"][m][h2_id])
+                ok &= take!(results["hpa_cap_from"][m][h2_id])
+            end
+        end
+    end
+    if atype == "VRES" && haskey(results, "Cap_VRES") && haskey(results["Cap_VRES"], m) &&
+            !isempty(results["Cap_VRES"][m])
+        ok &= take!(results["Cap_VRES"][m])
+        ok &= take!(results["Inv_VRES"][m])
+    end
+    if haskey(mod.ext[:variables], :cap_H2_y) && haskey(results, "Cap_Elec_H2") &&
+            haskey(results["Cap_Elec_H2"], m) && !isempty(results["Cap_Elec_H2"][m])
+        ok &= take!(results["Cap_Elec_H2"][m])
+        ok &= take!(results["Inv_Elec_H2"][m])
+    end
+    if atype == "GreenOfftaker" && haskey(results, "Cap_EP_Green") &&
+            haskey(results["Cap_EP_Green"], m) && !isempty(results["Cap_EP_Green"][m])
+        ok &= take!(results["Cap_EP_Green"][m])
+        ok &= take!(results["Inv_EP_Green"][m])
+    end
+    return ok
+end
+
+"""Halve current ρ after a numerical failure so the next QP is better scaled."""
+function dampen_rhos_on_numerical!(ADMM_state::Dict, m::String)
+    fac = 0.5
+    ρmin = 1e-4
+    if haskey(ADMM_state, "ρ")
+        for key in ("elec", "H2", "elec_GC", "H2_GC", "EP")
+            haskey(ADMM_state["ρ"], key) || continue
+            isempty(ADMM_state["ρ"][key]) && continue
+            ADMM_state["ρ"][key][end] = max(ρmin, fac * ADMM_state["ρ"][key][end])
+        end
+    end
+    cap = get(ADMM_state, "Capacity", nothing)
+    if cap !== nothing && haskey(cap, "ρ") && haskey(cap["ρ"], m) && !isempty(cap["ρ"][m])
+        cap["ρ"][m][end] = max(0.10, fac * cap["ρ"][m][end])
+    end
+    for ck in ("ppa", "hpa")
+        haskey(ADMM_state, ck) || continue
+        C = ADMM_state[ck]
+        for id in keys(C["ρ"])
+            isempty(C["ρ"][id]) || (C["ρ"][id][end] = max(ρmin, fac * C["ρ"][id][end]))
+            if haskey(C, "ρ_cap") && haskey(C["ρ_cap"], id) && !isempty(C["ρ_cap"][id])
+                C["ρ_cap"][id][end] = max(ρmin, fac * C["ρ_cap"][id][end])
+            end
+        end
+    end
+    return nothing
+end
+
+"""Keep capacity duals from dominating the agent QP (units: €/MW)."""
+_clip_λ_cap(λ; bound::Float64 = 1.0e6) = clamp(_cap_scalar(λ), -bound, bound)
+
 """Read installed capacity vector from ADMM results (coalition or legacy single-cap)."""
 function _agent_cap_vec_from_results(m::String, results::Dict)
     if haskey(results, "Cap_Merged") && !isempty(get(results["Cap_Merged"], m, []))
@@ -50,11 +199,26 @@ end
 function _cap_dual_ascent(λ_prev, ρ_m::Real, cap_vec::AbstractVector{<:Real}, z_vec::AbstractVector{<:Real})
     isempty(cap_vec) && return _cap_z_vec(λ_prev)
     if length(cap_vec) == 1
-        return [_cap_scalar(λ_prev) + ρ_m * (_cap_scalar(cap_vec) - _cap_scalar(z_vec))]
+        return [_clip_λ_cap(_cap_scalar(λ_prev) + ρ_m * (_cap_scalar(cap_vec) - _cap_scalar(z_vec)))]
     end
     λ0 = λ_prev isa AbstractVector ? Float64.(λ_prev) : fill(_cap_scalar(λ_prev), length(cap_vec))
     length(λ0) != length(cap_vec) && (λ0 = resize!(copy(λ0), length(cap_vec)))
-    return [λ0[i] + ρ_m * (Float64(cap_vec[i]) - Float64(z_vec[i])) for i in eachindex(cap_vec)]
+    return [_clip_λ_cap(λ0[i] + ρ_m * (Float64(cap_vec[i]) - Float64(z_vec[i]))) for i in eachindex(cap_vec)]
+end
+
+"""Boyd abs+rel tolerance for a scalar capacity split (`x = z`).
+
+Uses `EpsilonCap` (MW), not the flow-market `EpsilonAbs`. Capacity is one
+decision, so there is no `sqrt(n_slots)` factor. `relax` is the contracts-only
+`cap_tol_relax` multiplier (1.0 in plain ME).
+"""
+function _cap_boyd_eps(ADMM_state::Dict, m::String; relax::Float64 = 1.0)
+    eps_cap = Float64(get(ADMM_state, "EpsilonCap", get(ADMM_state, "EpsilonAbs", 5.0)))
+    eps_rel = Float64(get(ADMM_state, "EpsilonRel", 0.0))
+    cap_state = ADMM_state["Capacity"]
+    sp_m = max(get(cap_state["ResidualScale_Primal"], m, 1.0), 1.0)
+    sd_m = max(get(cap_state["ResidualScale_Dual"], m, 1.0), 1.0)
+    return relax * (eps_cap + eps_rel * sp_m), relax * (eps_cap + eps_rel * sd_m)
 end
 
 """Read one scalar installed capacity from SP_Capacities.csv rows for an agent."""

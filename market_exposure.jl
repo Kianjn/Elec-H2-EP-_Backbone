@@ -179,6 +179,7 @@ run_general = merge(gen, Dict(
 data_run = copy(data)
 data_run["General"] = run_general
 describe_scenario_grid(scen)
+describe_risk_parameters(data, n_years)
 
 # Time series and representative days, loaded once per distinct weather label.
 # Input files follow:
@@ -233,12 +234,10 @@ agents[:EP_market] = []
 # One JuMP model per agent; Gurobi is the solver. Keys are agent IDs (strings).
 mdict = Dict(i => Model(Gurobi.Optimizer) for i in agents[:all])
 
-# Suppress Gurobi solver output (banner + per-solve logs) on every agent
-# model. WHY: without this, each ADMM iteration would print solver output
-# for every agent, drowning out the ADMM progress bar. set_silent keeps
-# the console clean so only the progress bar is visible.
+# Suppress Gurobi output and apply numerically robust QP defaults (NumericFocus,
+# homogeneous barrier, aggressive scaling). See configure_gurobi_agent!.
 for m in values(mdict)
-    set_silent(m)
+    configure_gurobi_agent!(m)
 end
 
 # ------------------------------------------------------------------------------

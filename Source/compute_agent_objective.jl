@@ -60,6 +60,7 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
         g = quantities[:g]
         λ_elec = prices[:λ_elec]
         MC = get(params, :MarginalCost, 0.0)
+        MC_y = get(params, :MarginalCostByYear, nothing)
         has_stages = haskey(params, :ConvStageCap) && haskey(params, :ConvStageBaseCost) && haskey(params, :ConvStageSlope)
         stage_cap = has_stages ? params[:ConvStageCap] : [0.0, 0.0, 0.0]
         stage_base = has_stages ? params[:ConvStageBaseCost] : fill(MC, 3, length(JY))
@@ -76,7 +77,8 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
                 end
                 obj += W[jd, jy] * (cost - λ_elec[jh, jd, jy] * g_tot)
             else
-                obj += W[jd, jy] * (MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy])
+                mc_jy = MC_y === nothing ? MC : MC_y[jy]
+                obj += W[jd, jy] * (mc_jy * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy])
             end
         end
 
@@ -90,7 +92,7 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
         λ_H2 = prices[:λ_H2]
         λ_H2_GC = prices[:λ_H2_GC]
         op_cost = get(params, :OperationalCost, 0.0)
-        F_cap = get(params, :FixedCost_per_MW_Electrolyzer, 0.0)
+        F_cap = electrolyzer_h2_annuity(params)
         for jh in JH, jd in JD, jy in JY
             obj += W[jd, jy] * (
                 λ_elec[jh, jd, jy] * e_in[jh, jd, jy]
@@ -180,9 +182,9 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
         F_cap = get(params, :FixedCost_per_MW, 0.0)
         for jh in JH, jd in JD, jy in JY
             obj += W[jd, jy] * (
-                MC * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
+                MC * g_EOM[jh, jd, jy]
                 - λ_elec[jh, jd, jy] * g_EOM[jh, jd, jy]
-                - λ_elec_GC[jh, jd, jy] * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
+                - λ_elec_GC[jh, jd, jy] * g_EOM[jh, jd, jy]
                 - λ_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
             )
         end
@@ -202,7 +204,7 @@ function compute_agent_objective_economic(agent_type::Symbol, quantities::Dict, 
         λ_H2 = prices[:λ_H2]
         λ_H2_GC = prices[:λ_H2_GC]
         op_cost = get(params, :OperationalCost, 0.0)
-        F_cap = get(params, :FixedCost_per_MW_Electrolyzer, 0.0)
+        F_cap = electrolyzer_h2_annuity(params)
         for jh in JH, jd in JD, jy in JY
             contract_term = 0.0
             for v in keys(g_ppa_from)
@@ -266,6 +268,7 @@ function compute_agent_objective_contributions(agent_type::Symbol, quantities::D
         g = quantities[:g]
         λ_elec = prices_dict[:λ_elec]
         MC = get(params, :MarginalCost, 0.0)
+        MC_y = get(params, :MarginalCostByYear, nothing)
         has_stages = haskey(params, :ConvStageCap) && haskey(params, :ConvStageBaseCost) && haskey(params, :ConvStageSlope)
         stage_cap = has_stages ? params[:ConvStageCap] : [0.0, 0.0, 0.0]
         stage_base = has_stages ? params[:ConvStageBaseCost] : fill(MC, 3, length(JY_vec))
@@ -282,7 +285,8 @@ function compute_agent_objective_contributions(agent_type::Symbol, quantities::D
                 end
                 contrib[ih, id, iy] = cost - λ_elec[jh, jd, jy] * g_tot
             else
-                contrib[ih, id, iy] = MC * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy]
+                mc_jy = MC_y === nothing ? MC : MC_y[jy]
+                contrib[ih, id, iy] = mc_jy * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy]
             end
         end
 
@@ -377,9 +381,9 @@ function compute_agent_objective_contributions(agent_type::Symbol, quantities::D
         MC = get(params, :MarginalCost, 0.0)
         for (iy, jy) in enumerate(JY_vec), (id, jd) in enumerate(JD_vec), (ih, jh) in enumerate(JH_vec)
             contrib[ih, id, iy] = (
-                MC * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
+                MC * g_EOM[jh, jd, jy]
                 - λ_elec[jh, jd, jy] * g_EOM[jh, jd, jy]
-                - λ_elec_GC[jh, jd, jy] * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
+                - λ_elec_GC[jh, jd, jy] * g_EOM[jh, jd, jy]
                 - λ_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
             )
         end

@@ -132,3 +132,20 @@ function describe_scenario_grid(scen)
             "$(round(1 / scen.n_years, digits = 4)) each)")
     return nothing
 end
+
+# Print γ/β at start-up and warn if a risk-averse run has a tail narrower than
+# one scenario (CVaR then collapses onto the single worst outcome).
+function describe_risk_parameters(data::Dict, n_years::Int)
+    admm = get(data, "ADMM", Dict{String,Any}())
+    gamma = Float64(get(admm, "gamma", 1.0))
+    beta  = Float64(get(admm, "beta", 0.95))
+    println("Risk parameters: gamma = $gamma, beta = $beta " *
+            "(tail = worst $(round(100 * (1 - beta); digits = 1))% of scenarios)")
+    if gamma < 1.0 - 1e-12 && (1 - beta) < 1 / n_years - 1e-9
+        @warn "ADMM.beta = $beta requests a tail narrower than one of $n_years " *
+              "equiprobable scenarios. CVaR will collapse onto the single worst " *
+              "scenario. For a tail of k scenarios use beta = 1 - k/$n_years " *
+              "(e.g. $(round(1 - 3 / n_years; digits = 3)) for k = 3)."
+    end
+    return nothing
+end

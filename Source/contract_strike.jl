@@ -16,10 +16,6 @@
 #
 # ==============================================================================
 
-if !isdefined(@__MODULE__, :shared_contract_capacity)
-    include(joinpath(@__DIR__, "contract_capacity.jl"))
-end
-
 """W-weighted mean over representative days and hours → one scalar €/MWh."""
 function _contract_strike_scalar(arr::AbstractArray{<:Real}, W::AbstractMatrix)
     n_ts, n_rd, n_yr = size(arr)
@@ -61,22 +57,32 @@ function _ng_benchmark_scalars(data::Dict)
     gas_mult = isempty(mults) ? 1.0 : sum(mults) / length(mults)
 
     conv_mc = 100.0
+    peak_tech = nothing
     for (_, blk) in power
         String(get(blk, "Type", "")) == "Conventional" || continue
-        peak = get(blk, "PeakTechnology", nothing)
-        conv_mc = if peak !== nothing && !isempty(fuel)
-            thermal_srmc(peak, fuel, gas_mult)   # OCGT tail: the price-setting unit
-        else
-            Float64(get(blk, "FinalMarginalCost", get(blk, "MarginalCost", conv_mc)))
+        if haskey(blk, "PeakTechnology")
+            peak_tech = blk["PeakTechnology"]
         end
-        break
+    end
+    if peak_tech !== nothing && !isempty(fuel)
+        conv_mc = thermal_srmc(peak_tech, fuel, gas_mult)
+    elseif !isempty(fuel)
+        # Default peaking OCGT benchmark (NL calibration) when flat agents have no PeakTechnology.
+        ocgt = Dict("name" => "OCGT", "fuel" => "Gas", "efficiency" => 0.38, "vom" => 3.0)
+        conv_mc = thermal_srmc(ocgt, fuel, gas_mult)
+    else
+        for (_, blk) in power
+            String(get(blk, "Type", "")) == "Conventional" || continue
+            conv_mc = Float64(get(blk, "FinalMarginalCost", get(blk, "MarginalCost", conv_mc)))
+            break
+        end
     end
 
     grey_ep = 180.0
     grey_alpha = 1.0
     for (_, blk) in off
         String(get(blk, "Type", "")) == "GreyOfftaker" || continue
-        grey_alpha = Float64(get(blk, "Alpha", 1.0))
+        grey_alpha = Float64(get(blk, "gamma_NH3", get(blk, "Alpha", 1.0)))
         grey_ep = if haskey(blk, "GasIntensity") && !isempty(fuel)
             Float64(blk["GasIntensity"]) * Float64(get(fuel, "GasPrice", 0.0)) * gas_mult +
             Float64(get(blk, "CO2Intensity", 0.0)) * Float64(get(fuel, "CO2Price", 0.0)) +
@@ -127,8 +133,10 @@ function contract_cap_g_bar(prev_net_cap::Real, imb_cap::Real, n_contract::Int)
 end
 
 function _consensus_contract_capacity(results::Dict, cap_key::String, id::String)
-    pool = cap_key == "ppa_cap" ? :ppa : :hpa
-    return shared_contract_capacity(results, pool, id)
+    hist = get(results, cap_key, Dict())
+    haskey(hist, id) || return 0.0
+    isempty(hist[id]) && return 0.0
+    return Float64(hist[id][end])
 end
 
 """
@@ -163,9 +171,9 @@ function finalize_contract_terms!(ADMM_state::Dict, results::Dict, data::Dict,
     strikes["C_hpa"] = Dict{String, Float64}()
 
     for vres_id in get(ppa_market, "ppa_vres", String[])
+        K_spot = _bundled_spot_scalar(results, ["elec", "elec_GC"], W)
         λ = results["λ_ppa"][vres_id][end]
-        B = contract_benchmark_field("negotiated", results, data, shp; λ_clearing=λ)
-        strikes["K_ppa"][vres_id] = _contract_strike_scalar(B, W)
+        strikes["K_ppa"][vres_id] = K_spot === nothing ? _contract_strike_scalar(λ, W) : K_spot
         strikes["C_ppa"][vres_id] = _consensus_contract_capacity(results, "ppa_cap", vres_id)
     end
 
@@ -173,8 +181,14 @@ function finalize_contract_terms!(ADMM_state::Dict, results::Dict, data::Dict,
         cfg = get(get(hpa_market, "per_h2", Dict()), h2_id, Dict())
         bench = String(get(cfg, "price_benchmark", get(hpa_market, "price_benchmark", "negotiated")))
         λ = results["λ_hpa"][h2_id][end]
-        B = contract_benchmark_field(bench, results, data, shp; λ_clearing=λ)
-        strikes["K_hpa"][h2_id] = _contract_strike_scalar(B, W)
+        negotiated = lowercase(strip(bench)) in ("negotiated", "internal", "endogenous")
+        if negotiated
+            K_spot = _bundled_spot_scalar(results, ["H2", "H2_GC"], W)
+            strikes["K_hpa"][h2_id] = K_spot === nothing ? _contract_strike_scalar(λ, W) : K_spot
+        else
+            B = contract_benchmark_field(bench, results, data, shp; λ_clearing=λ)
+            strikes["K_hpa"][h2_id] = _contract_strike_scalar(B, W)
+        end
         strikes["C_hpa"][h2_id] = _consensus_contract_capacity(results, "hpa_cap", h2_id)
     end
 
@@ -203,13 +217,50 @@ function final_contract_capacity(ADMM_state::Dict, pool::Symbol, id::String)
     return strikes[key][id]
 end
 
-"""Update K_ppa for one VRES or one electrolyzer vres leg (scalar, uniform over hours)."""
+"""Latest 3D λ field, or `nothing` if that market has not been priced yet."""
+function _latest_λ(results::Dict, key::String)
+    hist = get(get(results, "λ", Dict()), key, [])
+    isempty(hist) && return nothing
+    return hist[end]
+end
+
+"""W-mean of bundled spot (PPA: elec+GC; HPA: H2+H2-GC)."""
+function _bundled_spot_scalar(results::Dict, keys::Vector{String}, W::AbstractMatrix)
+    fields = Any[]
+    for k in keys
+        f = _latest_λ(results, k)
+        f === nothing && return nothing
+        push!(fields, f)
+    end
+    bundled = copy(fields[1])
+    for f in fields[2:end]
+        bundled .+= f
+    end
+    return _contract_strike_scalar(bundled, W)
+end
+
+"""True once shared C has grown well past the yaml seed (reporting only)."""
+function _contract_volume_material(results::Dict, pool::String, id::String, data::Dict)
+    cfg = get(get(data, "ADMM", Dict()), "contract_cap", Dict())
+    C0 = Float64(get(cfg, "initial", 10.0))
+    cap_key = pool == "ppa" ? "ppa_cap" : "hpa_cap"
+    C = _consensus_contract_capacity(results, cap_key, id)
+    return C >= max(2.0 * C0, 50.0)
+end
+
+"""Update K_ppa for one VRES or one electrolyzer vres leg (scalar, uniform over hours).
+
+CfD strike is the bundled physical spot (elec + elec-GC), not the ADMM dual λ_ppa.
+λ_ppa only matches buyer/seller hedge quantities; copying it into K collapsed
+the strike to 0 and left agents with nothing to hedge.
+"""
 function update_ppa_strike!(mod::Model, vres_id::String, vres_cfg::Dict,
                             results::Dict, data::Dict, ADMM_state::Dict, shp::Tuple, W::AbstractMatrix)
     p = mod.ext[:parameters]
     λ = results["λ_ppa"][vres_id][end]
-    B = contract_benchmark_field("negotiated", results, data, shp; λ_clearing=λ)
-    K = _strike_field(_contract_strike_scalar(B, W), shp)
+    K_spot = _bundled_spot_scalar(results, ["elec", "elec_GC"], W)
+    K_scalar = K_spot === nothing ? _contract_strike_scalar(λ, W) : K_spot
+    K = _strike_field(K_scalar, shp)
     if p[:K_ppa] isa Dict
         p[:K_ppa][vres_id] = K
     else
@@ -218,15 +269,27 @@ function update_ppa_strike!(mod::Model, vres_id::String, vres_cfg::Dict,
     return nothing
 end
 
-"""Update K_hpa / B_hpa for one HPA leg (scalar strike, uniform over hours)."""
+"""Update K_hpa / B_hpa for one HPA leg (scalar strike, uniform over hours).
+
+Default negotiated strike is bundled H₂ + H₂-GC spot (the CfD floating index).
+Yaml `cfd` still uses the configured benchmark field B as the floating index.
+"""
 function update_hpa_strike!(mod::Model, h2_id::String, h2_cfg::Dict,
                             results::Dict, data::Dict, ADMM_state::Dict, shp::Tuple, W::AbstractMatrix)
     p = mod.ext[:parameters]
     bench = String(get(h2_cfg, "price_benchmark", "negotiated"))
     structure = String(get(h2_cfg, "price_structure", "fixed"))
     λ = results["λ_hpa"][h2_id][end]
-    B = contract_benchmark_field(bench, results, data, shp; λ_clearing=λ)
-    K = _strike_field(_contract_strike_scalar(B, W), shp)
+    negotiated = lowercase(strip(bench)) in ("negotiated", "internal", "endogenous")
+    if negotiated
+        K_spot = _bundled_spot_scalar(results, ["H2", "H2_GC"], W)
+        K_scalar = K_spot === nothing ? _contract_strike_scalar(λ, W) : K_spot
+        B = _strike_field(K_scalar, shp)
+    else
+        B = contract_benchmark_field(bench, results, data, shp; λ_clearing=λ)
+        K_scalar = _contract_strike_scalar(B, W)
+    end
+    K = _strike_field(K_scalar, shp)
     if p[:K_hpa] isa Dict
         p[:K_hpa][h2_id] = K
         haskey(p, :B_hpa) || (p[:B_hpa] = Dict{String, Array{Float64, 3}}())

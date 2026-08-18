@@ -95,8 +95,9 @@ function build_offtaker_agent!(m::String, mod::Model, EP_market::Dict, H2_market
         # ── Risk variables (agent-level CVaR) ───────────────────────────────
         # α_G: VaR proxy; CVaR_G: Conditional Value-at-Risk of loss;
         # u_G[jy]: shortfall per scenario year.
-        alpha_G = mod.ext[:variables][:alpha_GreenOfftaker] = @variable(mod, lower_bound = 0, base_name = "alpha_GreenOfftaker_$(m)")
-        cvar_G  = mod.ext[:variables][:CVaR_GreenOfftaker]  = @variable(mod, lower_bound = 0, base_name = "CVaR_GreenOfftaker_$(m)")
+        # α and CVaR unbounded: losses (cost − revenue) can be negative.
+        alpha_G = mod.ext[:variables][:alpha_GreenOfftaker] = @variable(mod, base_name = "alpha_GreenOfftaker_$(m)")
+        cvar_G  = mod.ext[:variables][:CVaR_GreenOfftaker]  = @variable(mod, base_name = "CVaR_GreenOfftaker_$(m)")
         u_G     = mod.ext[:variables][:u_GreenOfftaker]     = @variable(mod, [jy in JY], lower_bound = 0, base_name = "u_GreenOfftaker_$(m)")
 
         # Per-year economic loss (cost − revenue) excluding ADMM penalties.

@@ -2,7 +2,7 @@
 # ADMM_subroutine.jl — Per-agent step: update params, solve, record quantities
 # ==============================================================================
 
-if !isdefined(@__MODULE__, :_cap_z_push!)
+if !isdefined(@__MODULE__, :repeat_last_agent_quantities!)
     include(joinpath(@__DIR__, "cap_admm_helpers.jl"))
 end
 #

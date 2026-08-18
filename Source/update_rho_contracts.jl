@@ -36,10 +36,10 @@ function update_rho_contracts!(ADMM_state::Dict, iter::Int)
 
         if key in ("elec", "elec_GC", "H2_GC")
             τ = 1.05
-            ρ_max = key == "H2_GC" ? 100.0 : 5_000.0
+            ρ_max = 30.0
         else
             τ = 1.01
-            ρ_max = 100.0
+            ρ_max = 30.0
         end
         ρ_min = 1e-4
 
@@ -85,7 +85,7 @@ function update_rho_contracts!(ADMM_state::Dict, iter::Int)
         haskey(ADMM_state, contract_key) || continue
         C = ADMM_state[contract_key]
         τ = 1.05
-        ρ_max = 500.0
+        ρ_max = 30.0
         ρ_min = 1e-4
         for id in keys(C["ρ"])
             isempty(C["Primal"][id]) && continue

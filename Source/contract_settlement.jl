@@ -2,27 +2,30 @@
 # contract_settlement.jl — Volume and price-structure settlement for PPAs/HPAs
 # ==============================================================================
 #
-# PPA (all ME contract entry points): pay-as-produced at scalar strike K (€/MWh,
-# uniform over hours). K tracks bilateral λ each ADMM iteration; snapshotted at
-# convergence for reporting.
+# PPA (all ME contract entry points): pay-as-produced *CfD* at scalar strike K
+# (€/MWh, uniform over hours). Physical pool sales stay at λ; the hedge pays
+#   (K − λ_bundle) · q,   λ_bundle = λ_elec + λ_elec_GC.
+# Without the floating leg, K·q is a free add-on to full spot revenue, ADMM
+# drives K → 0, and risk-averse agents have nothing to hedge.
 #
 # HPA volume modes (selected by entry point me_pap / me_top / me_sop):
-#   pap — pay-as-produced:     buyer pays K·q, seller receives K·q
-#   top — take-or-pay:         buyer pays K·max(q, cap), seller receives K·max(q, cap)
-#   sop — send-or-pay:         buyer pays K·q; seller receives K·q − K·s, s = shortfall
-#                              vs min(cap, available production)
+#   pap — pay-as-produced:     buyer pays (K−λ_H2)·q, seller receives (K−λ_H2)·q
+#   top — take-or-pay:         same on q_pay = max(q, cap)
+#   sop — send-or-pay:         energy CfD on q; seller also pays K·s,
+#                              s = max(0, cap − q)
 #
 # HPA price structure (data.yaml):
-#   fixed — settlement uses locked strike K only
-#   cfd   — decomposed as B·q + (K−B)·q (net K·q; B exposes benchmark risk in CVaR)
+#   fixed — float vs physical λ_H2 (default hedge of the H₂ pool price)
+#   cfd   — float vs benchmark field B (NG / ammonia / negotiated)
 #
 # ==============================================================================
 
 """Add auxiliary variables/constraints for ToP / SoP HPA volume logic."""
 function add_hpa_volume_variables!(mod::Model; role::Symbol)
     p = mod.ext[:parameters]
-    volume_mode = String(get(p, :hpa_volume_mode, "pap"))
-    volume_mode == "pap" && return mod
+    raw_mode = lowercase(String(get(p, :hpa_volume_mode, "sop")))
+    volume_mode = raw_mode == "pap" ? "sop" : raw_mode
+    volume_mode in ("sop", "top") || error("Unsupported hpa_volume_mode=$(raw_mode). Use sop or top.")
 
     JH = mod.ext[:sets][:JH]
     JD = mod.ext[:sets][:JD]
@@ -58,59 +61,73 @@ function add_hpa_volume_variables!(mod::Model; role::Symbol)
             cons[:hpa_top_shortfall_ub] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
                 vars[:hpa_top_shortfall][jh, jd, jy] <= hpa_cap - h2_hpa[jh, jd, jy])
         elseif volume_mode == "sop"
-            h2_out = vars[:h2_out]
-            vars[:hpa_sop_oblig] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound=0,
-                                             base_name="hpa_sop_oblig")
+            # Convex send-or-pay: s = max(0, C - q).
+            # The old oblig <= min(C, production) auxiliary is inactive in a
+            # min-s problem (solver sets oblig=0), and if the strike K goes
+            # negative an unbounded-above s makes Gurobi return 0 solutions.
             vars[:hpa_sop_shortfall] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound=0,
                                                  base_name="hpa_sop_shortfall")
-            cons[:hpa_sop_oblig_cap] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
-                vars[:hpa_sop_oblig][jh, jd, jy] <= hpa_cap)
-            cons[:hpa_sop_oblig_prod] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
-                vars[:hpa_sop_oblig][jh, jd, jy] <= h2_out[jh, jd, jy])
-            cons[:hpa_sop_shortfall] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
-                vars[:hpa_sop_shortfall][jh, jd, jy] >= vars[:hpa_sop_oblig][jh, jd, jy] - h2_hpa[jh, jd, jy])
+            cons[:hpa_sop_shortfall_lb] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
+                vars[:hpa_sop_shortfall][jh, jd, jy] >= hpa_cap - h2_hpa[jh, jd, jy])
+            cons[:hpa_sop_shortfall_ub] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
+                vars[:hpa_sop_shortfall][jh, jd, jy] <= hpa_cap)
         end
     end
     return mod
 end
 
-"""PPA payment on delivered energy (always PaP): +K·g for seller, cost for buyer."""
-function ppa_payment_term(K::AbstractArray, q::JuMP.AbstractJuMPScalar, W, jh, jd, jy)
-    return K[jh, jd, jy] * q
+"""Bundled electricity + elec-GC spot used as the PPA CfD floating index."""
+function ppa_bundle_spot(mod::Model, jh, jd, jy)
+    p = mod.ext[:parameters]
+    return p[:λ_elec][jh, jd, jy] + p[:λ_elec_GC][jh, jd, jy]
+end
+
+"""PPA CfD payment: (K − λ_bundle)·q. Seller revenue; buyer cost."""
+function ppa_cfd_term(mod::Model, K::AbstractArray, q, jh, jd, jy)
+    return (K[jh, jd, jy] - ppa_bundle_spot(mod, jh, jd, jy)) * q
+end
+
+"""Bundled H₂ + H₂-GC spot used as the default HPA CfD floating index."""
+function hpa_bundle_spot(p, jh, jd, jy)
+    λ = p[:λ_H2][jh, jd, jy]
+    λgc = get(p, :λ_H2_GC, nothing)
+    return λgc === nothing ? λ : λ + λgc[jh, jd, jy]
 end
 
 """
     hpa_settlement_terms(p, K, B, q, W, jh, jd, jy; side=:buyer)
 
-Return (fixed_leg, cfd_leg) contributions to agent loss at one slot.
+Return (cfd_leg, unused) contributions to agent loss at one slot.
 Buyer: positive = cost. Seller: returned values are subtracted in caller (revenue).
+Default (`fixed`): (K − λ_H2 − λ_H2_GC)·q_pay. Yaml `cfd`: (K − B)·q_pay.
 """
 function hpa_settlement_terms(p, K::AbstractArray, B::Union{Nothing, AbstractArray},
                               q::JuMP.AbstractJuMPScalar, W, jh, jd, jy; side::Symbol=:buyer,
                               top_shortfall=nothing)
-    volume_mode = String(get(p, :hpa_volume_mode, "pap"))
+    raw_mode = lowercase(String(get(p, :hpa_volume_mode, "sop")))
+    volume_mode = raw_mode == "pap" ? "sop" : raw_mode
+    volume_mode in ("sop", "top") || error("Unsupported hpa_volume_mode=$(raw_mode). Use sop or top.")
     structure = String(get(p, :hpa_price_structure, "fixed"))
-    Buse = B === nothing ? K : B
 
     q_pay = q
     if volume_mode == "top" && top_shortfall !== nothing
         q_pay = q + top_shortfall[jh, jd, jy]
     end
 
-    fixed_leg = K[jh, jd, jy] * q_pay
     if structure == "cfd"
-        cfd_leg = (K[jh, jd, jy] - Buse[jh, jd, jy]) * q_pay
-        return fixed_leg, cfd_leg
+        Buse = B === nothing ? p[:λ_H2] : B
+        return (K[jh, jd, jy] - Buse[jh, jd, jy]) * q_pay, 0.0
     end
-    return fixed_leg, 0.0
+    return (K[jh, jd, jy] - hpa_bundle_spot(p, jh, jd, jy)) * q_pay, 0.0
 end
 
 """Seller-side HPA revenue including SoP penalty."""
 function hpa_seller_revenue_terms(p, K::AbstractArray, B::Union{Nothing, AbstractArray},
                                   h2_hpa, W, jh, jd, jy; top_shortfall=nothing, sop_shortfall=nothing)
-    volume_mode = String(get(p, :hpa_volume_mode, "pap"))
+    raw_mode = lowercase(String(get(p, :hpa_volume_mode, "sop")))
+    volume_mode = raw_mode == "pap" ? "sop" : raw_mode
+    volume_mode in ("sop", "top") || error("Unsupported hpa_volume_mode=$(raw_mode). Use sop or top.")
     structure = String(get(p, :hpa_price_structure, "fixed"))
-    Buse = B === nothing ? K : B
 
     q = h2_hpa[jh, jd, jy]
     q_pay = q
@@ -118,9 +135,11 @@ function hpa_seller_revenue_terms(p, K::AbstractArray, B::Union{Nothing, Abstrac
         q_pay = q + top_shortfall[jh, jd, jy]
     end
 
-    rev = K[jh, jd, jy] * q_pay
     if structure == "cfd"
-        rev += (K[jh, jd, jy] - Buse[jh, jd, jy]) * q_pay
+        Buse = B === nothing ? p[:λ_H2] : B
+        rev = (K[jh, jd, jy] - Buse[jh, jd, jy]) * q_pay
+    else
+        rev = (K[jh, jd, jy] - hpa_bundle_spot(p, jh, jd, jy)) * q_pay
     end
     if volume_mode == "sop" && sop_shortfall !== nothing
         rev -= K[jh, jd, jy] * sop_shortfall[jh, jd, jy]
@@ -132,7 +151,8 @@ end
 function sum_ppa_buyer_cost(mod, ppa_vres, W, JH, JD, JY)
     K_ppa = mod.ext[:parameters][:K_ppa]
     g_ppa_from = mod.ext[:variables][:g_ppa_from]
-    return sum(W[jd, jy] * sum(K_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
+    return sum(W[jd, jy] * sum(ppa_cfd_term(mod, K_ppa[v], g_ppa_from[v][jh, jd, jy], jh, jd, jy)
+                               for v in ppa_vres)
                for jh in JH, jd in JD, jy in JY)
 end
 
@@ -140,7 +160,8 @@ end
 function sum_ppa_seller_revenue(mod, W, JH, JD, JY)
     K_ppa = mod.ext[:parameters][:K_ppa]
     g_ppa = mod.ext[:variables][:g_ppa]
-    return sum(W[jd, jy] * K_ppa[jh, jd, jy] * g_ppa[jh, jd, jy] for jh in JH, jd in JD, jy in JY)
+    return sum(W[jd, jy] * ppa_cfd_term(mod, K_ppa, g_ppa[jh, jd, jy], jh, jd, jy)
+               for jh in JH, jd in JD, jy in JY)
 end
 
 """Sum W-weighted HPA buyer cost for GreenOfftaker (one scenario year jy)."""
@@ -182,7 +203,8 @@ end
 function sum_ppa_buyer_cost_jy(mod, ppa_vres, jy, W, JH, JD)
     K_ppa = mod.ext[:parameters][:K_ppa]
     g_ppa_from = mod.ext[:variables][:g_ppa_from]
-    return sum(W[jd, jy] * sum(K_ppa[v][jh, jd, jy] * g_ppa_from[v][jh, jd, jy] for v in ppa_vres)
+    return sum(W[jd, jy] * sum(ppa_cfd_term(mod, K_ppa[v], g_ppa_from[v][jh, jd, jy], jh, jd, jy)
+                               for v in ppa_vres)
                for jh in JH, jd in JD)
 end
 
@@ -190,7 +212,8 @@ end
 function sum_ppa_seller_revenue_jy(mod, jy, W, JH, JD)
     K_ppa = mod.ext[:parameters][:K_ppa]
     g_ppa = mod.ext[:variables][:g_ppa]
-    return sum(W[jd, jy] * K_ppa[jh, jd, jy] * g_ppa[jh, jd, jy] for jh in JH, jd in JD)
+    return sum(W[jd, jy] * ppa_cfd_term(mod, K_ppa, g_ppa[jh, jd, jy], jh, jd, jy)
+               for jh in JH, jd in JD)
 end
 
 """Sum W-weighted HPA buyer cost for GreenOfftaker (full horizon)."""

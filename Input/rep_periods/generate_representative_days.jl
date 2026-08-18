@@ -83,9 +83,9 @@ const SCENARIOS = [
 
 # Label whose ERA5 year defines the common NL capacity-factor calibration.
 const REFERENCE_LABEL = 1
-# [NL] CBS 2021 national annual capacity factors for the installed fleet.
-const SOLAR_CF_TARGET = 0.18   # [CBS-RE]
-const WIND_CF_TARGET  = 0.28   # [CBS-RE], on+offshore weighted
+# [NL] CBS 2024 national annual normalised capacity factors for the installed fleet.
+const SOLAR_CF_TARGET = 0.182  # [CBS-RE] — 18.24% (table 82610, 2024)
+const WIND_CF_TARGET  = 0.280  # [CBS-RE], on+offshore weighted — 28.01% (2024)
 
 # ------------------------------------------------------------ demand model ---
 #
@@ -179,8 +179,8 @@ function nl_load_raw(source_year::Int, temperature_c::Vector{Float64})
 
         # Hour-of-day activity shape: overnight base + morning ramp + evening peak.
         # The three amplitudes are set so the resulting profile reproduces the NL
-        # 2021 system load factor of ~0.685 (117 TWh consumption against a ~19.5 GW
-        # peak [CBS-EP]); a peakier shape would understate annual energy.
+        # 2024 system load factor of ~0.636 (108.5 TWh net consumption against a
+        # 19.48 GW peak [CBS-EP; ENTSOE-PEAK-2024]); a peakier shape would understate annual energy.
         hod = 0.58 +
               0.18 * exp(-0.5 * ((hour - 8) / 3.5)^2) +
               0.30 * exp(-0.5 * ((hour - 19) / 2.8)^2)

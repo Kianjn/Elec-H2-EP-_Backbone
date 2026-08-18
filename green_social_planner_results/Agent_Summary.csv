@@ -1,7 +1,0 @@
-AgentID,Group,Type,elec_net_sum,H2_net_sum,elec_GC_net_sum,H2_GC_net_sum,EP_net_sum,Capacity_Final_MW,Investment_Total_MW,Objective_Value
-Cons_Elec_01,power,PowerCons,-3.88582736277497e7,0.0,0.0,0.0,0.0,0.0,0.0,-6.403977446410411e11
-Gen_Conv_01,power,PowerGen,1.8837483017219357e7,0.0,0.0,0.0,0.0,0.0,0.0,-3.495079123358966e10
-Offtaker_Grey,offtaker,Offtaker,0.0,0.0,0.0,-1.8178158743344815e6,2.7351179258150784e6,0.0,0.0,-3.192806713339295e9
-Offtaker_Import,offtaker,Offtaker,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
-Demand_GC_Elec_01,elec_GC_demand,GC_Demand,0.0,0.0,-1.9639960776608042e7,0.0,0.0,0.0,0.0,-1.7776521550629838e9
-Green_Coalition,merged,GreenCoalition,2.0020790628576025e7,0.0,1.963995905054626e7,1.817815922489589e6,2.371122038924706e6,43418.557917448285,0.0,5371.49609375

@@ -1,7 +1,7 @@
 periods,weights,selected_periods
 1,0.0,false
 2,0.0,false
-3,24.318782301089556,true
+3,0.0,false
 4,0.0,false
 5,0.0,false
 6,0.0,false
@@ -10,7 +10,7 @@ periods,weights,selected_periods
 9,0.0,false
 10,0.0,false
 11,0.0,false
-12,19.993214031546614,true
+12,0.0,false
 13,0.0,false
 14,0.0,false
 15,0.0,false
@@ -19,7 +19,7 @@ periods,weights,selected_periods
 18,0.0,false
 19,0.0,false
 20,0.0,false
-21,60.62127665438146,true
+21,0.0,false
 22,0.0,false
 23,0.0,false
 24,0.0,false
@@ -88,9 +88,9 @@ periods,weights,selected_periods
 87,0.0,false
 88,0.0,false
 89,0.0,false
-90,0.0,false
+90,24.891187306519548,true
 91,0.0,false
-92,107.5707957174306,true
+92,0.0,false
 93,0.0,false
 94,0.0,false
 95,0.0,false
@@ -217,7 +217,7 @@ periods,weights,selected_periods
 216,0.0,false
 217,0.0,false
 218,0.0,false
-219,58.241123145675886,true
+219,55.98542263659067,true
 220,0.0,false
 221,0.0,false
 222,0.0,false
@@ -249,14 +249,14 @@ periods,weights,selected_periods
 248,0.0,false
 249,0.0,false
 250,0.0,false
-251,0.0,false
+251,38.95682057513468,true
 252,0.0,false
 253,0.0,false
 254,0.0,false
 255,0.0,false
 256,0.0,false
 257,0.0,false
-258,0.0,false
+258,128.75732931878443,true
 259,0.0,false
 260,0.0,false
 261,0.0,false
@@ -277,7 +277,7 @@ periods,weights,selected_periods
 276,0.0,false
 277,0.0,false
 278,0.0,false
-279,26.314601346498307,true
+279,34.803264048707746,true
 280,0.0,false
 281,0.0,false
 282,0.0,false
@@ -295,7 +295,7 @@ periods,weights,selected_periods
 294,0.0,false
 295,0.0,false
 296,0.0,false
-297,0.0,false
+297,23.63956817543227,true
 298,0.0,false
 299,0.0,false
 300,0.0,false
@@ -303,7 +303,7 @@ periods,weights,selected_periods
 302,0.0,false
 303,0.0,false
 304,0.0,false
-305,0.0,false
+305,33.75893164525314,true
 306,0.0,false
 307,0.0,false
 308,0.0,false
@@ -328,11 +328,11 @@ periods,weights,selected_periods
 327,0.0,false
 328,0.0,false
 329,0.0,false
-330,34.67142351334002,true
+330,0.0,false
 331,0.0,false
 332,0.0,false
 333,0.0,false
-334,0.0,false
+334,24.207476293577525,true
 335,0.0,false
 336,0.0,false
 337,0.0,false
@@ -358,7 +358,7 @@ periods,weights,selected_periods
 357,0.0,false
 358,0.0,false
 359,0.0,false
-360,33.2687832900377,true
+360,0.0,false
 361,0.0,false
 362,0.0,false
 363,0.0,false

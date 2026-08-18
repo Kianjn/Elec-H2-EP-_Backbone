@@ -2,13 +2,13 @@
 # ADMM_contracts.jl — Main ADMM loop with bilateral contract markets
 # ==============================================================================
 
-if !isdefined(@__MODULE__, :_cap_z_push!)
+if !isdefined(@__MODULE__, :repeat_last_agent_quantities!)
     include(joinpath(@__DIR__, "cap_admm_helpers.jl"))
 end
 if !isdefined(@__MODULE__, :finalize_contract_terms!)
     include(joinpath(@__DIR__, "contract_strike.jl"))
 end
-if !isdefined(@__MODULE__, :init_shared_contract_capacity!)
+if !isdefined(@__MODULE__, :update_shared_contract_capacity!)
     include(joinpath(@__DIR__, "contract_capacity.jl"))
 end
 
@@ -20,22 +20,20 @@ end
 # CAPACITY CONSENSUS TOLERANCE (relaxed for contracts case):
 #   The capacity consensus uses a per-agent equality split (x_cap = z_cap
 #   with explicit dual λ_cap and per-agent ρ_cap; see DOCUMENTATION.md §5.4)
-#   that couples VRES, electrolyzer, and green offtaker investments. In the
-#   contracts case, VRES splits generation between pool and contract, so
-#   z_cap = f(g_bar_elec + g_bar_ppa) depends on both standard and contract
-#   flow consensus. This creates stronger coupling and slower convergence
-#   than in market_exposure.
+#   that couples VRES, electrolyzer, and green offtaker investments. Physical
+#   z_cap is derived from *pool* flow only (same as market_exposure): PPA/HPA
+#   hedges do not occupy a second slice of plant capacity.
 #
-#   We relax the capacity tolerance by CAP_CONSENSUS_TOL_RELAX so that
-#   convergence can be declared when flow markets are sufficiently converged,
-#   even if capacity consensus lags. The capacity residual remains monitored
-#   and reported; results are still meaningful when flow markets have cleared.
+#   We relax the *physical investment* capacity test by cap_tol_relax × ε_cap
+#   so that convergence can be declared when flow markets are sufficiently
+#   converged, even if capacity consensus lags. The capacity residual remains
+#   monitored and reported; results are still meaningful when flow markets
+#   have cleared. See DOCUMENTATION.md §6.5 for the numerical justification.
 #
 # ==============================================================================
 
-# Multiplier for capacity consensus tolerance. Effective tolerance for cap is
-# (eps_pr, eps_du) * CAP_CONSENSUS_TOL_RELAX, i.e. we accept larger capacity
-# residuals. Tune via data["ADMM"]["cap_tol_relax"] if present.
+# Multiplier for physical-investment capacity consensus in the contracts case.
+# Effective tolerance is cap_tol_relax × ε_cap (see DOCUMENTATION.md §6.5).
 const CAP_CONSENSUS_TOL_RELAX_DEFAULT = 100.0
 
 function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Dict,
@@ -84,8 +82,6 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     # Capacity-owning agents — see ADMM.jl and DOCUMENTATION.md §5.4.
     cap_agents = get(agents, :cap_agents, String[])
 
-    init_shared_contract_capacity!(ADMM_state, results, ppa_market, hpa_market)
-
     # Expose horizon sizes to update_rho_contracts! (Boyd-style abs tolerance).
     n_yr_admm = data["General"]["nYears"]
     n_ts_admm = data["General"]["nTimesteps"]
@@ -96,9 +92,14 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     ADMM_state["rho_cap_inc_factor"] = get(get(data, "ADMM", Dict()), "rho_cap_inc_factor", 1.05)
 
     function _market_eps_std(key::String, n_slots::Int)
-        eps_abs = ADMM_state["EpsilonAbs"]
         eps_rel = ADMM_state["EpsilonRel"]
-        sqrt_n = sqrt(max(1, n_slots))
+        if key == "cap"
+            eps_abs = Float64(get(ADMM_state, "EpsilonCap", ADMM_state["EpsilonAbs"]))
+            sqrt_n = 1.0
+        else
+            eps_abs = ADMM_state["EpsilonAbs"]
+            sqrt_n = sqrt(max(1, n_slots))
+        end
         sp = max(ADMM_state["ResidualScale"]["Primal"][key], 1.0)
         sd = max(ADMM_state["ResidualScale"]["Dual"][key], 1.0)
         eps_pr = eps_abs * sqrt_n + eps_rel * sp
@@ -107,15 +108,15 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     end
 
     function _market_eps_contract(C::Dict, id::String, is_cap::Bool, n_slots::Int)
-        eps_abs = ADMM_state["EpsilonAbs"]
         eps_rel = ADMM_state["EpsilonRel"]
         if is_cap
+            eps_abs = Float64(get(ADMM_state, "EpsilonCap", ADMM_state["EpsilonAbs"]))
             sp = max(C["ResidualScale_Primal_cap"][id], 1.0)
             sd = max(C["ResidualScale_Dual_cap"][id], 1.0)
-            # Scalar consensus (capacity): keep sqrt(1) basis for consistency with current check.
             eps_pr = eps_abs * 1.0 + eps_rel * sp
             eps_du = eps_abs * 1.0 + eps_rel * sd
         else
+            eps_abs = ADMM_state["EpsilonAbs"]
             sqrt_n = sqrt(max(1, n_slots))
             sp = max(C["ResidualScale_Primal"][id], 1.0)
             sd = max(C["ResidualScale_Dual"][id], 1.0)
@@ -133,11 +134,20 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
     for iter in iterations
         convergence == 1 && break
 
-        for m in agents[:all]
-            ADMM_subroutine_contracts!(m, data, results, ADMM_state, elec_market, H2_market,
-                                       elec_GC_market, H2_GC_market, EP_market, ppa_market, hpa_market,
-                                       mdict, agents, TO)
+        if iter > 1 && (iter % 40 == 0)
+            for md in values(mdict)
+                reset_gurobi_optimizer!(md)
+            end
         end
+
+        for m in agents[:all]
+            Base.invokelatest(ADMM_subroutine_contracts!, m, data, results, ADMM_state,
+                              elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market,
+                              ppa_market, hpa_market, mdict, agents, TO)
+        end
+
+        shared_cap_peaks = update_shared_contract_capacity!(ADMM_state, results, data,
+                                                           mdict, agents, ppa_market, hpa_market, shp)
 
         # ------------------------------------------------------------------
         # Imbalances (standard + contract)
@@ -205,12 +215,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             for h2_id in get(hpa_market, "hpa_h2", String[])
                 push!(C_hpa["ImbalanceMean"][h2_id],     mean(C_hpa["Imbalances"][h2_id][end]))
             end
-        end
-
-        @timeit TO "Shared contract capacity" begin
-            cap_peaks = update_shared_contract_capacity!(
-                ADMM_state, results, data, mdict, agents, ppa_market, hpa_market, shp)
-            record_shared_cap_residuals!(ADMM_state, cap_peaks, iter)
+            record_shared_cap_residuals!(ADMM_state, shared_cap_peaks, iter)
         end
 
         # ------------------------------------------------------------------
@@ -320,7 +325,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 if isempty(cap_vec)
                     push!(cap_state["λ"][m], copy(λ_prev))
                 else
-                    λ_new = [_cap_scalar(λ_prev) + ρ_m * (_cap_scalar(cap_vec) - _cap_scalar(z_vec))]
+                    λ_new = [_clip_λ_cap(_cap_scalar(λ_prev) + ρ_m * (_cap_scalar(cap_vec) - _cap_scalar(z_vec)))]
                     push!(cap_state["λ"][m], λ_new)
                 end
             end
@@ -652,7 +657,6 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 η = η_scale_ppa[vres_id] * η_raw
                 push!(results["λ_ppa"][vres_id],
                       results["λ_ppa"][vres_id][end] .- η .* C["ρ"][vres_id][end] .* C["Imbalances"][vres_id][end])
-                results["λ_ppa"][vres_id][end] .= max.(results["λ_ppa"][vres_id][end], 0.0)
             end
 
             hpa_h2 = get(hpa_market, "hpa_h2", String[])
@@ -667,7 +671,6 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
                 η = η_scale_hpa[h2_id] * η_raw
                 push!(results["λ_hpa"][h2_id],
                       results["λ_hpa"][h2_id][end] .- η .* C_hpa["ρ"][h2_id][end] .* C_hpa["Imbalances"][h2_id][end])
-                results["λ_hpa"][h2_id][end] .= max.(results["λ_hpa"][h2_id][end], 0.0)
             end
         end
 
@@ -782,10 +785,7 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         for vres_id in get(ppa_market, "ppa_vres", String[])
             rp = C["Primal_cap"][vres_id][end]
             rd = C["Dual_cap"][vres_id][end]
-            sp = max(C["ResidualScale_Primal_cap"][vres_id], 1.0)
-            sd = max(C["ResidualScale_Dual_cap"][vres_id], 1.0)
-            eps_pr = eps_abs * 1.0 + eps_rel * sp
-            eps_du = eps_abs * 1.0 + eps_rel * sd
+            eps_pr, eps_du = _market_eps_contract(C, vres_id, true, n_slots)
             cap_ok = cap_ok && (rp <= eps_pr) && (rd <= eps_du)
         end
         C_hpa = ADMM_state["hpa"]
@@ -803,33 +803,25 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         for h2_id in get(hpa_market, "hpa_h2", String[])
             rp = C_hpa["Primal_cap"][h2_id][end]
             rd = C_hpa["Dual_cap"][h2_id][end]
-            sp = max(C_hpa["ResidualScale_Primal_cap"][h2_id], 1.0)
-            sd = max(C_hpa["ResidualScale_Dual_cap"][h2_id], 1.0)
-            eps_pr = eps_abs * 1.0 + eps_rel * sp
-            eps_du = eps_abs * 1.0 + eps_rel * sd
+            eps_pr, eps_du = _market_eps_contract(C_hpa, h2_id, true, n_slots)
             hpa_cap_ok = hpa_cap_ok && (rp <= eps_pr) && (rd <= eps_du)
         end
 
         # Capacity consensus: use relaxed tolerance (see file header).
-        # Effective eps = (eps_pr, eps_du) * cap_tol_relax so we accept larger residuals.
+        # Effective eps = cap_tol_relax × (ε_cap + ε_rel · scale).
         # ----------------------------------------------------------------
-        # Per-agent capacity convergence (new equality-split formulation):
-        # every cap-owning agent must satisfy its own Boyd test on r_m, s_m.
-        # The optional cap_tol_relax knob still applies (multiplies the
-        # right-hand side) to keep backwards compatibility with the
-        # data.yaml configuration. See DOCUMENTATION.md §5.4.
+        # Per-agent physical-investment capacity convergence: every cap-owning
+        # agent must satisfy its own Boyd test on r_m, s_m. cap_tol_relax still
+        # multiplies the right-hand side in the contracts case because z_cap
+        # is coupled through pool flow only (hedges do not enter z_cap). See DOCUMENTATION.md §6.5.
         # ----------------------------------------------------------------
-        cap_tol_relax = get(get(data, "ADMM", Dict()), "cap_tol_relax", CAP_CONSENSUS_TOL_RELAX_DEFAULT)
-        sqrt_y = 1.0
+        cap_tol_relax = Float64(get(get(data, "ADMM", Dict()), "cap_tol_relax", CAP_CONSENSUS_TOL_RELAX_DEFAULT))
         cap_state = ADMM_state["Capacity"]
         cap_consensus_ok = true
         for m in cap_agents
             rp_m = cap_state["Primal"][m][end]
             rd_m = cap_state["Dual"][m][end]
-            sp_m = max(cap_state["ResidualScale_Primal"][m], 1.0)
-            sd_m = max(cap_state["ResidualScale_Dual"][m], 1.0)
-            eps_pr_m = cap_tol_relax * (eps_abs * sqrt_y + eps_rel * sp_m)
-            eps_du_m = cap_tol_relax * (eps_abs * sqrt_y + eps_rel * sd_m)
+            eps_pr_m, eps_du_m = _cap_boyd_eps(ADMM_state, m; relax=cap_tol_relax)
             if !(isfinite(rp_m) && isfinite(rd_m) &&
                  rp_m <= eps_pr_m && rd_m <= eps_du_m)
                 cap_consensus_ok = false
@@ -838,7 +830,8 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
         end
         if (within_tol("elec") && within_tol("H2") && within_tol("elec_GC") &&
             within_tol("H2_GC") && within_tol("EP") &&
-            contract_ok && cap_ok && hpa_ok && hpa_cap_ok && cap_consensus_ok)
+            contract_ok && cap_ok && hpa_ok && hpa_cap_ok && cap_consensus_ok &&
+            shared_contract_capacity_settled(ADMM_state, results, data))
             convergence = 1
         end
 

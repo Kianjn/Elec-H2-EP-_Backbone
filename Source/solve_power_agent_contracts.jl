@@ -35,7 +35,6 @@ function solve_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
     g_bar_elec_GC = mod.ext[:parameters][:g_bar_elec_GC]
     ρ_elec_GC  = mod.ext[:parameters][:ρ_elec_GC]
     λ_ppa     = mod.ext[:parameters][:λ_ppa]
-    K_ppa     = get(mod.ext[:parameters], :K_ppa, λ_ppa)
     g_bar_ppa = mod.ext[:parameters][:g_bar_ppa]
     ρ_ppa     = mod.ext[:parameters][:ρ_ppa]
     g_bar_ppa_cap = mod.ext[:parameters][:g_bar_ppa_cap]
@@ -61,11 +60,11 @@ function solve_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
     for jy in JY
         loss_VRES[jy] = @expression(mod,
             sum(W[jd, jy] * (
-                MC * (g_EOM[jh, jd, jy] + g_ppa[jh, jd, jy])
+                MC * g_EOM[jh, jd, jy]
                 - λ_elec[jh, jd, jy] * g_EOM[jh, jd, jy]
                 - λ_elec_GC[jh, jd, jy] * g_EOM[jh, jd, jy]
-                - K_ppa[jh, jd, jy] * g_ppa[jh, jd, jy]
             ) for jh in JH, jd in JD)
+            - sum_ppa_seller_revenue_jy(mod, jy, W, JH, JD)
         )
         loss_total[jy] = @expression(mod, loss_VRES[jy] + F_cap * cap_VRES)
     end
@@ -76,6 +75,7 @@ function solve_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
     ρ_cap   = get(mod.ext[:parameters], :ρ_cap, 0.1)
     cap_pen = haskey(mod.ext[:parameters], :z_cap) ?
         λ_cap * (cap_VRES - z_cap) + ρ_cap/2 * (cap_VRES - z_cap)^2 : 0.0
+    cap_pen_ppa = ρ_ppa_cap/2 * (ppa_cap - g_bar_ppa_cap)^2
 
     mod.ext[:objective] = @objective(mod, Min,
         gamma * (F_cap * cap_VRES + sum(P[jy] * loss_VRES[jy] for jy in JY))
@@ -83,6 +83,8 @@ function solve_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
         + sum(ρ_elec/2 * W[jd, jy] * (g_EOM[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_elec_GC/2 * W[jd, jy] * (g_EOM[jh, jd, jy] - g_bar_elec_GC[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         + sum(ρ_ppa/2 * W[jd, jy] * (g_ppa[jh, jd, jy] - g_bar_ppa[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+        - sum(W[jd, jy] * λ_ppa[jh, jd, jy] * g_ppa[jh, jd, jy] for jh in JH, jd in JD, jy in JY)
+        + cap_pen_ppa
         + cap_pen
     )
 
@@ -90,14 +92,13 @@ function solve_power_agent_contracts!(m::String, mod::Model, elec_market::Dict, 
     for jy in JY
         delete(mod, mod.ext[:constraints][:CVaR_VRES_shortfall][jy])
     end
-    delete(mod, mod.ext[:constraints][:CVaR_VRES_link])
+    # CVaR linking constraint does not depend on λ; keep it.
 
     mod.ext[:constraints][:CVaR_VRES_shortfall] = @constraint(mod, [jy in JY],
         u_VRES[jy] >= loss_total[jy] - alpha_VRES)
-    one_minus_beta = max(1e-6, 1.0 - beta_conf)
-    mod.ext[:constraints][:CVaR_VRES_link] = @constraint(mod,
-        cvar_VRES >= alpha_VRES + (1 / one_minus_beta) * sum(P[jy] * u_VRES[jy] for jy in JY))
 
+    snapshot_primal_starts!(mod)
     optimize!(mod)
+    Base.invokelatest(ensure_agent_solution!, mod, m)
     return nothing
 end

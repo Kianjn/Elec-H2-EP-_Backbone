@@ -35,6 +35,12 @@ function define_offtaker_parameters!(m::String, mod::Model, data::Dict, ts::Dict
     # offtakers are subject to this constraint. Defaults to 0.42 if not overridden.
     params[:gamma_GC] = get(data, "gamma_GC", 0.42)
 
+    # Green ammonia nameplate is product output (MW_EP / t NH₃), not H₂ feed.
+    # H₂ intake is implied: Capacity_H2_In = Capacity_EP_Out / Alpha.
+    if String(get(data, "Type", "")) == "GreenOfftaker"
+        derive_green_offtaker_capacities!(params, data)
+    end
+
     # --- Grey ammonia: gas-price-dependent marginal cost, one value per scenario ---
     # Grey ammonia is SMR-based, so its variable cost is dominated by natural gas
     # and tracks the same gas price that drives the conventional generator:
@@ -72,4 +78,23 @@ function define_offtaker_parameters!(m::String, mod::Model, data::Dict, ts::Dict
     end
 
     return mod
+end
+
+function derive_green_offtaker_capacities!(params::Dict, data::AbstractDict)
+    alpha = Float64(get(data, "Alpha", 1.0))
+    alpha > 0 || error("GreenOfftaker Alpha must be positive")
+    cap_ep = Float64(data["Capacity_EP_Out"])
+    cap_h2 = cap_ep / alpha
+    if haskey(data, "Capacity_H2_In")
+        yaml_h2 = Float64(data["Capacity_H2_In"])
+        if abs(yaml_h2 - cap_h2) / max(cap_h2, 1e-9) > 0.02
+            error("Capacity_H2_In ($yaml_h2 MW_H2) must equal " *
+                  "Capacity_EP_Out / Alpha " *
+                  "($cap_ep / $alpha = $(round(cap_h2; digits=3)) MW_H2)")
+        end
+    end
+    params[:Capacity_EP_Out] = cap_ep
+    params[:Capacity_H2_In] = cap_h2
+    params[:Alpha] = alpha
+    return params
 end

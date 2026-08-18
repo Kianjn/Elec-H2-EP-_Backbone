@@ -15,10 +15,10 @@
 #     + ADMM penalties + fixed annualised CAPEX on cap_VRES + optional CVaR
 #     term (γ·β_VRES). Capacity constraint: g ≤ AF × cap_VRES (non-anticipative).
 #
-#   - Conventional: dispatchable generator with fixed Capacity and a 3-stage
-#     convex variable-cost stack (single aggregated agent). Net position:
-#     g_net_elec = +g. ADMM objective = stagewise generation cost − elec
-#     revenue + ADMM penalties.
+#   - Conventional: dispatchable generator with fixed Capacity; either a flat
+#     single-technology plant (constant SRMC from Fuel block) or a legacy 3-stage
+#     increasing-cost stack when StageTechnologies is set. Net position:
+#     g_net_elec = +g. ADMM objective = generation cost − elec revenue + ADMM penalties.
 #
 #   - Consumer: elastic electricity demand with quadratic utility. Net position:
 #     g_net_elec = −d. ADMM objective = expenditure − utility + ADMM penalty.
@@ -100,8 +100,10 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
         # ── Risk variables (agent-level CVaR) ───────────────────────────────
         # α_VRES: VaR proxy; CVaR_VRES: Conditional Value-at-Risk of loss;
         # u_VRES[jy]: shortfall per scenario year.
-        alpha_VRES = mod.ext[:variables][:alpha_VRES] = @variable(mod, lower_bound = 0, base_name = "alpha_VRES_$(m)")
-        cvar_VRES  = mod.ext[:variables][:CVaR_VRES]  = @variable(mod, lower_bound = 0, base_name = "CVaR_VRES_$(m)")
+        # α and CVaR are unbounded: losses can be negative (profits). Forcing
+        # them ≥ 0 would zero-out CVaR in profitable years and invert γ<1.
+        alpha_VRES = mod.ext[:variables][:alpha_VRES] = @variable(mod, base_name = "alpha_VRES_$(m)")
+        cvar_VRES  = mod.ext[:variables][:CVaR_VRES]  = @variable(mod, base_name = "CVaR_VRES_$(m)")
         u_VRES     = mod.ext[:variables][:u_VRES]     = @variable(mod, [jy in JY], lower_bound = 0, base_name = "u_VRES_$(m)")
 
         # Per-year economic loss (cost − revenue) excluding ADMM penalties; prices
@@ -158,33 +160,24 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
     elseif agent_type == "Conventional"
         cap = mod.ext[:parameters][:Capacity]        # installed capacity (MW)
         MC  = mod.ext[:parameters][:MarginalCost]    # fallback marginal cost (€/MWh)
-        # Stage base costs and slopes are 3 x nYears: gas-fired stages are more
-        # expensive in the high-gas scenarios, so they are indexed by [s, jy].
+        MC_y = get(mod.ext[:parameters], :MarginalCostByYear, nothing)
+
+        g = mod.ext[:variables][:g] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "gen")
+        mod.ext[:expressions][:g_net_elec] = @expression(mod, g)
+
+        if MC_y === nothing && haskey(mod.ext[:parameters], :ConvStageBaseCost)
+        # Legacy 3-stage stacked technologies.
         stage_cap = get(mod.ext[:parameters], :ConvStageCap, [cap, 0.0, 0.0])
-        stage_base = get(mod.ext[:parameters], :ConvStageBaseCost, fill(MC, 3, length(JY)))
+        stage_base = mod.ext[:parameters][:ConvStageBaseCost]
         stage_slope = get(mod.ext[:parameters], :ConvStageSlope, zeros(3, length(JY)))
 
-        # Generation variable g ≥ 0 for conventional (thermal) plant.
-        g = mod.ext[:variables][:g] = @variable(mod, [jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "gen")
-        # Segment variables for 3-stage stacked technologies.
         g_stage = mod.ext[:variables][:g_stage] = @variable(mod, [s in 1:3, jh in JH, jd in JD, jy in JY], lower_bound = 0, base_name = "gen_stage")
 
-        # Net position in the electricity market only — conventional generation
-        # does NOT participate in the elec-GC market (output is not renewable-
-        # certified), so there is no g_net_elec_GC expression.
-        mod.ext[:expressions][:g_net_elec] = @expression(mod, g)   # g_net_elec = +g
-
-        # Stage coupling and capacity limits:
-        # - Total output equals sum of stage outputs.
-        # - Each stage has its own capacity, representing one technology block.
         mod.ext[:constraints][:stage_balance] = @constraint(mod, [jh in JH, jd in JD, jy in JY],
             g[jh, jd, jy] == sum(g_stage[s, jh, jd, jy] for s in 1:3))
         mod.ext[:constraints][:stage_caps] = @constraint(mod, [s in 1:3, jh in JH, jd in JD, jy in JY],
             g_stage[s, jh, jd, jy] <= stage_cap[s])
 
-        # Objective — same structure as VRES but without GC market terms:
-        #   min  Σ W·( Σ_s (a_s,jy·g_s + 0.5·b_s,jy·g_s²) − λ_elec·g )  ← stagewise convex variable cost minus elec revenue
-        #      + Σ (ρ_elec/2)·W·(g − ḡ)²   ← ADMM penalty toward consensus
         mod.ext[:objective] = @objective(mod, Min,
             sum(W[jd, jy] * (
                 sum(stage_base[s, jy] * g_stage[s, jh, jd, jy] + 0.5 * stage_slope[s, jy] * g_stage[s, jh, jd, jy]^2 for s in 1:3)
@@ -192,9 +185,17 @@ function build_power_agent!(m::String, mod::Model, elec_market::Dict, elec_GC_ma
             ) for jh in JH, jd in JD, jy in JY)
             + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
         )
+        else
+        # Flat single-technology plant: constant SRMC per scenario (merit order via λ_elec).
+        if MC_y === nothing
+            MC_y = fill(MC, length(JY))
+        end
+        mod.ext[:objective] = @objective(mod, Min,
+            sum(W[jd, jy] * (MC_y[jy] * g[jh, jd, jy] - λ_elec[jh, jd, jy] * g[jh, jd, jy]) for jh in JH, jd in JD, jy in JY)
+            + sum(ρ_elec/2 * W[jd, jy] * (g[jh, jd, jy] - g_bar_elec[jh, jd, jy])^2 for jh in JH, jd in JD, jy in JY)
+        )
+        end
 
-        # Capacity constraint: generation ≤ installed capacity (no AF for
-        # dispatchable plants — they can produce up to full capacity at will).
         mod.ext[:constraints][:cap] = @constraint(mod, [jh in JH, jd in JD, jy in JY], g[jh, jd, jy] <= cap)
 
     elseif agent_type == "Consumer"
@@ -311,18 +312,19 @@ function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
     else  # Conventional
         cap = _p(mod, :Capacity)
         C = _p(mod, :MarginalCost)
-        stage_cap = get(mod.ext[:parameters], :ConvStageCap, [cap, 0.0, 0.0])
-        stage_base = get(mod.ext[:parameters], :ConvStageBaseCost, fill(C, 3, length(JY)))
-        stage_slope = get(mod.ext[:parameters], :ConvStageSlope, zeros(3, length(JY)))
+        MC_y = get(mod.ext[:parameters], :MarginalCostByYear, nothing)
 
         q_E = @variable(planner, [jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="q_E_$(id)")
+
+        if MC_y === nothing && haskey(mod.ext[:parameters], :ConvStageBaseCost)
+        stage_cap = get(mod.ext[:parameters], :ConvStageCap, [cap, 0.0, 0.0])
+        stage_base = mod.ext[:parameters][:ConvStageBaseCost]
+        stage_slope = get(mod.ext[:parameters], :ConvStageSlope, zeros(3, length(JY)))
+
         q_stage = @variable(planner, [s in 1:3, jh in JH, jd in JD, jy in JY], lower_bound=0, base_name="q_E_stage_$(id)")
         @constraint(planner, [jh in JH, jd in JD, jy in JY], q_E[jh, jd, jy] == sum(q_stage[s, jh, jd, jy] for s in 1:3))
         @constraint(planner, [s in 1:3, jh in JH, jd in JD, jy in JY], q_stage[s, jh, jd, jy] <= stage_cap[s])
-        @constraint(planner, [jh in JH, jd in JD, jy in JY], q_E[jh, jd, jy] <= cap)
 
-        # Per-year welfare = −(stagewise convex production cost). Revenue from electricity
-        # sales is a transfer that cancels in the aggregate planner objective.
         welfare_per_year = Dict{Int, Any}()
         for jy in JY
             welfare_per_year[jy] = @expression(planner,
@@ -331,8 +333,22 @@ function add_power_agent_to_planner!(planner::Model, id::String, mod::Model,
                 ) for jh in JH, jd in JD)
             )
         end
-        var_dict[:power_q_E][id] = q_E
         var_dict[:power_q_E_stage][id] = q_stage
+        else
+        if MC_y === nothing
+            MC_y = fill(C, length(JY))
+        end
+        welfare_per_year = Dict{Int, Any}()
+        for jy in JY
+            welfare_per_year[jy] = @expression(planner,
+                -sum(W_dict[jy][jd] * (MC_y[jy] * q_E[jh, jd, jy]) for jh in JH, jd in JD)
+            )
+        end
+        end
+
+        @constraint(planner, [jh in JH, jd in JD, jy in JY], q_E[jh, jd, jy] <= cap)
+
+        var_dict[:power_q_E][id] = q_E
         return welfare_per_year
     end
 end
