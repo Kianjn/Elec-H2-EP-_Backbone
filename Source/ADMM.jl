@@ -163,7 +163,7 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
 
         # Solve all agents (single-threaded for deterministic order and result indexing)
         for m in agents[:all]
-            ADMM_subroutine!(m, data, results, ADMM_state, elec_market, H2_market,
+            Base.invokelatest(ADMM_subroutine!, m, data, results, ADMM_state, elec_market, H2_market,
                             elec_GC_market, H2_GC_market, EP_market, mdict[m], agents, TO)
         end
 

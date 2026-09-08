@@ -222,6 +222,17 @@ function merged_admm_step!(m::String, data::Dict, results::Dict, ADMM_state::Dic
         solve_merged_agent!(m, mod)
     end
 
+    ok = has_values(mod)
+    ok || (ok = Base.invokelatest(ensure_agent_solution!, mod, m))
+    if !ok
+        reused = repeat_last_agent_quantities!(results, m, mod)
+        reused || error("Agent $(m) has no primal and no previous ADMM iterate to reuse " *
+                        "(termination=$(termination_status(mod)), primal=$(primal_status(mod))).")
+        dampen_rhos_on_numerical!(ADMM_state, m)
+        reset_gurobi_optimizer!(mod)
+        return nothing
+    end
+
     @timeit TO "Query results" begin
         push!(results["g"][m], collect(value.(mod.ext[:expressions][:g_net_elec])))
         push!(results["elec_GC"][m], collect(value.(mod.ext[:expressions][:g_net_elec_GC])))

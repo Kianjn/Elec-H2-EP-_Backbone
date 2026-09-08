@@ -616,3 +616,218 @@ function print_risk_metrics_summary!(metrics::NamedTuple; title::String = "Risk 
     end
     return nothing
 end
+
+# ==============================================================================
+# Cost metrics for the console log (system cost + consumer €/MWh)
+# ==============================================================================
+
+function _slot_value(x, jh, jd, jy)
+    v = x[jh, jd, jy]
+    return Float64(v isa Number ? v : value(v))
+end
+
+function _add_price_qty!(exp_y::Vector{Float64}, qty_y::Vector{Float64},
+                         λ, q, W, JH, JD, JY)
+    q === nothing && return
+    for (iy, jy) in enumerate(JY), jd in JD, jh in JH
+        qq = _slot_value(q, jh, jd, jy)
+        pp = _slot_value(λ, jh, jd, jy)
+        w = W[jd, jy]
+        exp_y[iy] += w * pp * qq
+        qty_y[iy] += w * qq
+    end
+    return nothing
+end
+
+function _prob_expect(yvec::Vector{Float64}, P::Vector{Float64})
+    return sum(P[i] * yvec[i] for i in eachindex(yvec))
+end
+
+"""γ·E[x] + (1−γ)·CVaR_β(x). CVaR is on the high-x tail (x = cost or expenditure)."""
+function _risk_adjust_cost(yvec::Vector{Float64}, P::Vector{Float64}, gamma::Float64, beta::Float64)
+    e = _prob_expect(yvec, P)
+    gamma >= 1.0 - 1e-12 && return e
+    cv, _, _ = empirical_cvar(yvec, P, beta)
+    return gamma * e + (1.0 - gamma) * cv
+end
+
+function _safe_unit_price(exp::Float64, qty::Float64)
+    return qty > 1.0e-12 ? exp / qty : NaN
+end
+
+"""
+Real-resource system cost per scenario year (€/year): every CAPEX + OPEX / fuel
+expense, excluding consumer utility and excluding market transfers.
+"""
+function _system_cost_per_year(mdict::Dict, agents::Dict, JY;
+                               planner_wpy::Union{Nothing, Dict}=nothing)
+    rows = collect_agent_welfare_table(mdict, agents, JY; planner_wpy=planner_wpy)
+    cost_y = zeros(length(JY))
+    for r in rows
+        r.is_demand && continue
+        for (i, jy) in enumerate(JY)
+            cost_y[i] -= r.welfare_per_year[jy]
+        end
+    end
+    return cost_y
+end
+
+function _final_h2_qty(id::String, atype::AbstractString, vars, vd)
+    # Standalone H₂ demand only. Offtaker / merged-chain H₂ is ammonia feedstock.
+    atype in ("GreenOfftaker", "GreenProducer", "GreenH2Coalition", "GreenCoalition") && return nothing
+    if vd !== nothing
+        h2d = get(vd, :H2_d_H, Dict())
+        return get(h2d, id, nothing)
+    end
+    return haskey(vars, :d_H) ? vars[:d_H] : nothing
+end
+
+function _final_ep_qty(id::String, atype::AbstractString, vars, vd)
+    atype in ("GreenOfftaker", "GreyOfftaker", "EPImporter",
+              "GreenH2Coalition", "GreenCoalition") || return nothing
+    if vd !== nothing
+        haskey(get(vd, :offtaker_ep_sell, Dict()), id) && return vd[:offtaker_ep_sell][id]
+        haskey(get(vd, :offtaker_ep_sell_import, Dict()), id) && return vd[:offtaker_ep_sell_import][id]
+        return nothing
+    end
+    return get(vars, :ep, nothing)
+end
+
+function _elec_demand_qty(id::String, atype::AbstractString, vars, vd)
+    atype == "Consumer" || return nothing
+    if vd !== nothing
+        return get(get(vd, :power_d_E, Dict()), id, nothing)
+    end
+    return get(vars, :d, nothing)
+end
+
+"""
+Collect total system cost and consumer €/MWh metrics.
+
+Final energy = electricity consumed by power consumers + any standalone H₂
+demand + ammonia (EP). Hydrogen that is converted to ammonia is excluded.
+"""
+function collect_cost_metrics(mdict::Dict, agents::Dict;
+                              planner_state::Union{Nothing, Dict}=nothing,
+                              λ_elec=nothing, λ_H2=nothing, λ_EP=nothing)
+    ref = mdict[agents[:all][1]]
+    JH = collect(ref.ext[:sets][:JH])
+    JD = collect(ref.ext[:sets][:JD])
+    JY = collect(ref.ext[:sets][:JY])
+    W = ref.ext[:parameters][:W]
+    P = Float64[ref.ext[:parameters][:P][jy] for jy in JY]
+    gamma, beta = _read_risk_params(ref.ext[:parameters])
+    planner_wpy = nothing
+    vd = nothing
+    if planner_state !== nothing
+        JH = collect(planner_state[:JH])
+        JD = collect(planner_state[:JD])
+        JY = collect(planner_state[:JY])
+        W = planner_state[:W]
+        gamma = Float64(get(planner_state, :gamma, gamma))
+        beta = Float64(get(planner_state, :beta, beta))
+        planner_wpy = get(planner_state, :agent_welfare_per_year, nothing)
+        vd = get(planner_state, :var_dict, nothing)
+        P = Float64[ref.ext[:parameters][:P][jy] for jy in JY]
+    end
+
+    λ_elec === nothing && (λ_elec = ref.ext[:parameters][:λ_elec])
+    λ_H2 === nothing && (λ_H2 = ref.ext[:parameters][:λ_H2])
+    λ_EP === nothing && (λ_EP = ref.ext[:parameters][:λ_EP])
+
+    n = length(JY)
+    elec_exp = zeros(n); elec_qty = zeros(n)
+    h2_exp = zeros(n);   h2_qty = zeros(n)
+    ep_exp = zeros(n);   ep_qty = zeros(n)
+
+    for id in agents[:all]
+        haskey(mdict, id) || continue
+        atype = String(get(mdict[id].ext[:parameters], :Type, ""))
+        vars = mdict[id].ext[:variables]
+        q_e = _elec_demand_qty(id, atype, vars, vd)
+        q_e !== nothing && _add_price_qty!(elec_exp, elec_qty, λ_elec, q_e, W, JH, JD, JY)
+        q_h = _final_h2_qty(id, atype, vars, vd)
+        q_h !== nothing && _add_price_qty!(h2_exp, h2_qty, λ_H2, q_h, W, JH, JD, JY)
+        q_p = _final_ep_qty(id, atype, vars, vd)
+        q_p !== nothing && _add_price_qty!(ep_exp, ep_qty, λ_EP, q_p, W, JH, JD, JY)
+    end
+
+    cost_y = _system_cost_per_year(mdict, agents, JY; planner_wpy=planner_wpy)
+    total_exp_y = elec_exp .+ h2_exp .+ ep_exp
+    total_qty_y = elec_qty .+ h2_qty .+ ep_qty
+
+    e_cost = _prob_expect(cost_y, P)
+    ra_cost = _risk_adjust_cost(cost_y, P, gamma, beta)
+
+    e_elec_exp = _prob_expect(elec_exp, P)
+    e_elec_qty = _prob_expect(elec_qty, P)
+    ra_elec_exp = _risk_adjust_cost(elec_exp, P, gamma, beta)
+    elec_cwap = _safe_unit_price(e_elec_exp, e_elec_qty)
+    elec_ra_cwap = _safe_unit_price(ra_elec_exp, e_elec_qty)
+
+    e_h2_exp = _prob_expect(h2_exp, P)
+    e_h2_qty = _prob_expect(h2_qty, P)
+    e_ep_exp = _prob_expect(ep_exp, P)
+    e_ep_qty = _prob_expect(ep_qty, P)
+
+    e_tot_exp = _prob_expect(total_exp_y, P)
+    e_tot_qty = _prob_expect(total_qty_y, P)
+    ra_tot_exp = _risk_adjust_cost(total_exp_y, P, gamma, beta)
+    blended = _safe_unit_price(e_tot_exp, e_tot_qty)
+    blended_ra = _safe_unit_price(ra_tot_exp, e_tot_qty)
+
+    return (
+        gamma = gamma,
+        beta = beta,
+        system_cost_expected = e_cost,
+        system_cost_risk_adjusted = ra_cost,
+        elec_cwap = elec_cwap,
+        elec_ra_cwap = elec_ra_cwap,
+        elec_qty = e_elec_qty,
+        elec_exp = e_elec_exp,
+        h2_cwap = _safe_unit_price(e_h2_exp, e_h2_qty),
+        h2_qty = e_h2_qty,
+        h2_exp = e_h2_exp,
+        ep_cwap = _safe_unit_price(e_ep_exp, e_ep_qty),
+        ep_qty = e_ep_qty,
+        ep_exp = e_ep_exp,
+        blended_cwap = blended,
+        blended_ra_cwap = blended_ra,
+        total_exp = e_tot_exp,
+        total_qty = e_tot_qty,
+        total_exp_risk_adjusted = ra_tot_exp,
+    )
+end
+
+function print_cost_metrics_summary!(metrics::NamedTuple; title::String = "Cost metrics")
+    nz(x) = isfinite(x) ? x : 0.0
+    println()
+    println("-" ^ 72)
+    println("  ", title)
+    println("-" ^ 72)
+    @printf("  Total system cost:                      %10.3f bn EUR/year\n",
+            metrics.system_cost_expected / 1e9)
+    if abs(metrics.gamma - 1.0) > 1e-12
+        @printf("    risk-adjusted (γ·E + (1−γ)·CVaR):     %10.3f bn EUR/year\n",
+                metrics.system_cost_risk_adjusted / 1e9)
+    end
+    @printf("  Consumer CWAP (electricity):            %10.2f €/MWh\n",
+            nz(metrics.elec_cwap))
+    if abs(metrics.gamma - 1.0) > 1e-12
+        @printf("    risk-adjusted:                        %10.2f €/MWh\n",
+                nz(metrics.elec_ra_cwap))
+    end
+    @printf("  Total RA consumer cost (final energy):  %10.2f €/MWh\n",
+            nz(metrics.blended_ra_cwap))
+    @printf("    expenditure / energy:                 %10.3f bn EUR  /  %.2f TWh\n",
+            metrics.total_exp_risk_adjusted / 1e9, metrics.total_qty / 1e6)
+    @printf("    electricity                           %10.2f €/MWh   (%.2f TWh)\n",
+            nz(metrics.elec_cwap), metrics.elec_qty / 1e6)
+    @printf("    ammonia (EP)                          %10.2f €/MWh   (%.2f TWh)\n",
+            nz(metrics.ep_cwap), metrics.ep_qty / 1e6)
+    @printf("    hydrogen (final only)                 %10.2f €/MWh   (%.2f TWh)\n",
+            nz(metrics.h2_cwap), metrics.h2_qty / 1e6)
+    println("    (H₂ converted to ammonia is excluded from final energy.)")
+    println("    Hours weighted by representative-day weights W and scenario probabilities.")
+    return nothing
+end

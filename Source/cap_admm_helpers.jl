@@ -41,12 +41,21 @@ function reset_gurobi_optimizer!(mod::Model)
     return nothing
 end
 
-"""Copy the last successful primal into MIP/QP starts for the next solve."""
+"""Copy the last successful primal into MIP/QP starts for the next solve.
+
+Query every value first, then set starts. JuMP invalidates the primal if the
+model is modified (including `set_start_value`) while values are still being
+read.
+"""
 function snapshot_primal_starts!(mod::Model)
     has_values(mod) || return nothing
+    starts = Vector{Tuple{VariableRef, Float64}}()
     for v in all_variables(mod)
         val = value(v)
-        isfinite(val) && set_start_value(v, val)
+        isfinite(val) && push!(starts, (v, val))
+    end
+    for (v, val) in starts
+        set_start_value(v, val)
     end
     return nothing
 end
@@ -135,6 +144,10 @@ function repeat_last_agent_quantities!(results::Dict, m::String, mod::Model)
             haskey(results["Cap_EP_Green"], m) && !isempty(results["Cap_EP_Green"][m])
         ok &= take!(results["Cap_EP_Green"][m])
         ok &= take!(results["Inv_EP_Green"][m])
+    end
+    if haskey(results, "Cap_Merged") && haskey(results["Cap_Merged"], m) &&
+            !isempty(results["Cap_Merged"][m])
+        ok &= take!(results["Cap_Merged"][m])
     end
     return ok
 end

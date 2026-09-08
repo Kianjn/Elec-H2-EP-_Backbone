@@ -35,6 +35,10 @@
 # ==============================================================================
 
 function build_scenario_grid(data::Dict)
+    # Scale solar/wind CAPEX before any agent is built so every entry point
+    # (ADMM, contracts, social planner, merged green) sees the same costs.
+    apply_vres_fixed_cost_scale!(data)
+
     sc  = get(data, "Scenarios", Dict{String,Any}())
     gen = get(data, "General", Dict{String,Any}())
 
@@ -121,6 +125,32 @@ function scenario_gas_multipliers(data::AbstractDict, n_years::Int)
     length(mult) == n_years ||
         error("GasPriceMultiplier has $(length(mult)) entries but the run has $n_years scenarios")
     return mult
+end
+
+# Multiply Gen_VRES_* FixedCost_per_MW by General.VRES_FixedCost_Scale (default 1.0).
+# Idempotent: the unscaled yaml value is stored on first call and reused, so a
+# second build_scenario_grid on the same dict cannot double-scale.
+function apply_vres_fixed_cost_scale!(data::Dict)
+    gen = get(data, "General", Dict{String,Any}())
+    scale = Float64(get(gen, "VRES_FixedCost_Scale", 1.0))
+    power = get(data, "Power", nothing)
+    power isa AbstractDict || return nothing
+
+    applied = String[]
+    for id in sort!(collect(keys(power)); by = string)
+        block = power[id]
+        block isa AbstractDict || continue
+        String(get(block, "Type", "")) == "VRES" || continue
+        haskey(block, "FixedCost_per_MW") || continue
+        orig = Float64(get(block, "FixedCost_per_MW_unscaled", block["FixedCost_per_MW"]))
+        block["FixedCost_per_MW_unscaled"] = orig
+        block["FixedCost_per_MW"] = orig * scale
+        push!(applied, "$(id) $(orig) → $(orig * scale) €/MW-year")
+    end
+    if !isempty(applied) && abs(scale - 1.0) > 1e-12
+        println("VRES_FixedCost_Scale = $scale applied: " * join(applied, "; "))
+    end
+    return nothing
 end
 
 # Human-readable one-line summary, printed by the entry points at start-up so a

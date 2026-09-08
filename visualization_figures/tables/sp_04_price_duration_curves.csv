@@ -1,0 +1,136 @@
+market,risk,duration_fraction,price_EUR_per_MWh
+Electricity,RN,0,455.963
+Electricity,RN,0.05,201.951
+Electricity,RN,0.1,201.951
+Electricity,RN,0.25,142.641
+Electricity,RN,0.5,89.8421
+Electricity,RN,0.75,83.3305
+Electricity,RN,0.9,-5.40298
+Electricity,RN,0.95,-5.54854
+Electricity,RN,1,-5.89283
+Electricity,β=0.2,0,455.957
+Electricity,β=0.2,0.05,201.951
+Electricity,β=0.2,0.1,201.951
+Electricity,β=0.2,0.25,142.641
+Electricity,β=0.2,0.5,85.3987
+Electricity,β=0.2,0.75,83.3305
+Electricity,β=0.2,0.9,-4.98606
+Electricity,β=0.2,0.95,-5.08061
+Electricity,β=0.2,1,-5.49082
+Electricity,β=0.4,0,455.957
+Electricity,β=0.4,0.05,201.951
+Electricity,β=0.4,0.1,201.951
+Electricity,β=0.4,0.25,142.641
+Electricity,β=0.4,0.5,85.3987
+Electricity,β=0.4,0.75,83.3305
+Electricity,β=0.4,0.9,-4.96494
+Electricity,β=0.4,0.95,-5.05268
+Electricity,β=0.4,1,-5.47321
+Electricity,β=0.6,0,455.954
+Electricity,β=0.6,0.05,201.951
+Electricity,β=0.6,0.1,201.951
+Electricity,β=0.6,0.25,142.641
+Electricity,β=0.6,0.5,85.3987
+Electricity,β=0.6,0.75,83.3305
+Electricity,β=0.6,0.9,-4.88903
+Electricity,β=0.6,0.95,-4.96042
+Electricity,β=0.6,1,-5.40428
+Electricity,β=0.8,0,455.953
+Electricity,β=0.8,0.05,201.951
+Electricity,β=0.8,0.1,201.951
+Electricity,β=0.8,0.25,142.641
+Electricity,β=0.8,0.5,85.3987
+Electricity,β=0.8,0.75,83.3305
+Electricity,β=0.8,0.9,-4.85652
+Electricity,β=0.8,0.95,-4.92406
+Electricity,β=0.8,1,-5.37803
+Hydrogen,RN,0,611.132
+Hydrogen,RN,0.05,144.038
+Hydrogen,RN,0.1,144.038
+Hydrogen,RN,0.25,114.922
+Hydrogen,RN,0.5,92.5175
+Hydrogen,RN,0.75,53.7483
+Hydrogen,RN,0.9,50.4884
+Hydrogen,RN,0.95,26.3424
+Hydrogen,RN,1,-5.50716
+Hydrogen,β=0.2,0,614.227
+Hydrogen,β=0.2,0.05,144.038
+Hydrogen,β=0.2,0.1,144.038
+Hydrogen,β=0.2,0.25,109.77
+Hydrogen,β=0.2,0.5,94.0221
+Hydrogen,β=0.2,0.75,55.2862
+Hydrogen,β=0.2,0.9,50.4201
+Hydrogen,β=0.2,0.95,14.7577
+Hydrogen,β=0.2,1,-6.4674
+Hydrogen,β=0.4,0,614.225
+Hydrogen,β=0.4,0.05,144.038
+Hydrogen,β=0.4,0.1,144.038
+Hydrogen,β=0.4,0.25,100.905
+Hydrogen,β=0.4,0.5,92.7586
+Hydrogen,β=0.4,0.75,55.2862
+Hydrogen,β=0.4,0.9,42.4584
+Hydrogen,β=0.4,0.95,6.61993
+Hydrogen,β=0.4,1,-8.22053
+Hydrogen,β=0.6,0,614.222
+Hydrogen,β=0.6,0.05,153.684
+Hydrogen,β=0.6,0.1,144.038
+Hydrogen,β=0.6,0.25,116.294
+Hydrogen,β=0.6,0.5,92.0326
+Hydrogen,β=0.6,0.75,55.2862
+Hydrogen,β=0.6,0.9,17.7585
+Hydrogen,β=0.6,0.95,1.68291
+Hydrogen,β=0.6,1,-8.47838
+Hydrogen,β=0.8,0,614.22
+Hydrogen,β=0.8,0.05,179.353
+Hydrogen,β=0.8,0.1,159.953
+Hydrogen,β=0.8,0.25,116.294
+Hydrogen,β=0.8,0.5,80.9911
+Hydrogen,β=0.8,0.75,55.2862
+Hydrogen,β=0.8,0.9,13.0272
+Hydrogen,β=0.8,0.95,2.87648
+Hydrogen,β=0.8,1,-7.43297
+Ammonia (EP),RN,0,873.836
+Ammonia (EP),RN,0.05,299.658
+Ammonia (EP),RN,0.1,299.369
+Ammonia (EP),RN,0.25,299.14
+Ammonia (EP),RN,0.5,215.109
+Ammonia (EP),RN,0.75,134.533
+Ammonia (EP),RN,0.9,132.708
+Ammonia (EP),RN,0.95,132.601
+Ammonia (EP),RN,1,132.601
+Ammonia (EP),β=0.2,0,875.875
+Ammonia (EP),β=0.2,0.05,299.321
+Ammonia (EP),β=0.2,0.1,298.976
+Ammonia (EP),β=0.2,0.25,298.685
+Ammonia (EP),β=0.2,0.5,214.759
+Ammonia (EP),β=0.2,0.75,130.7
+Ammonia (EP),β=0.2,0.9,130.408
+Ammonia (EP),β=0.2,0.95,130.399
+Ammonia (EP),β=0.2,1,130.399
+Ammonia (EP),β=0.4,0,875.855
+Ammonia (EP),β=0.4,0.05,299.306
+Ammonia (EP),β=0.4,0.1,298.953
+Ammonia (EP),β=0.4,0.25,298.662
+Ammonia (EP),β=0.4,0.5,214.741
+Ammonia (EP),β=0.4,0.75,130.676
+Ammonia (EP),β=0.4,0.9,130.385
+Ammonia (EP),β=0.4,0.95,130.347
+Ammonia (EP),β=0.4,1,130.347
+Ammonia (EP),β=0.6,0,875.786
+Ammonia (EP),β=0.6,0.05,299.248
+Ammonia (EP),β=0.6,0.1,298.875
+Ammonia (EP),β=0.6,0.25,278.683
+Ammonia (EP),β=0.6,0.5,214.677
+Ammonia (EP),β=0.6,0.75,130.599
+Ammonia (EP),β=0.6,0.9,130.292
+Ammonia (EP),β=0.6,0.95,130.183
+Ammonia (EP),β=0.6,1,130.183
+Ammonia (EP),β=0.8,0,875.757
+Ammonia (EP),β=0.8,0.05,299.226
+Ammonia (EP),β=0.8,0.1,298.845
+Ammonia (EP),β=0.8,0.25,278.596
+Ammonia (EP),β=0.8,0.5,205.077
+Ammonia (EP),β=0.8,0.75,130.568
+Ammonia (EP),β=0.8,0.9,130.253
+Ammonia (EP),β=0.8,0.95,130.096
+Ammonia (EP),β=0.8,1,130.096

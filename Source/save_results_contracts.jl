@@ -700,9 +700,9 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
     _move_first!(prices_df, :Time)
     CSV.write(joinpath(results_dir, "Market_Prices.csv"), prices_df)
 
-    risk_metrics = write_admm_risk_outputs!(mdict, agents, results_dir;
-                                            case_label = case_label)
-    print_risk_metrics_summary!(risk_metrics; title = "ADMM+contracts risk metrics (vs SP benchmark)")
+    write_admm_risk_outputs!(mdict, agents, results_dir; case_label = case_label)
+    cost_metrics = collect_cost_metrics(mdict, agents; λ_elec=λ_elec, λ_H2=λ_H2, λ_EP=λ_EP)
+    print_cost_metrics_summary!(cost_metrics; title = "Cost metrics")
 
     print_admm_run_summary!(ADMM_state, results, agents;
                             results_dir=results_dir,

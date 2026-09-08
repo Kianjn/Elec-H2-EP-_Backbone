@@ -621,9 +621,10 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     ts_df = select(ts_df, present)
     CSV.write(joinpath(results_folder, "Agent_Objectives_Per_Timestep.csv"), ts_df)
 
-    # ── Risk metrics (social CVaR, expected welfare) ─────────────────────
-    risk_metrics = write_sp_risk_outputs!(planner, planner_state, mdict, agents, results_folder)
-    print_risk_metrics_summary!(risk_metrics; title = "Social planner risk metrics")
+    write_sp_risk_outputs!(planner, planner_state, mdict, agents, results_folder)
+    cost_metrics = collect_cost_metrics(mdict, agents; planner_state=planner_state,
+                                        λ_elec=λ_elec, λ_H2=λ_H2, λ_EP=λ_EP)
+    print_cost_metrics_summary!(cost_metrics; title = "Cost metrics")
 
     return nothing
 end

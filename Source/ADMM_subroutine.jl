@@ -216,13 +216,20 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
     end
 
     # ------------------------------------------------------------------
-    # Result extraction: for each market the agent participates in,
-    # collect(value.(...)) converts JuMP solution values from the
-    # optimized model into a plain Julia Array (3D tensor). push!
-    # appends this array to the per-agent quantity history list (one
-    # 3D array per ADMM iteration). The main ADMM loop then reads
-    # [end] of each list to compute imbalances and residuals.
+    # Result extraction. A failed Gurobi QP (common with a wide CVaR tail,
+    # e.g. beta=0.6 after many objective rebuilds) has 0 solutions; value()
+    # would throw. Retry, then reuse the previous ADMM iterate if needed.
     # ------------------------------------------------------------------
+    ok = has_values(mod)
+    ok || (ok = Base.invokelatest(ensure_agent_solution!, mod, m))
+    if !ok
+        reused = repeat_last_agent_quantities!(results, m, mod)
+        reused || error("Agent $(m) has no primal and no previous ADMM iterate to reuse " *
+                        "(termination=$(termination_status(mod)), primal=$(primal_status(mod))).")
+        dampen_rhos_on_numerical!(ADMM_state, m)
+        reset_gurobi_optimizer!(mod)
+        return nothing
+    end
     @timeit TO "Query results" begin
         if mod.ext[:parameters][:in_elec_market]
             g = collect(value.(mod.ext[:expressions][:g_net_elec]))
