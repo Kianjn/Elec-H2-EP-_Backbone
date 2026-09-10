@@ -189,7 +189,7 @@ if isfile(sp_cap_file)
                 row = sp_cap_df[sp_cap_df.AgentID .== m, :]
                 cap_val = _sp_cap_scalar(row)
                 if cap_val !== nothing
-                    set_start_value(mod.ext[:variables][:cap_VRES], cap_val)
+                    vres_cap_inv_warmstart!(mod, cap_val)
                     global n_cap_warmstart += 1
                 end
             end
@@ -211,13 +211,19 @@ define_results!(merge(run_general, data["ADMM"]), results, ADMM, agents,
     sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file,
     sp_cap_file=sp_cap_file, use_primal_warmstart=true)
 
-results["Cap_Merged"] = Dict(m => [] for m in agents[:merged])
+results["Cap_Merged"] = get!(results, "Cap_Merged", Dict(m => [] for m in agents[:merged]))
+results["Inv_Merged"] = get!(results, "Inv_Merged", Dict(m => [] for m in agents[:merged]))
+results["Merged_z_flow"] = get!(results, "Merged_z_flow", Dict(m => [] for m in agents[:merged]))
+results["Cap_Merged_slots"] = get!(results, "Cap_Merged_slots", Dict{String, Vector{String}}())
+results["Cap_Merged_floors"] = get!(results, "Cap_Merged_floors", Dict{String, Vector{Float64}}())
 if haskey(ADMM, "Capacity") && !isempty(ADMM["Capacity"]["z"][merged_id])
     z0 = ADMM["Capacity"]["z"][merged_id][end]
     λ0 = ADMM["Capacity"]["λ"][merged_id][end]
-    mdict[merged_id].ext[:parameters][:z_cap] = z0 isa AbstractVector ? Float64.(z0) : fill(_cap_scalar(z0), length(mdict[merged_id].ext[:parameters][:z_cap]))
-    mdict[merged_id].ext[:parameters][:λ_cap] = λ0 isa AbstractVector ? Float64.(λ0) : fill(_cap_scalar(λ0), length(mdict[merged_id].ext[:parameters][:z_cap]))
-    push!(results["Cap_Merged"][merged_id], copy(mdict[merged_id].ext[:parameters][:z_cap]))
+    nslot = length(mdict[merged_id].ext[:parameters][:z_cap])
+    mdict[merged_id].ext[:parameters][:z_cap] = z0 isa AbstractVector && length(z0) == nslot ? Float64.(z0) : fill(_cap_scalar(z0), nslot)
+    mdict[merged_id].ext[:parameters][:λ_cap] = λ0 isa AbstractVector && length(λ0) == nslot ? Float64.(λ0) : fill(_cap_scalar(λ0), nslot)
+    results["Cap_Merged_slots"][merged_id] = String.(mdict[merged_id].ext[:parameters][:cap_slots])
+    results["Cap_Merged_floors"][merged_id] = merged_cap_floors(mdict[merged_id])
 end
 
 @info "Green H2 social planner" merged_agent=merged_id members=member_ids

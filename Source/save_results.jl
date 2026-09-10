@@ -26,6 +26,12 @@ import Printf: @sprintf, @printf
 if !isdefined(@__MODULE__, :print_social_planner_run_summary!)
     include(joinpath(@__DIR__, "print_run_summary.jl"))
 end
+if !isdefined(@__MODULE__, :_aligned_cap_target)
+    include(joinpath(@__DIR__, "cap_admm_helpers.jl"))
+end
+if !isdefined(@__MODULE__, :with_run_summary_log)
+    include(joinpath(@__DIR__, "tee_run_log.jl"))
+end
 include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
 
 function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
@@ -133,6 +139,8 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
                 results["Cap_Elec_H2"][m]
             elseif !isempty(get(results["Cap_EP_Green"], m, []))
                 results["Cap_EP_Green"][m]
+            elseif !isempty(get(get(results, "Cap_Merged", Dict()), m, []))
+                results["Cap_Merged"][m]
             else
                 Vector{Vector{Float64}}()
             end
@@ -142,21 +150,25 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
             rp_hist = get(get(cap_state_save, "Primal", Dict()), m, Float64[])
             rd_hist = get(get(cap_state_save, "Dual",   Dict()), m, Float64[])
             nrec = min(length(xhist), length(zhist))
+            slots = get(get(results, "Cap_Merged_slots", Dict()), m, String[])
             for i in 1:nrec
                 xvec = xhist[i]
-                zvec = zhist[i]
-                λvec = i <= length(λhist) ? λhist[i] : zeros(length(xvec))
+                zvec = _aligned_cap_target(zhist[i], length(xvec))
+                λraw = i <= length(λhist) ? λhist[i] : zeros(length(xvec))
+                λvec = _aligned_cap_target(λraw, length(xvec))
                 ρ_i  = i <= length(ρhist) ? ρhist[i] : (isempty(ρhist) ? NaN : ρhist[end])
                 rp_i = i <= length(rp_hist) ? rp_hist[i] : NaN
                 rd_i = i <= length(rd_hist) ? rd_hist[i] : NaN
                 for jy in 1:length(xvec)
+                    slot = jy <= length(slots) ? slots[jy] : "cap"
                     push!(cap_rows, (
                         iter         = i,
                         AgentID      = m,
+                        Slot         = slot,
                         jy           = jy,
                         x_cap        = xvec[jy],
                         z_cap        = zvec[jy],
-                        lambda_cap   = jy <= length(λvec) ? λvec[jy] : 0.0,
+                        lambda_cap   = λvec[jy],
                         rho_cap      = ρ_i,
                         primal_local = rp_i,
                         dual_local   = rd_i,
@@ -378,7 +390,14 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
         elseif haskey(results, "Cap_Merged") && !isempty(get(results["Cap_Merged"], id, []))
             cap_vec = results["Cap_Merged"][id][end]
             cap_final = sum(cap_vec)
-            inv_total = 0.0
+            inv_hist = get(get(results, "Inv_Merged", Dict()), id, [])
+            if !isempty(inv_hist)
+                inv_total = sum(inv_hist[end])
+            else
+                floors = get(get(results, "Cap_Merged_floors", Dict()), id, zeros(length(cap_vec)))
+                n = min(length(cap_vec), length(floors))
+                inv_total = sum(max(0.0, cap_vec[i] - floors[i]) for i in 1:n; init=0.0)
+            end
         end
 
         return cap_final, inv_total
@@ -451,6 +470,39 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
         Objective_Value = obj_sum,
     )
     CSV.write(joinpath(results_dir, "Agent_Summary.csv"), agents_df)
+
+    if haskey(results, "Cap_Merged")
+        merged_rows = NamedTuple[]
+        for mid in get(agents, :merged, String[])
+            cap_hist = get(results["Cap_Merged"], mid, [])
+            isempty(cap_hist) && continue
+            cap_vec = cap_hist[end]
+            inv_hist = get(get(results, "Inv_Merged", Dict()), mid, [])
+            inv_vec = isempty(inv_hist) ? zeros(length(cap_vec)) : copy(inv_hist[end])
+            length(inv_vec) != length(cap_vec) && (inv_vec = zeros(length(cap_vec)))
+            floors = get(get(results, "Cap_Merged_floors", Dict()), mid, zeros(length(cap_vec)))
+            slots = get(get(results, "Cap_Merged_slots", Dict()), mid,
+                        ["slot$i" for i in 1:length(cap_vec)])
+            for i in 1:length(cap_vec)
+                s = i <= length(slots) ? String(slots[i]) : "slot$i"
+                role, unit = get(_MERGED_SLOT_META, s, (s, "MW"))
+                fl = i <= length(floors) ? floors[i] : 0.0
+                inv = inv_vec[i]
+                push!(merged_rows, (
+                    AgentID = mid,
+                    Slot = s,
+                    Role = role,
+                    Unit = unit,
+                    Existing_MW = fl,
+                    Capacity_MW = cap_vec[i],
+                    Investment_MW = inv,
+                ))
+            end
+        end
+        if !isempty(merged_rows)
+            CSV.write(joinpath(results_dir, "Merged_Capacities.csv"), DataFrame(merged_rows))
+        end
+    end
 
     # --------------------------------------------------------------------------
     # Agent_Objectives_Per_Timestep.csv — Per-hour prices, quantities, objective contributions
@@ -736,9 +788,10 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
 
     write_admm_risk_outputs!(mdict, agents, results_dir; case_label = case_label)
     cost_metrics = collect_cost_metrics(mdict, agents; λ_elec=λ_elec, λ_H2=λ_H2, λ_EP=λ_EP)
-    print_cost_metrics_summary!(cost_metrics; title = "Cost metrics")
-
-    print_admm_run_summary!(ADMM_state, results, agents; results_dir=results_dir)
+    with_run_summary_log(results_dir) do
+        print_cost_metrics_summary!(cost_metrics; title = "Cost metrics")
+        print_admm_run_summary!(ADMM_state, results, agents; results_dir=results_dir)
+    end
 
     return nothing
 end

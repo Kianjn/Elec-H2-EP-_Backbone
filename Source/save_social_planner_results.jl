@@ -36,6 +36,9 @@ import Printf: @sprintf, @printf
 if !isdefined(@__MODULE__, :print_social_planner_run_summary!)
     include(joinpath(@__DIR__, "print_run_summary.jl"))
 end
+if !isdefined(@__MODULE__, :with_run_summary_log)
+    include(joinpath(@__DIR__, "tee_run_log.jl"))
+end
 include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
 
 function save_social_planner_results!(planner::Model, planner_state::Dict, agents::Dict,
@@ -233,12 +236,6 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
         cap_df = DataFrame(cap_rows)
         CSV.write(joinpath(results_folder, "SP_Capacities.csv"), cap_df)
     end
-
-    # Print run summary to the output log
-    print_social_planner_run_summary!(prices_df, var_dict, agents, JY,
-                                      power_vres, H2_producers, offtaker_green;
-                                      results_dir=results_folder,
-                                      solver_status=get(planner_state, :solver_status, termination_status(planner)))
 
     # ── Build 3D price arrays [jh, jd, jy] for ADMM-style objective computation ─
     # The duals are indexed [jy, jh, jd]. We build λ[jh, jd, jy] to match the
@@ -624,7 +621,13 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     write_sp_risk_outputs!(planner, planner_state, mdict, agents, results_folder)
     cost_metrics = collect_cost_metrics(mdict, agents; planner_state=planner_state,
                                         λ_elec=λ_elec, λ_H2=λ_H2, λ_EP=λ_EP)
-    print_cost_metrics_summary!(cost_metrics; title = "Cost metrics")
+    with_run_summary_log(results_folder) do
+        print_social_planner_run_summary!(prices_df, var_dict, agents, JY,
+                                          power_vres, H2_producers, offtaker_green;
+                                          results_dir=results_folder,
+                                          solver_status=get(planner_state, :solver_status, termination_status(planner)))
+        print_cost_metrics_summary!(cost_metrics; title = "Cost metrics")
+    end
 
     return nothing
 end

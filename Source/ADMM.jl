@@ -268,7 +268,7 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
                 z_vec  = isempty(z_hist) ? cap_vec : z_hist[end]
                 local_r = 0.0
                 if !isempty(cap_vec)
-                    z_use = length(z_vec) == length(cap_vec) ? z_vec : _cap_z_vec(_cap_scalar(z_vec))
+                    z_use = _aligned_cap_target(z_vec, length(cap_vec))
                     local_r = _cap_primal_residual(cap_vec, z_use)
                 end
                 push!(cap_state["Primal"][m], local_r)
@@ -310,7 +310,7 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
                 if isempty(cap_vec)
                     push!(cap_state["λ"][m], copy(λ_prev))
                 else
-                    z_use = length(z_vec) == length(cap_vec) ? z_vec : _cap_z_vec(_cap_scalar(z_vec))
+                    z_use = _aligned_cap_target(z_vec, length(cap_vec))
                     λ_new = _cap_dual_ascent(λ_prev, ρ_m, cap_vec, z_use)
                     push!(cap_state["λ"][m], λ_new)
                 end

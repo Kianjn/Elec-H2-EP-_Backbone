@@ -122,6 +122,7 @@ end
 # Root directory of the project; all paths (Data/, Input/, Source/, results) are
 # built from this.
 const home_dir = @__DIR__
+const results_folder = joinpath(home_dir, "social_planner_results")
 
 # ------------------------------------------------------------------------------
 # SECTION 4: FUNCTION LOADING (SOURCE FILES)
@@ -222,10 +223,7 @@ end
 # SECTION 6: RESULTS FOLDER
 # ------------------------------------------------------------------------------
 
-results_folder = joinpath(home_dir, "social_planner_results")
-if !isdir(results_folder)
-    mkdir(results_folder)
-end
+isdir(results_folder) || mkdir(results_folder)
 
 # ------------------------------------------------------------------------------
 # SECTION 7: AGENT INITIALIZATION

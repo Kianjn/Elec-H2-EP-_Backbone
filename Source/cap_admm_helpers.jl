@@ -148,6 +148,10 @@ function repeat_last_agent_quantities!(results::Dict, m::String, mod::Model)
     if haskey(results, "Cap_Merged") && haskey(results["Cap_Merged"], m) &&
             !isempty(results["Cap_Merged"][m])
         ok &= take!(results["Cap_Merged"][m])
+        haskey(results, "Inv_Merged") && haskey(results["Inv_Merged"], m) &&
+            !isempty(results["Inv_Merged"][m]) && (ok &= take!(results["Inv_Merged"][m]))
+        haskey(results, "Merged_z_flow") && haskey(results["Merged_z_flow"], m) &&
+            !isempty(results["Merged_z_flow"][m]) && (ok &= take!(results["Merged_z_flow"][m]))
     end
     return ok
 end
@@ -200,23 +204,30 @@ function _agent_cap_vec_from_results(m::String, results::Dict)
     return Float64[]
 end
 
+"""Pad or truncate a capacity/dual vector to length `n` without broadcasting a scalar."""
+function _aligned_cap_target(z_vec, n::Int)
+    n <= 0 && return Float64[]
+    v = z_vec isa AbstractVector ? Float64.(collect(z_vec)) : [_cap_scalar(z_vec)]
+    length(v) == n && return v
+    length(v) > n && return v[1:n]
+    return vcat(v, zeros(n - length(v)))
+end
+
 """Primal capacity residual (L2 for multi-cap coalitions)."""
 function _cap_primal_residual(cap_vec::AbstractVector{<:Real}, z_vec::AbstractVector{<:Real})
     isempty(cap_vec) && return 0.0
-    length(cap_vec) == 1 && return abs(_cap_scalar(cap_vec) - _cap_scalar(z_vec))
-    d = Float64.(cap_vec) .- Float64.(z_vec)
-    return sqrt(sum(abs2, d))
+    z = _aligned_cap_target(z_vec, length(cap_vec))
+    d = Float64.(cap_vec) .- z
+    return length(d) == 1 ? abs(d[1]) : sqrt(sum(abs2, d))
 end
 
 """Dual ascent update for scalar or vector capacity split."""
 function _cap_dual_ascent(λ_prev, ρ_m::Real, cap_vec::AbstractVector{<:Real}, z_vec::AbstractVector{<:Real})
     isempty(cap_vec) && return _cap_z_vec(λ_prev)
-    if length(cap_vec) == 1
-        return [_clip_λ_cap(_cap_scalar(λ_prev) + ρ_m * (_cap_scalar(cap_vec) - _cap_scalar(z_vec)))]
-    end
-    λ0 = λ_prev isa AbstractVector ? Float64.(λ_prev) : fill(_cap_scalar(λ_prev), length(cap_vec))
-    length(λ0) != length(cap_vec) && (λ0 = resize!(copy(λ0), length(cap_vec)))
-    return [_clip_λ_cap(λ0[i] + ρ_m * (Float64(cap_vec[i]) - Float64(z_vec[i]))) for i in eachindex(cap_vec)]
+    n = length(cap_vec)
+    λ0 = _aligned_cap_target(λ_prev, n)
+    z  = _aligned_cap_target(z_vec, n)
+    return [_clip_λ_cap(λ0[i] + ρ_m * (Float64(cap_vec[i]) - z[i])) for i in 1:n]
 end
 
 """Boyd abs+rel tolerance for a scalar capacity split (`x = z`).

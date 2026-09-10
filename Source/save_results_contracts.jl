@@ -25,6 +25,9 @@ import Printf: @sprintf, @printf
 if !isdefined(@__MODULE__, :print_social_planner_run_summary!)
     include(joinpath(@__DIR__, "print_run_summary.jl"))
 end
+if !isdefined(@__MODULE__, :with_run_summary_log)
+    include(joinpath(@__DIR__, "tee_run_log.jl"))
+end
 include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
 if !isdefined(@__MODULE__, :final_contract_strike)
     include(joinpath(@__DIR__, "contract_strike.jl"))
@@ -702,12 +705,13 @@ function save_results_contracts!(mdict::Dict, elec_market::Dict, H2_market::Dict
 
     write_admm_risk_outputs!(mdict, agents, results_dir; case_label = case_label)
     cost_metrics = collect_cost_metrics(mdict, agents; λ_elec=λ_elec, λ_H2=λ_H2, λ_EP=λ_EP)
-    print_cost_metrics_summary!(cost_metrics; title = "Cost metrics")
-
-    print_admm_run_summary!(ADMM_state, results, agents;
-                            results_dir=results_dir,
-                            ppa_market=ppa_market,
-                            hpa_market=hpa_market)
+    with_run_summary_log(results_dir) do
+        print_cost_metrics_summary!(cost_metrics; title = "Cost metrics")
+        print_admm_run_summary!(ADMM_state, results, agents;
+                                results_dir=results_dir,
+                                ppa_market=ppa_market,
+                                hpa_market=hpa_market)
+    end
 
     return nothing
 end

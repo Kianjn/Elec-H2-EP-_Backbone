@@ -1,0 +1,19 @@
+─────────────────────────────────────────────────────────────────────────────────
+                                        Time                    Allocations      
+                               ───────────────────────   ────────────────────────
+       Tot / % measured:            1080s /  95.9%            308GiB /  98.8%    
+
+Section                ncalls     time    %tot     avg     alloc    %tot      avg
+─────────────────────────────────────────────────────────────────────────────────
+Solve agent             14.7k     891s   86.1%  60.6ms    265GiB   87.2%  18.4MiB
+Query results           14.7k    90.0s    8.7%  6.12ms   30.8GiB   10.1%  2.15MiB
+Dual residuals          1.47k    35.9s    3.5%  24.4ms   5.42GiB    1.8%  3.78MiB
+Update ADMM params      14.7k    7.49s    0.7%   510μs   1.48GiB    0.5%   105KiB
+Compute imbalances      1.47k    6.33s    0.6%  4.30ms    844MiB    0.3%   588KiB
+Update prices           1.47k    2.33s    0.2%  1.58ms    226MiB    0.1%   157KiB
+Primal residuals        1.47k    1.90s    0.2%  1.29ms    237MiB    0.1%   165KiB
+Capacity dual update    1.47k    145ms    0.0%  98.3μs   11.7MiB    0.0%  8.14KiB
+Update ρ                1.47k   53.8ms    0.0%  36.6μs   2.87MiB    0.0%  2.00KiB
+Imbalance means         1.47k   29.6ms    0.0%  20.1μs   1.07MiB    0.0%     766B
+Price means             1.47k   23.7ms    0.0%  16.2μs    775KiB    0.0%     540B
+─────────────────────────────────────────────────────────────────────────────────

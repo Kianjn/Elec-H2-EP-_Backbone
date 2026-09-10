@@ -202,6 +202,11 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
     results["Inv_Elec_H2"]     = Dict(m => [] for m in agents[:all])   # Electrolyzer elec investment per year (MW)
     results["Cap_EP_Green"]    = Dict(m => [] for m in agents[:all])   # Green offtaker EP capacity per year (MW)
     results["Inv_EP_Green"]    = Dict(m => [] for m in agents[:all])   # Green offtaker EP investment per year (MW)
+    results["Cap_Merged"]      = Dict(m => [] for m in get(agents, :merged, String[]))
+    results["Inv_Merged"]      = Dict(m => [] for m in get(agents, :merged, String[]))
+    results["Merged_z_flow"]   = Dict(m => [] for m in get(agents, :merged, String[]))
+    results["Cap_Merged_slots"]  = Dict{String, Vector{String}}()
+    results["Cap_Merged_floors"] = Dict{String, Vector{Float64}}()
 
     # ADMM["ρ"] — Per-MARKET list of scalar penalty weights, one entry per
     # ADMM iteration. Updated by update_rho! (which may increase/decrease ρ
@@ -346,7 +351,10 @@ function define_results!(admm_data::Dict, results::Dict, ADMM::Dict, agents::Dic
         # Per-agent penalty ρ_m history (one push per iteration; first entry = rho_cap_initial)
         "ρ" => Dict{String, Vector{Float64}}(m => [rho_cap_init] for m in cap_agents),
         # Per-agent dual λ_m history; each entry is a length-nYears vector
-        "λ" => Dict{String, Vector{Vector{Float64}}}(m => [[0.0]] for m in cap_agents),
+        "λ" => Dict{String, Vector{Vector{Float64}}}(
+            m => [zeros(haskey(get(agents, :merged_members, Dict()), m) ?
+                         length(agents[:merged_members][m]) : 1)]
+            for m in cap_agents),
         # Per-agent auxiliary z_m history; filled by ADMM_subroutine each iter
         "z" => Dict{String, Vector{Vector{Float64}}}(m => Vector{Float64}[] for m in cap_agents),
         # Per-agent residuals (one scalar per iteration). Primal = ||x_m-z_m||,

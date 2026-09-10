@@ -94,6 +94,7 @@ const GUROBI_ENV = Gurobi.Env()
 # Root directory of the project; all paths (Data/, Input/, Source/, results) are
 # built from this.
 const home_dir = @__DIR__
+const results_dir = joinpath(home_dir, "market_exposure_results")
 
 # ------------------------------------------------------------------------------
 # SECTION 4: FUNCTION LOADING (SOURCE FILES)
@@ -196,9 +197,7 @@ end
 # SECTION 6: RESULTS FOLDER
 # ------------------------------------------------------------------------------
 
-if isdir(joinpath(home_dir, "market_exposure_results")) != 1
-    mkdir(joinpath(home_dir, "market_exposure_results"))
-end
+isdir(results_dir) || mkdir(results_dir)
 
 # ------------------------------------------------------------------------------
 # SECTION 7: AGENT INITIALIZATION
@@ -404,6 +403,7 @@ ADMM["walltime"] = TimerOutputs.tottime(TO) * 10^-9 / 60
 # SECTION 13: SAVE RESULTS
 # ------------------------------------------------------------------------------
 
-save_results(mdict, elec_market, H2_market, elec_GC_market, H2_GC_market, ADMM, results, agents)
+save_results(mdict, elec_market, H2_market, elec_GC_market, H2_GC_market, ADMM, results, agents;
+    results_dir=results_dir)
 
-YAML.write_file(joinpath(home_dir, "market_exposure_results", "TimerOutput.yaml"), TO)
+YAML.write_file(joinpath(results_dir, "TimerOutput.yaml"), TO)

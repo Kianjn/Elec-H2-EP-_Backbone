@@ -13,8 +13,74 @@ function _merged_cap_variables(mod::Model)
     error("Unknown merged agent Type: $t")
 end
 
+"""Existing (pre-investment) capacity per merged slot, same order as `cap_slots`."""
+function merged_cap_floors(mod::Model)
+    p = mod.ext[:parameters]
+    t = String(p[:Type])
+    if t == "GreenH2Coalition"
+        return Float64[get(p, :Capacity_H2_Output, 0.0), get(p, :Capacity_EP_Out, 0.0)]
+    end
+    v = Float64[u.Capacity for u in p[:vres_units]]
+    append!(v, Float64[get(p, :Capacity_H2_Output, 0.0), get(p, :Capacity_EP_Out, 0.0)])
+    return v
+end
+
 function merged_cap_snapshot(mod::Model)
     return Float64[value(v) for v in _merged_cap_variables(mod)]
+end
+
+function merged_inv_snapshot(mod::Model)
+    t = String(mod.ext[:parameters][:Type])
+    if t == "GreenH2Coalition"
+        return Float64[value(mod.ext[:variables][:inv_cap_H2]),
+                       value(mod.ext[:variables][:inv_EP])]
+    end
+    invs = Float64[value(mod.ext[:variables][:inv_vres][u.label])
+                   for u in mod.ext[:parameters][:vres_units]]
+    append!(invs, Float64[value(mod.ext[:variables][:inv_cap_H2]),
+                          value(mod.ext[:variables][:inv_EP])])
+    return invs
+end
+
+function _peak_value(var)
+    return maximum(value(v) for v in var)
+end
+
+function _z_from_profile(g, AF::AbstractArray)
+    z = 0.0
+    n1, n2, n3 = size(AF)
+    for jy in 1:n3, jd in 1:n2, jh in 1:n1
+        af = AF[jh, jd, jy]
+        af > 1e-9 || continue
+        z = max(z, value(g[jh, jd, jy]) / af)
+    end
+    return z
+end
+
+"""Flow-implied capacity targets per slot (same construction as standalone VRES/H2/EP)."""
+function merged_flow_z_target(mod::Model)
+    p = mod.ext[:parameters]
+    z = merged_cap_floors(mod)
+    vars = mod.ext[:variables]
+    t = String(p[:Type])
+    if t == "GreenCoalition"
+        for (i, u) in enumerate(p[:vres_units])
+            z[i] = max(z[i], _z_from_profile(vars[:g_vres][u.label], u.AF))
+        end
+        z[end - 1] = max(z[end - 1], _peak_value(vars[:h2]))
+        z[end] = max(z[end], _peak_value(vars[:ep]))
+    else
+        z[1] = max(z[1], _peak_value(vars[:h2]))
+        z[2] = max(z[2], _peak_value(vars[:ep]))
+    end
+    return z
+end
+
+function _merged_λ_vec(λ_raw, n_cap::Int)
+    if λ_raw isa AbstractVector && length(λ_raw) == n_cap
+        return Float64.(λ_raw)
+    end
+    return fill(_cap_scalar(λ_raw), n_cap)
 end
 
 function update_merged_z_cap!(mod::Model, m::String, results::Dict, ADMM_state::Dict, data::Dict)
@@ -22,33 +88,26 @@ function update_merged_z_cap!(mod::Model, m::String, results::Dict, ADMM_state::
     cap_state = ADMM_state["Capacity"]
     p = mod.ext[:parameters]
     n_cap = length(p[:cap_slots])
-    t = String(p[:Type])
-
-    floors = if t == "GreenH2Coalition"
-        [get(p, :Capacity_H2_Output, 0.0), get(p, :Capacity_EP_Out, 0.0)]
-    else
-        v = [u.Capacity for u in p[:vres_units]]
-        append!(v, [get(p, :Capacity_H2_Output, 0.0), get(p, :Capacity_EP_Out, 0.0)])
-        v
-    end
+    floors = merged_cap_floors(mod)
 
     if get(ADMM_state, "n_iter", 0) == 0 && !isempty(cap_state["z"][m])
         z_raw = cap_state["z"][m][end]
-        p[:z_cap] = z_raw isa AbstractVector ? Float64.(z_raw) : fill(_cap_scalar(z_raw), n_cap)
-        λ_raw = cap_state["λ"][m][end]
-        p[:λ_cap] = λ_raw isa AbstractVector ? Float64.(λ_raw) : fill(_cap_scalar(λ_raw), n_cap)
+        p[:z_cap] = z_raw isa AbstractVector && length(z_raw) == n_cap ?
+            Float64.(z_raw) : fill(_cap_scalar(z_raw), n_cap)
+        p[:λ_cap] = _merged_λ_vec(cap_state["λ"][m][end], n_cap)
         p[:ρ_cap] = cap_state["ρ"][m][end]
         return nothing
     end
 
     z_cap = copy(floors)
-    if haskey(results, "Cap_Merged") && !isempty(get(results["Cap_Merged"], m, []))
+    flow_z = get(get(results, "Merged_z_flow", Dict()), m, [])
+    if !isempty(flow_z)
+        z_cap = copy(flow_z[end])
+    elseif haskey(results, "Cap_Merged") && !isempty(get(results["Cap_Merged"], m, []))
         z_cap = copy(results["Cap_Merged"][m][end])
     end
-    flow_ep = isempty(get(results["EP"], m, [])) ? nothing : results["EP"][m][end]
-    if flow_ep !== nothing
-        z_cap[end] = max(z_cap[end], maximum(flow_ep))
-    end
+    length(z_cap) != n_cap && (z_cap = copy(floors))
+
     z_alpha = min(1.0, max(0.05, get(get(data, "ADMM", Dict()), "cap_z_relax", 1.0)))
     if !isempty(cap_state["z"][m])
         z_prev = cap_state["z"][m][end]
@@ -61,8 +120,7 @@ function update_merged_z_cap!(mod::Model, m::String, results::Dict, ADMM_state::
     end
     _cap_z_push!(cap_state["z"][m], z_cap)
     p[:z_cap] = z_cap
-    λ_raw = cap_state["λ"][m][end]
-    p[:λ_cap] = λ_raw isa AbstractVector ? Float64.(λ_raw) : fill(_cap_scalar(λ_raw), n_cap)
+    p[:λ_cap] = _merged_λ_vec(cap_state["λ"][m][end], n_cap)
     p[:ρ_cap] = cap_state["ρ"][m][end]
     return nothing
 end
@@ -239,22 +297,34 @@ function merged_admm_step!(m::String, data::Dict, results::Dict, ADMM_state::Dic
         push!(results["H2_GC"][m], collect(value.(mod.ext[:expressions][:g_net_H2_GC])))
         push!(results["EP"][m], collect(value.(mod.ext[:expressions][:g_net_EP])))
         cap_snap = merged_cap_snapshot(mod)
-        if !isempty(cap_snap)
-            haskey(results, "Cap_Merged") || (results["Cap_Merged"] = Dict{String, Vector{Vector{Float64}}}())
-            push!(get!(results["Cap_Merged"], m, []), cap_snap)
-        end
+        inv_snap = merged_inv_snapshot(mod)
+        p = mod.ext[:parameters]
+        haskey(results, "Cap_Merged") || (results["Cap_Merged"] = Dict{String, Vector{Vector{Float64}}}())
+        haskey(results, "Inv_Merged") || (results["Inv_Merged"] = Dict{String, Vector{Vector{Float64}}}())
+        haskey(results, "Merged_z_flow") || (results["Merged_z_flow"] = Dict{String, Vector{Vector{Float64}}}())
+        haskey(results, "Cap_Merged_slots") || (results["Cap_Merged_slots"] = Dict{String, Vector{String}}())
+        haskey(results, "Cap_Merged_floors") || (results["Cap_Merged_floors"] = Dict{String, Vector{Float64}}())
+        results["Cap_Merged_slots"][m] = String.(p[:cap_slots])
+        results["Cap_Merged_floors"][m] = merged_cap_floors(mod)
+        push!(get!(results["Cap_Merged"], m, []), cap_snap)
+        push!(get!(results["Inv_Merged"], m, []), inv_snap)
+        push!(get!(results["Merged_z_flow"], m, []), merged_flow_z_target(mod))
     end
     return nothing
 end
 
 function merged_cap_warmstart!(mod::Model, sp_cap_df::DataFrame, member_ids::Vector{String})
     t = String(mod.ext[:parameters][:Type])
+    floors = merged_cap_floors(mod)
     if t == "GreenH2Coalition"
-        for (var, mid) in ((:cap_H2_y, member_ids[1]), (:cap_EP_y, member_ids[2]))
+        for (i, (var, invvar, mid)) in enumerate((
+                (:cap_H2_y, :inv_cap_H2, member_ids[1]),
+                (:cap_EP_y, :inv_EP, member_ids[2])))
             row = sp_cap_df[sp_cap_df.AgentID .== mid, :]
             val = _sp_cap_scalar(row)
             val === nothing && continue
             set_start_value(mod.ext[:variables][var], val)
+            set_start_value(mod.ext[:variables][invvar], max(0.0, val - floors[i]))
         end
     elseif t == "GreenCoalition"
         id_map = Dict(:solar => member_ids[1], :wind => member_ids[2],
@@ -265,10 +335,27 @@ function merged_cap_warmstart!(mod::Model, sp_cap_df::DataFrame, member_ids::Vec
             val === nothing && continue
             if label in (:solar, :wind)
                 set_start_value(mod.ext[:variables][:cap_vres][label], val)
+                set_start_value(mod.ext[:variables][:inv_vres][label], max(0.0, val - floors[label == :solar ? 1 : 2]))
+            elseif label == :cap_H2_y
+                set_start_value(mod.ext[:variables][:cap_H2_y], val)
+                set_start_value(mod.ext[:variables][:inv_cap_H2], max(0.0, val - floors[end - 1]))
             else
-                set_start_value(mod.ext[:variables][label], val)
+                set_start_value(mod.ext[:variables][:cap_EP_y], val)
+                set_start_value(mod.ext[:variables][:inv_EP], max(0.0, val - floors[end]))
             end
         end
     end
     return nothing
+end
+
+"""Set VRES cap and inv starts together so `cap == cap0 + inv` stays feasible."""
+function vres_cap_inv_warmstart!(mod::Model, cap_val::Real)
+    haskey(mod.ext[:variables], :cap_VRES) || return false
+    val = Float64(cap_val)
+    set_start_value(mod.ext[:variables][:cap_VRES], val)
+    if haskey(mod.ext[:variables], :inv_VRES)
+        floor = Float64(get(mod.ext[:parameters], :Capacity, 0.0))
+        set_start_value(mod.ext[:variables][:inv_VRES], max(0.0, val - floor))
+    end
+    return true
 end

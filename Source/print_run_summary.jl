@@ -69,19 +69,47 @@ function _admm_capacity_row(results::Dict, id::String, agents::Dict)
             inv_total = inv_total, cap_vec = cap_vec)
 end
 
+const _MERGED_SLOT_META = Dict(
+    "VRES_solar" => ("Solar", "MW"),
+    "VRES_wind"  => ("Wind", "MW"),
+    "H2"         => ("Electrolyzer", "MW_H2"),
+    "EP"         => ("EP plant", "MW_EP"),
+)
+
+function _admm_capacity_rows(results::Dict, id::String, agents::Dict)
+    if haskey(results, "Cap_Merged") && !isempty(get(results["Cap_Merged"], id, []))
+        cap_vec = results["Cap_Merged"][id][end]
+        inv_hist = get(get(results, "Inv_Merged", Dict()), id, [])
+        inv_vec = isempty(inv_hist) ? zeros(length(cap_vec)) : copy(inv_hist[end])
+        length(inv_vec) != length(cap_vec) && (inv_vec = zeros(length(cap_vec)))
+        slots = get(get(results, "Cap_Merged_slots", Dict()), id,
+                    ["slot$i" for i in 1:length(cap_vec)])
+        rows = NamedTuple[]
+        for i in 1:length(cap_vec)
+            s = i <= length(slots) ? String(slots[i]) : "slot$i"
+            role, unit = get(_MERGED_SLOT_META, s, (s, "MW"))
+            label = "$(id) / $(role)"
+            push!(rows, (id = label, role = role, unit = unit, cap_final = cap_vec[i],
+                         inv_total = inv_vec[i], cap_vec = [cap_vec[i]]))
+        end
+        return rows
+    end
+    return [_admm_capacity_row(results, id, agents)]
+end
+
 function _print_capacity_table(rows::Vector)
     isempty(rows) && return
     println()
-    @printf("  %-22s  %-14s  %8s  %12s  %s\n",
+    @printf("  %-32s  %-14s  %8s  %12s  %s\n",
             "Agent", "Role", "Unit", "Final cap.", "New investment")
-    @printf("  %-22s  %-14s  %8s  %12s  %s\n",
-            repeat("-", 22), repeat("-", 14), repeat("-", 8),
+    @printf("  %-32s  %-14s  %8s  %12s  %s\n",
+            repeat("-", 32), repeat("-", 14), repeat("-", 8),
             repeat("-", 12), repeat("-", 14))
     for r in rows
         cap_str = length(r.cap_vec) <= 1 ?
             @sprintf("%.2f", r.cap_final) :
             join([@sprintf("%.1f", c) for c in r.cap_vec], " → ")
-        @printf("  %-22s  %-14s  %8s  %12s  %12.2f\n",
+        @printf("  %-32s  %-14s  %8s  %12s  %12.2f\n",
                 r.id, r.role, r.unit, cap_str, r.inv_total)
     end
 end
@@ -189,7 +217,10 @@ function print_admm_run_summary!(ADMM_state::Dict, results::Dict, agents::Dict;
                 "Capacity (agg.)", _fmt_res(rp_agg), _fmt_res(rd_agg), "n/a")
     end
 
-    cap_rows = [_admm_capacity_row(results, m, agents) for m in cap_agents]
+    cap_rows = NamedTuple[]
+    for m in cap_agents
+        append!(cap_rows, _admm_capacity_rows(results, m, agents))
+    end
     _print_capacity_table(cap_rows)
 
     if !isempty(cap_agents)

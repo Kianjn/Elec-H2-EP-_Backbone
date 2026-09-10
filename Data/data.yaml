@@ -84,11 +84,11 @@ ADMM:
     bind_tol: 1.0e-6   # Treat q_peak ≈ C as "cap binding"
     dual_tol: 1.0e-4   # Min weighted shadow of q ≤ C (€/MW-year) to count as "wants more C"
   # γ=0.5, β=0.8: Hoschle mix with CVaR on the worst 3 of 15 equiprobable scenarios.
-  gamma: 1.0             # Risk weight (γ=1 ⇒ risk-neutral; γ=0.5 ⇒ risk-averse Hoschle-style). SP + ADMM read this block.
+  gamma: 0.5             # Risk weight (γ=1 ⇒ risk-neutral; γ=0.5 ⇒ risk-averse Hoschle-style). SP + ADMM read this block.
   # CVaR confidence β (Rockafellar–Uryasev); higher β = more risk-averse at γ<1.
   # Tail (1−β) must span at least one of the 15 equiprobable scenarios (6.7%),
   # so β ≤ 0.933. The sweep 0.2/0.4/0.6/0.8 gives tails of 12/9/6/3 years (§4.10.4).
-  beta: 0.8
+  beta: 0.2
 
 # ---------------------------------------------------------------------------
 # SocialPlanner: solver configuration for social_planner.jl only
@@ -176,8 +176,8 @@ Power:
     Profile_Column: "SOLAR"    # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
     MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
     FixedCost_per_MW: 95000.0  # [NL] €/MW-year — NL utility solar ≈0.79 M€/MW CAPEX+FOM, 25 yr, 8% WACC ⇒ LCOE ≈50 €/MWh [IRENA-2024]. Multiplied by General.VRES_FixedCost_Scale before the run.
-    gamma: 1.0                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
-    beta: 0.8                 # CVaR confidence β (Rockafellar–Uryasev); higher = more risk-averse at gamma<1 (§4.10.4).
+    gamma: 0.5                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
+    beta: 0.2                 # CVaR confidence β (Rockafellar–Uryasev); higher = more risk-averse at gamma<1 (§4.10.4).
 
   # Variable Renewable Energy Source (wind — national aggregate, on+offshore)
   Gen_VRES_Wind:
@@ -186,8 +186,8 @@ Power:
      Profile_Column: "WIND"     # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
      MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
      FixedCost_per_MW: 185000.0 # [NL] €/MW-year — NL offshore-leaning wind ≈2.2 M€/MW CAPEX+FOM ⇒ LCOE ≈62 €/MWh [IRENA-2024]. Multiplied by General.VRES_FixedCost_Scale before the run.
-     gamma: 1.0                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
-     beta: 0.8                # CVaR confidence β (Rockafellar–Uryasev); higher = more risk-averse at gamma<1 (§4.10.4).
+     gamma: 0.5                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
+     beta: 0.2                # CVaR confidence β (Rockafellar–Uryasev); higher = more risk-averse at gamma<1 (§4.10.4).
 
   # Dispatchable conventional fleet — three flat merit-order plants (NL 2024/25)
   # Total capacity 18,000 MW = 14,040 CCGT + 1,800 coal + 2,160 biomass (78/10/12%
@@ -243,8 +243,8 @@ Hydrogen:
     # [NL] IEA GHR 2024 Assumptions annex: installed CAPEX 2160 USD/kWe (global avg 2023) [IEA-H2-2024].
     # 2160 × 0.92 €/USD = 1.987 M€/MW_e. CRF(8%, 20 yr)=0.10185 + 3% FOM (IEA) ⇒ 262 k€/MW_e-yr.
     FixedCost_per_MW_Electrolyzer: 262000.0   # [NL] €/MW_e-year — IEA kWe CAPEX annualised [IEA-H2-2024]
-    gamma: 1.0                                  # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
-    beta: 0.8                                # CVaR confidence level τ.
+    gamma: 0.5                                  # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
+    beta: 0.2                                # CVaR confidence level τ.
 
 # ---------------------------------------------------------------------------
 # Hydrogen offtakers (downstream processors & importers)
@@ -262,8 +262,8 @@ Hydrogen_Offtaker:
     # IEA 770 USD/(t NH₃/y) for synthesis loop + ASU, excluding electrolyser [IEA-NH3-2024].
     # 770 × 0.92 €/USD × 8760 / 5.167 MWh/t = 1.201 M€/MW_EP; CRF+3% FOM ⇒ 158 k€/MW_EP-yr.
     FixedCost_per_MW_EP_Out: 158000.0  # [NL] €/MW_EP-year — Haber–Bosch+ASU annuity [IEA-NH3-2024]
-    gamma: 1.0                           # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
-    beta: 0.8                         # CVaR confidence level τ.
+    gamma: 0.5                           # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
+    beta: 0.2                         # CVaR confidence level τ.
 
   # Grey offtaker — uses conventional (grey) hydrogen but must buy H2 GCs for a fraction of its implied H2 use
   Offtaker_Grey:
