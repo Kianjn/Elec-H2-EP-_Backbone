@@ -1,19 +1,19 @@
 ─────────────────────────────────────────────────────────────────────────────────
                                         Time                    Allocations      
                                ───────────────────────   ────────────────────────
-       Tot / % measured:            1452s /  95.0%            204GiB /  98.2%    
+       Tot / % measured:            1684s /  97.9%            408GiB /  99.1%    
 
 Section                ncalls     time    %tot     avg     alloc    %tot      avg
 ─────────────────────────────────────────────────────────────────────────────────
-Solve agent             7.88k    1266s   91.8%   161ms    175GiB   87.3%  22.7MiB
-Query results           7.88k    91.4s    6.6%  11.6ms   22.3GiB   11.1%  2.90MiB
-Dual residuals            985    11.2s    0.8%  11.4ms   1.97GiB    1.0%  2.05MiB
-Compute imbalances        985    3.42s    0.2%  3.47ms    460MiB    0.2%   479KiB
-Update ADMM params      7.88k    3.19s    0.2%   405μs    317MiB    0.2%  41.2KiB
-Update prices             985    2.88s    0.2%  2.92ms    152MiB    0.1%   158KiB
-Primal residuals          985    1.45s    0.1%  1.47ms    159MiB    0.1%   166KiB
-Capacity dual update      985    146ms    0.0%   148μs   6.81MiB    0.0%  7.07KiB
-Update ρ                  985   41.8ms    0.0%  42.4μs   1.65MiB    0.0%  1.72KiB
-Imbalance means           985   27.7ms    0.0%  28.2μs    508KiB    0.0%     528B
-Price means               985   17.4ms    0.0%  17.7μs    472KiB    0.0%     491B
+Solve agent             16.7k    1505s   91.3%  90.3ms    352GiB   87.2%  21.7MiB
+Query results           16.7k     101s    6.1%  6.05ms   45.8GiB   11.3%  2.81MiB
+Dual residuals          2.08k    27.9s    1.7%  13.4ms   3.98GiB    1.0%  1.96MiB
+Compute imbalances      2.08k    5.86s    0.4%  2.82ms    910MiB    0.2%   447KiB
+Update ADMM params      16.7k    4.78s    0.3%   287μs    602MiB    0.1%  37.0KiB
+Update prices           2.08k    2.04s    0.1%   978μs    286MiB    0.1%   141KiB
+Primal residuals        2.08k    1.88s    0.1%   900μs    292MiB    0.1%   144KiB
+Capacity dual update    2.08k   70.7ms    0.0%  33.9μs   8.23MiB    0.0%  4.05KiB
+Update ρ                2.08k   51.2ms    0.0%  24.6μs   2.87MiB    0.0%  1.41KiB
+Imbalance means         2.08k   29.0ms    0.0%  13.9μs    917KiB    0.0%     451B
+Price means             2.08k   20.7ms    0.0%  9.92μs    849KiB    0.0%     417B
 ─────────────────────────────────────────────────────────────────────────────────

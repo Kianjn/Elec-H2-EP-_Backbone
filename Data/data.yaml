@@ -27,7 +27,7 @@ General:
 # level, so nYears = length(weather_years) × length(gas_price_multipliers) = 15.
 # Scenario jy is ordered gas-fastest:
 #   jy = (weather_index − 1) × 3 + gas_index
-# so jy = 1,2,3 are weather year 1 at 1.0/1.1/1.2 × gas, jy = 4,5,6 are weather
+# so jy = 1,2,3 are weather year 1 at 1.0/2.0/3.0 × gas, jy = 4,5,6 are weather
 # year 2, and so on. All 15 carry equal probability 1/15 (independent uniform
 # priors over weather and gas). See DOCUMENTATION.md §9.7.
 #
@@ -65,13 +65,13 @@ Fuel:
 # ---------------------------------------------------------------------------
 ADMM:
   rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
-  rho_cap_initial: 0.1  # Penalty for investment/capacity consensus; low initial to avoid over-constraining early iterations
+  rho_cap_initial: 0.1  # Leftover yaml; ME zeros ρ_cap each iteration (installed cap is private). See DOCUMENTATION.md §6.4.
   nScenarioYears: 15    # Fallback only — the Scenarios block above is authoritative and yields 5 weather × 3 gas = 15
-  max_iter: 4000        # Iteration budget
+  max_iter: 5000        # Iteration budget
   epsilon: 0.2          # Flow-market Boyd ε_abs (MW per slot) for market_exposure; L2 tol = ε_abs·√n_slots. See DOCUMENTATION.md §6.5.
   epsilon_contracts: 2.0 # [me_pap / me_top / me_sop] Flow-market ε_abs; 10× ME (≈ Boyd 1e-4 of NL peak). L2 bar ≈ 107 MW (§6.5).
-  epsilon_cap: 5.0      # Scalar MW bar for physical x=z and bilateral contract C. Not scaled by √n_slots (§6.5).
-  cap_tol_relax: 10    # [me_pap / me_top / me_sop] Extra multiplier on ε_cap for physical *investment* only (10×5 = 50 MW); not shared contract C.
+  epsilon_cap: 5.0      # Unused for ME stop (installed cap is private). Contracts may use it for bilateral C.
+  cap_tol_relax: 10    # Leftover; physical x=z split is disabled in ME (§6.4). Contracts may still use it.
   # Shared bilateral contract capacity C (MW): updated outside agent subproblems each ADMM iter.
   contract_cap:
     initial: 0.0       # Contract-capacity seed for strike bootstrapping; set to 0 for no-contract warm start.
@@ -83,7 +83,7 @@ ADMM:
     settle_iters: 3    # C must stay within settle_tol for this many consecutive iterations
     bind_tol: 1.0e-6   # Treat q_peak ≈ C as "cap binding"
     dual_tol: 1.0e-4   # Min weighted shadow of q ≤ C (€/MW-year) to count as "wants more C"
-  # γ=0.5, β=0.8: Hoschle mix with CVaR on the worst 3 of 15 equiprobable scenarios.
+  # γ=0.5 with β in {0.2, 0.4, 0.6, 0.8}: Hoschle mix; current β is the sweep point.
   gamma: 0.5             # Risk weight (γ=1 ⇒ risk-neutral; γ=0.5 ⇒ risk-averse Hoschle-style). SP + ADMM read this block.
   # CVaR confidence β (Rockafellar–Uryasev); higher β = more risk-averse at γ<1.
   # Tail (1−β) must span at least one of the 15 equiprobable scenarios (6.7%),
@@ -213,7 +213,7 @@ Power:
 
   # At 2024 fuel prices (gas 34.40, CO₂ 64.79) derived SRMCs are
   #     CCGT 83.3  <  coal 85.4  <  biomass 89.8  €/MWh_e.
-  # The +10%/+20% gas scenarios lift only CCGT (to 89.3 and 95.2 €/MWh_e),
+  # The 2×/3× gas scenarios lift only CCGT (to 142.6 and 202.0 €/MWh_e),
   # reordering merit vs coal/biomass without a monotonicity constraint.
   # OCGT peaking (~128 €/MWh_e at base gas) is omitted as a separate agent;
   # contract ng_elec benchmarks still use the OCGT tail in contract_strike.jl.
@@ -276,7 +276,7 @@ Hydrogen_Offtaker:
     # Validation: ammonia NW Europe averaged $528–581/t in 2024 [OCI-NH3-2024],
     # i.e. European producers sat near cash cost after the 2022–23 spike normalised.
     # Grey is the marginal EP supplier, so its MC effectively sets the ammonia price.
-    # The +10%/+20% gas scenarios lift it to 91.6 and 97.6 €/MWh_EP.
+    # The 2×/3× gas scenarios lift it to 144.9 and 204.1 €/MWh_EP.
     GasIntensity: 1.720       # [NL] MWh_th NG per MWh_EP — 32 GJ_LHV/t NH₃ ÷ 5.167 MWh/t [FE-BAT; DECHEMA-2030]
     CO2Intensity: 0.348       # [NL] tCO₂ per MWh_EP — 1.8 tCO₂/t NH₃ (process + fuel) ÷ 5.167 MWh/t [FE-BAT]
     VariableOM: 4.0           # €/MWh_EP (≈21 €/t) — catalysts, chemicals, variable maintenance; engineering estimate

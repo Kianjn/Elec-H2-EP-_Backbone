@@ -807,27 +807,9 @@ function ADMM_contracts!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_
             hpa_cap_ok = hpa_cap_ok && (rp <= eps_pr) && (rd <= eps_du)
         end
 
-        # Capacity consensus: use relaxed tolerance (see file header).
-        # Effective eps = cap_tol_relax × (ε_cap + ε_rel · scale).
-        # ----------------------------------------------------------------
-        # Per-agent physical-investment capacity convergence: every cap-owning
-        # agent must satisfy its own Boyd test on r_m, s_m. cap_tol_relax still
-        # multiplies the right-hand side in the contracts case because z_cap
-        # is coupled through pool flow only (hedges do not enter z_cap). See DOCUMENTATION.md §6.5.
-        # ----------------------------------------------------------------
-        cap_tol_relax = Float64(get(get(data, "ADMM", Dict()), "cap_tol_relax", CAP_CONSENSUS_TOL_RELAX_DEFAULT))
-        cap_state = ADMM_state["Capacity"]
+        # Installed plant capacity is private (Alessio). Contract C still has
+        # its own consensus (shared_contract_capacity_settled).
         cap_consensus_ok = true
-        for m in cap_agents
-            rp_m = cap_state["Primal"][m][end]
-            rd_m = cap_state["Dual"][m][end]
-            eps_pr_m, eps_du_m = _cap_boyd_eps(ADMM_state, m; relax=cap_tol_relax)
-            if !(isfinite(rp_m) && isfinite(rd_m) &&
-                 rp_m <= eps_pr_m && rd_m <= eps_du_m)
-                cap_consensus_ok = false
-                break
-            end
-        end
         if (within_tol("elec") && within_tol("H2") && within_tol("elec_GC") &&
             within_tol("H2_GC") && within_tol("EP") &&
             contract_ok && cap_ok && hpa_ok && hpa_cap_ok && cap_consensus_ok &&

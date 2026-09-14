@@ -151,82 +151,10 @@ function ADMM_subroutine_contracts!(m::String, data::Dict, results::Dict, ADMM_s
             end
         end
 
-        # ----------------------------------------------------------------
-        # Capacity consensus parameter refresh (per-agent ADMM equality split)
-        #
-        # Physical investment x = z is driven by *physical* pool flow only.
-        # PPA/HPA quantities are financial hedges: they do not occupy a second
-        # slice of plant capacity, so they must not enter z_cap. Adding them
-        # (legacy physical-split logic) makes z ≈ 2x and capacity doubles
-        # every few iterations.
-        # ----------------------------------------------------------------
+        # Installed capacity is a private QP variable (Alessio). ADMM
+        # coordinates energy only: do not penalize (cap − peak(g/AF)).
         if haskey(mod.ext[:parameters], :z_cap)
-            cap_state = ADMM_state["Capacity"]
-            # On the first ADMM iteration, if z was warm-started from SP
-            # capacities, use that target directly to keep x and z aligned.
-            if get(ADMM_state, "n_iter", 0) == 0 && !isempty(cap_state["z"][m])
-                z_raw = cap_state["z"][m][end]
-                z_cap = z_raw isa Real ? Float64(z_raw) :
-                        (isempty(z_raw) ? 0.0 : Float64(maximum(z_raw)))
-                mod.ext[:parameters][:z_cap] = z_cap
-                λ_raw = cap_state["λ"][m][end]
-                mod.ext[:parameters][:λ_cap] = _clip_λ_cap(λ_raw)
-                mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
-            else
-                agent_type = String(get(mod.ext[:parameters], :Type, ""))
-                JY = mod.ext[:sets][:JY]
-                cap_floor = if agent_type == "VRES"
-                    get(mod.ext[:parameters], :Capacity, 0.0)
-                elseif agent_type == "GreenProducer"
-                    get(mod.ext[:parameters], :Capacity_H2_Output, 0.0)
-                elseif agent_type == "GreenOfftaker"
-                    get(mod.ext[:parameters], :Capacity_EP_Out, 0.0)
-                else
-                    0.0
-                end
-                z_cap = cap_floor
-                if agent_type == "VRES"
-                    flow_ref = isempty(get(results["g"], m, [])) ?
-                               mod.ext[:parameters][:g_bar_elec] : results["g"][m][end]
-                    AF = mod.ext[:timeseries][:AF]
-                    for jy in JY
-                        for jh in 1:n_ts, jd in 1:n_rd
-                            af = AF[jh, jd, jy]
-                            if af > 1e-9
-                                z_cap = max(z_cap, max(0.0, flow_ref[jh, jd, jy] / af))
-                            end
-                        end
-                    end
-                elseif agent_type == "GreenProducer"
-                    flow_ref = isempty(get(results["h2"], m, [])) ?
-                               mod.ext[:parameters][:g_bar_H2] : results["h2"][m][end]
-                    for jy in JY
-                        z_cap = max(z_cap, max(0.0, maximum(flow_ref[:, :, jy])))
-                    end
-                elseif agent_type == "GreenOfftaker"
-                    flow_ref = isempty(get(results["EP"], m, [])) ?
-                               mod.ext[:parameters][:g_bar_EP] : results["EP"][m][end]
-                    for jy in JY
-                        z_cap = max(z_cap, max(0.0, maximum(flow_ref[:, :, jy])))
-                    end
-                end
-
-                z_alpha = get(get(data, "ADMM", Dict()), "cap_z_relax", 1.0)
-                z_alpha = min(1.0, max(0.05, z_alpha))
-                if !isempty(cap_state["z"][m])
-                    z_prev = cap_state["z"][m][end]
-                    z_prev_scalar = z_prev isa Real ? Float64(z_prev) :
-                        (isempty(z_prev) ? z_cap : Float64(z_prev[1]))
-                    z_cap = z_alpha * z_cap + (1.0 - z_alpha) * z_prev_scalar
-                end
-                z_cap = max(z_cap, cap_floor)
-                _cap_z_push!(cap_state["z"][m], z_cap)
-
-                mod.ext[:parameters][:z_cap] = z_cap
-                λ_raw = cap_state["λ"][m][end]
-                mod.ext[:parameters][:λ_cap] = _clip_λ_cap(λ_raw)
-                mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
-            end
+            disable_installed_capacity_split!(mod.ext[:parameters])
         end
     end
 

@@ -85,43 +85,7 @@ end
 
 function update_merged_z_cap!(mod::Model, m::String, results::Dict, ADMM_state::Dict, data::Dict)
     haskey(mod.ext[:parameters], :z_cap) || return nothing
-    cap_state = ADMM_state["Capacity"]
-    p = mod.ext[:parameters]
-    n_cap = length(p[:cap_slots])
-    floors = merged_cap_floors(mod)
-
-    if get(ADMM_state, "n_iter", 0) == 0 && !isempty(cap_state["z"][m])
-        z_raw = cap_state["z"][m][end]
-        p[:z_cap] = z_raw isa AbstractVector && length(z_raw) == n_cap ?
-            Float64.(z_raw) : fill(_cap_scalar(z_raw), n_cap)
-        p[:λ_cap] = _merged_λ_vec(cap_state["λ"][m][end], n_cap)
-        p[:ρ_cap] = cap_state["ρ"][m][end]
-        return nothing
-    end
-
-    z_cap = copy(floors)
-    flow_z = get(get(results, "Merged_z_flow", Dict()), m, [])
-    if !isempty(flow_z)
-        z_cap = copy(flow_z[end])
-    elseif haskey(results, "Cap_Merged") && !isempty(get(results["Cap_Merged"], m, []))
-        z_cap = copy(results["Cap_Merged"][m][end])
-    end
-    length(z_cap) != n_cap && (z_cap = copy(floors))
-
-    z_alpha = min(1.0, max(0.05, get(get(data, "ADMM", Dict()), "cap_z_relax", 1.0)))
-    if !isempty(cap_state["z"][m])
-        z_prev = cap_state["z"][m][end]
-        if z_prev isa AbstractVector && length(z_prev) == n_cap
-            z_cap = [z_alpha * z_cap[i] + (1 - z_alpha) * z_prev[i] for i in 1:n_cap]
-        end
-    end
-    for i in 1:n_cap
-        z_cap[i] = max(z_cap[i], floors[i])
-    end
-    _cap_z_push!(cap_state["z"][m], z_cap)
-    p[:z_cap] = z_cap
-    p[:λ_cap] = _merged_λ_vec(cap_state["λ"][m][end], n_cap)
-    p[:ρ_cap] = cap_state["ρ"][m][end]
+    disable_installed_capacity_split!(mod.ext[:parameters])
     return nothing
 end
 

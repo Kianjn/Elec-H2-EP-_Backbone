@@ -702,10 +702,11 @@ function _elec_demand_qty(id::String, atype::AbstractString, vars, vd)
 end
 
 """
-Collect total system cost and consumer €/MWh metrics.
+Collect expected social welfare, resource cost, and consumer €/MWh metrics.
 
-Final energy = electricity consumed by power consumers + any standalone H₂
-demand + ammonia (EP). Hydrogen that is converted to ammonia is excluded.
+Resource cost is CAPEX + fuel/OPEX (no transfers). Final energy = electricity
+consumed by power consumers + any standalone H₂ demand + ammonia (EP).
+Hydrogen that is converted to ammonia is excluded.
 """
 function collect_cost_metrics(mdict::Dict, agents::Dict;
                               planner_state::Union{Nothing, Dict}=nothing,
@@ -752,10 +753,20 @@ function collect_cost_metrics(mdict::Dict, agents::Dict;
         q_p !== nothing && _add_price_qty!(ep_exp, ep_qty, λ_EP, q_p, W, JH, JD, JY)
     end
 
-    cost_y = _system_cost_per_year(mdict, agents, JY; planner_wpy=planner_wpy)
+    rows = collect_agent_welfare_table(mdict, agents, JY; planner_wpy=planner_wpy)
+    cost_y = zeros(n)
+    sw_y = zeros(n)
+    for r in rows
+        for (i, jy) in enumerate(JY)
+            w = r.welfare_per_year[jy]
+            sw_y[i] += w
+            r.is_demand || (cost_y[i] -= w)
+        end
+    end
     total_exp_y = elec_exp .+ h2_exp .+ ep_exp
     total_qty_y = elec_qty .+ h2_qty .+ ep_qty
 
+    e_sw = _prob_expect(sw_y, P)
     e_cost = _prob_expect(cost_y, P)
     ra_cost = _risk_adjust_cost(cost_y, P, gamma, beta)
 
@@ -779,6 +790,8 @@ function collect_cost_metrics(mdict::Dict, agents::Dict;
     return (
         gamma = gamma,
         beta = beta,
+        expected_social_welfare = e_sw,
+        resource_cost = e_cost,
         system_cost_expected = e_cost,
         system_cost_risk_adjusted = ra_cost,
         elec_cwap = elec_cwap,
@@ -799,28 +812,26 @@ function collect_cost_metrics(mdict::Dict, agents::Dict;
     )
 end
 
-function print_cost_metrics_summary!(metrics::NamedTuple; title::String = "Cost metrics")
+function print_cost_metrics_summary!(metrics::NamedTuple; title::String = "Welfare and cost metrics")
     nz(x) = isfinite(x) ? x : 0.0
+    resource_cost = hasproperty(metrics, :resource_cost) ?
+        metrics.resource_cost : metrics.system_cost_expected
+    e_sw = hasproperty(metrics, :expected_social_welfare) ?
+        metrics.expected_social_welfare : NaN
     println()
     println("-" ^ 72)
     println("  ", title)
     println("-" ^ 72)
-    @printf("  Total system cost:                      %10.3f bn EUR/year\n",
-            metrics.system_cost_expected / 1e9)
-    if abs(metrics.gamma - 1.0) > 1e-12
-        @printf("    risk-adjusted (γ·E + (1−γ)·CVaR):     %10.3f bn EUR/year\n",
-                metrics.system_cost_risk_adjusted / 1e9)
-    end
+    @printf("  Expected social welfare:                %10.3f bn EUR\n", e_sw / 1e9)
+    @printf("  Total resource cost:                    %10.3f bn EUR/year\n",
+            resource_cost / 1e9)
+    println("    (CAPEX + fuel/OPEX; no market transfers. Equals −E[ex-demand welfare].)")
     @printf("  Consumer CWAP (electricity):            %10.2f €/MWh\n",
             nz(metrics.elec_cwap))
-    if abs(metrics.gamma - 1.0) > 1e-12
-        @printf("    risk-adjusted:                        %10.2f €/MWh\n",
-                nz(metrics.elec_ra_cwap))
-    end
-    @printf("  Total RA consumer cost (final energy):  %10.2f €/MWh\n",
-            nz(metrics.blended_ra_cwap))
+    @printf("  Expected consumer cost (final energy):  %10.2f €/MWh\n",
+            nz(metrics.blended_cwap))
     @printf("    expenditure / energy:                 %10.3f bn EUR  /  %.2f TWh\n",
-            metrics.total_exp_risk_adjusted / 1e9, metrics.total_qty / 1e6)
+            metrics.total_exp / 1e9, metrics.total_qty / 1e6)
     @printf("    electricity                           %10.2f €/MWh   (%.2f TWh)\n",
             nz(metrics.elec_cwap), metrics.elec_qty / 1e6)
     @printf("    ammonia (EP)                          %10.2f €/MWh   (%.2f TWh)\n",
@@ -829,5 +840,34 @@ function print_cost_metrics_summary!(metrics::NamedTuple; title::String = "Cost 
             nz(metrics.h2_cwap), metrics.h2_qty / 1e6)
     println("    (H₂ converted to ammonia is excluded from final energy.)")
     println("    Hours weighted by representative-day weights W and scenario probabilities.")
+    println("    Consumer €/MWh is expected expenditure / expected MWh, not a CVaR mix.")
+    return nothing
+end
+
+function write_cost_metrics_csv(metrics::NamedTuple, results_dir::String)
+    resource_cost = hasproperty(metrics, :resource_cost) ?
+        metrics.resource_cost : metrics.system_cost_expected
+    e_sw = hasproperty(metrics, :expected_social_welfare) ?
+        metrics.expected_social_welfare : NaN
+    CSV.write(joinpath(results_dir, "Cost_Metrics.csv"), DataFrame(
+        Metric = [
+            "gamma", "beta", "expected_social_welfare", "resource_cost",
+            "elec_cwap", "ep_cwap", "h2_cwap", "blended_cwap",
+            "elec_exp", "ep_exp", "h2_exp", "total_exp",
+            "elec_qty", "ep_qty", "h2_qty", "total_qty",
+        ],
+        Value = [
+            metrics.gamma, metrics.beta, e_sw, resource_cost,
+            metrics.elec_cwap, metrics.ep_cwap, metrics.h2_cwap, metrics.blended_cwap,
+            metrics.elec_exp, metrics.ep_exp, metrics.h2_exp, metrics.total_exp,
+            metrics.elec_qty, metrics.ep_qty, metrics.h2_qty, metrics.total_qty,
+        ],
+        Unit = [
+            "-", "-", "EUR", "EUR/year",
+            "EUR/MWh", "EUR/MWh", "EUR/MWh", "EUR/MWh",
+            "EUR", "EUR", "EUR", "EUR",
+            "MWh", "MWh", "MWh", "MWh",
+        ],
+    ))
     return nothing
 end

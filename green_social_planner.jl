@@ -157,7 +157,7 @@ for m in agents[:elec_GC_demand]
     build_elec_GC_demand_agent!(m, mdict[m], elec_GC_market)
 end
 
-# ── SP primal + capacity warm-start (merged agent + remaining VRES) ─────────
+# ── SP primal + capacity warm-start (risk-neutral only; Alessio otherwise) ─
 
 n_cap_warmstart = 0
 sp_cap_file = joinpath(home_dir, "social_planner_results", "SP_Capacities.csv")
@@ -165,8 +165,9 @@ sp_primal_file = joinpath(home_dir, "social_planner_results", "SP_Primal_Quantit
 n_ts = run_general["nTimesteps"]
 n_rd = run_general["nReprDays"]
 n_yr = run_general["nYears"]
+rn_admm = admm_is_risk_neutral(data)
 
-if isfile(sp_primal_file)
+if rn_admm && isfile(sp_primal_file)
     try
         sp_primal_df = CSV.read(sp_primal_file, DataFrame)
         merged_operational_warmstart!(mdict[merged_id], sp_primal_df, member_ids, n_ts, n_rd, n_yr)
@@ -175,7 +176,7 @@ if isfile(sp_primal_file)
     end
 end
 
-if isfile(sp_cap_file)
+if rn_admm && isfile(sp_cap_file)
     try
         sp_cap_df = CSV.read(sp_cap_file, DataFrame)
         merged_cap_warmstart!(mdict[merged_id], sp_cap_df, member_ids)
@@ -207,8 +208,10 @@ TO = TimerOutput()
 sp_prices_file = joinpath(home_dir, "social_planner_results", "Market_Prices.csv")
 define_results!(merge(run_general, data["ADMM"]), results, ADMM, agents,
     elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market;
-    sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file,
-    sp_cap_file=sp_cap_file, use_primal_warmstart=true)
+    sp_prices_file=sp_prices_file,
+    sp_primal_file=rn_admm ? sp_primal_file : "",
+    sp_cap_file=rn_admm ? sp_cap_file : "",
+    use_primal_warmstart=rn_admm)
 
 results["Cap_Merged"] = get!(results, "Cap_Merged", Dict(m => [] for m in agents[:merged]))
 results["Inv_Merged"] = get!(results, "Inv_Merged", Dict(m => [] for m in agents[:merged]))
@@ -236,6 +239,6 @@ n_cap_warmstart > 0 && push!(parts, "capacity seeds for $n_cap_warmstart agents"
 ADMM!(results, ADMM, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market, mdict, agents, data_run, TO)
 ADMM["walltime"] = TimerOutputs.tottime(TO) * 10^-9 / 60
 
-save_results(mdict, elec_market, H2_market, elec_GC_market, H2_GC_market, ADMM, results, agents;
+Base.invokelatest(save_results, mdict, elec_market, H2_market, elec_GC_market, H2_GC_market, ADMM, results, agents;
     results_dir=results_dir, case_label="green_social_planner")
 YAML.write_file(joinpath(results_dir, "TimerOutput.yaml"), TO)

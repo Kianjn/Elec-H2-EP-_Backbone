@@ -1,0 +1,53 @@
+# run_summary.txt
+# script:  c:\Users\kjafarinejad\.vscode\extensions\julialang.language-julia-1.219.2\scripts\terminalserver\terminalserver.jl
+# written: 2026-09-13T15:14:53.025
+# results: c:\Users\kjafarinejad\Models\Project01\Now\market_exposure_results
+
+
+------------------------------------------------------------------------
+  Welfare and cost metrics
+------------------------------------------------------------------------
+  Expected social welfare:                    39.909 bn EUR
+  Total resource cost:                        15.141 bn EUR/year
+    (CAPEX + fuel/OPEX; no market transfers. Equals −E[ex-demand welfare].)
+  Consumer CWAP (electricity):                112.80 €/MWh
+  Expected consumer cost (final energy):      128.45 €/MWh
+    expenditure / energy:                     16.528 bn EUR  /  128.66 TWh
+    electricity                               112.80 €/MWh   (113.13 TWh)
+    ammonia (EP)                              242.47 €/MWh   (15.53 TWh)
+    hydrogen (final only)                       0.00 €/MWh   (0.00 TWh)
+    (H₂ converted to ammonia is excluded from final energy.)
+    Hours weighted by representative-day weights W and scenario probabilities.
+    Consumer €/MWh is expected expenditure / expected MWh, not a CVaR mix.
+
+------------------------------------------------------------------------
+  ADMM run summary
+------------------------------------------------------------------------
+  Status:     Converged
+  Iterations: 3782
+
+  Market                Primal        Dual    Mean price
+  ----------------  ----------  ----------  ------------
+  Electricity        1.059e+01   1.038e+01      113.1579
+  Hydrogen           1.282e+00   8.766e-01       76.6997
+  Electricity_GC     9.770e+00   9.583e+00       29.7629
+  H2_GC              2.006e+00   1.674e+00      173.5868
+  End_Product        1.869e+00   1.064e+00      242.7828
+  Capacity (agg.)    0.000e+00         Inf           n/a
+
+  Agent                             Role                Unit    Final cap.  New investment
+  --------------------------------  --------------  --------  ------------  --------------
+  Gen_VRES_Solar                    VRES                  MW      25881.00          0.00
+  Gen_VRES_Wind                     VRES                  MW      11782.00          0.00
+  Prod_H2_Green                     Electrolyzer       MW_H2        998.97        465.64
+  Offtaker_Green                    EP plant           MW_EP        749.23        349.23
+
+  Agent                       Primal        Dual         ρ
+  ----------------------  ----------  ----------  --------
+  Gen_VRES_Solar           0.000e+00   0.000e+00     0.100
+  Gen_VRES_Wind            0.000e+00   0.000e+00     0.100
+  Prod_H2_Green            0.000e+00   0.000e+00     0.100
+  Offtaker_Green           0.000e+00   0.000e+00     0.100
+  Slowest capacity agent: Gen_VRES_Solar (max residual = 0.000e+00)
+
+  Results saved to: c:\Users\kjafarinejad\Models\Project01\Now\market_exposure_results

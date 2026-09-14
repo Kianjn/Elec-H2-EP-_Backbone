@@ -87,7 +87,7 @@ end
 #
 # Scenario-adjusted commodity price (EUR/MWh_th) and combustion emission factor
 # (tCO2/MWh_th) for one fuel. Only gas carries the scenario multiplier: the
-# +10%/+20% scenarios are a gas-market shock, so coal and biomass are unchanged.
+# 2×/3× scenarios are a gas-market shock, so coal and biomass are unchanged.
 
 function fuel_price_ef(fuel::AbstractDict, name, gas_mult::Float64)
     f = lowercase(String(name))

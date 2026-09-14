@@ -8,7 +8,7 @@
 3. [Agents](#3-agents)
 4. [Equilibrium Theory](#4-equilibrium-theory-mcp-structure-competition-and-objectives) — MCP, competition, objectives, risk institutions; [CVaR, γ, β](#410-risk-aversion-cvar-γ-and-β)
 5. [Mathematical Formulation](#5-mathematical-formulation)
-6. [ADMM Algorithm](#6-admm-algorithm) — [why ADMM](#60-why-admm-alternatives-and-literature), [Boyd mapping](#610-mapping-to-boyd-et-al-2011), [ρ controller](#63-adaptive-penalty-ρ), [warm-start](#66-warm-start-from-social-planner)
+6. [ADMM Algorithm](#6-admm-algorithm) — [why ADMM](#60-why-admm-alternatives-and-literature), [private capacity](#64-installed-capacity-private-qp-variable), [Boyd mapping](#610-mapping-to-boyd-et-al-2011), [ρ controller](#63-adaptive-penalty-ρ), [warm-start](#66-warm-start-from-social-planner)
 7. [Social Planner Benchmark](#7-social-planner-benchmark) — incl. [IPOPT tolerance (`ipopt_tol`)](#ipopt-settings-and-convergence-tolerance-ipopt_tol)
 8. [Data and Indexing](#8-data-and-indexing) — incl. [scenario mapping](#83-scenario-labels-jy-mapping)
 9. [Configuration Reference (data.yaml)](#9-configuration-reference-datayaml) — incl. [NL Calibration and Data Sources](#96-nl-calibration-and-data-sources), [Weather Scenarios](#97-weather-scenarios-representative-days-and-availability-factors), [Gas Prices and the 15-Scenario Grid](#98-gas-prices-and-the-15-scenario-grid)
@@ -826,7 +826,7 @@ This project follows the **two-step risk calibration** used in Hoschle et al. (2
 - $\beta=0.6$ ⇒ worst **40%** (6 of 15).
 - $\beta=0.8$ ⇒ worst **20%** (3 of 15) — narrow, extreme tail, strongest CVaR penalty in the standard sweep.
 
-**Lower bound on $\beta$'s resolution.** The tail must contain at least one scenario: $(1-\beta) \ge 1/n_{\mathrm{scen}}$. With 15 scenarios that caps $\beta$ at **0.933**; anything finer (including the `data.yaml` default of `0.95`) collapses CVaR onto the single worst scenario and makes $\beta$ inert. `print_risk_metrics_summary!` detects this and prints an explicit warning with the correct $\beta$ values.
+**Lower bound on $\beta$'s resolution.** The tail must contain at least one scenario: $(1-\beta) \ge 1/n_{\mathrm{scen}}$. With 15 scenarios that caps $\beta$ at **0.933**; anything finer (e.g. `0.95`) collapses CVaR onto the single worst scenario and makes $\beta$ inert. `print_risk_metrics_summary!` still contains that warning if called; the default console print is `print_cost_metrics_summary!`.
 
 **$\gamma$ and $\beta$ are complementary, not interchangeable:**
 
@@ -835,11 +835,11 @@ This project follows the **two-step risk calibration** used in Hoschle et al. (2
 
 **Two $\beta$ conventions (Hoschle vs this codebase).** Hoschle et al. (2018) and this project both use a $\gamma$–CVaR objective of the form $\gamma\,\mathbb{E}[\cdot] + (1-\gamma)\,\mathrm{CVaR}$, but they assign **risk neutrality** and **tail depth** differently. Hoschle fixes $\gamma=0.5$ for risk-averse case studies and sweeps **their** $\beta$ from $1$ (risk-neutral on their axis) down to $0.1$ (very risk-averse); **lower Hoschle $\beta$ = stronger aversion**. The CVaR constraints in code follow **Rockafellar–Uryasev**: $\beta$ is a **confidence level**, $\mathrm{CVaR}_{\beta}$ averages the worst $(1-\beta)$ share of scenarios, and **higher $\beta$ = narrower, more extreme tail = stronger aversion** at fixed $\gamma<1$. This codebase sets **$\gamma=1$** for the risk-neutral benchmark (the $(1-\gamma)\,\mathrm{CVaR}$ term vanishes) rather than Hoschle’s $\beta=1$, then uses **$\gamma=0.5$** with Rockafellar $\beta\in\lbrace 0.2,0.4,0.6,0.8\rbrace$ for the sensitivity sweep. The **economic direction** is the same (more conservative outcomes as aversion rises), but the **parameter labels are not interchangeable**: Hoschle $\beta=0.2$ (high aversion) is not the same run as Rockafellar $\beta=0.2$ (broad 80% tail, mildest in our sweep).
 
-In `data.yaml`, both SP and ME read **`ADMM.gamma`** and **`ADMM.beta`**. Defaults: `gamma: 1.0`, `beta: 0.95`. The shipped $\beta$ is a **placeholder that is inactive at $\gamma=1$** and must be lowered to at most $0.933$ before any risk-averse run — see the resolution bound above.
+In `data.yaml`, both SP and ME read **`ADMM.gamma`** and **`ADMM.beta`**. Shipped values: `gamma: 0.5`, `beta` equal to the current sweep point (presently `0.4`). The standard RA sweep is $\beta\in\lbrace 0.2,0.4,0.6,0.8\rbrace$ at $\gamma=0.5$. Set `gamma: 1` for the risk-neutral benchmark (any `beta`; CVaR drops out).
 
 **Per-agent `gamma`/`beta` in agent blocks do not currently override.** Entry points build each agent's data dict as `merge(General, agent_block, ADMM)`, so the ADMM block wins whenever both define the same key. The duplicate keys on VRES / electrolyzer / green offtaker are therefore inert while `ADMM.gamma` / `ADMM.beta` are set — change risk aversion in the `ADMM` block (or remove those keys from it) if you want per-agent values to take effect.
 
-**Multi-scenario requirement:** with one scenario, $\mathrm{CVaR}=\ell$ always — changing $\gamma$ has **no effect** on the optimum if `loss_total` is specified correctly (§5.1). Risk aversion is meaningful once the `Scenarios` grid has more than one entry; the default grid has **15** (5 weather years × 3 gas levels, §9.8). Note also that $\beta$ must be coarse enough for the grid: with 15 equiprobable scenarios, `beta = 0.95` asks for a tail narrower than a single scenario, so use $\beta = 1 - k/15$ for a tail of $k$ scenarios (e.g. `0.8` for the worst 3).
+**Multi-scenario requirement:** with one scenario, $\mathrm{CVaR}=\ell$ always — changing $\gamma$ has **no effect** on the optimum if `loss_total` is specified correctly (§5.1). Risk aversion is meaningful once the `Scenarios` grid has more than one entry; the default grid has **15** (5 weather years × 3 gas levels, §9.8). Note also that $\beta$ must be coarse enough for the grid: with 15 equiprobable scenarios, $\beta = 0.95$ asks for a tail narrower than a single scenario, so use $\beta = 1 - k/15$ for a tail of $k$ scenarios (e.g. `0.8` for the worst 3).
 
 #### 4.10.5 Complete vs incomplete risk trading (reminder)
 
@@ -854,30 +854,33 @@ In `data.yaml`, both SP and ME read **`ADMM.gamma`** and **`ADMM.beta`**. Defaul
 
 Risk aversion reshapes **capacity**, **dispatch**, and **prices** because bad scenarios get **more weight** in the optimiser (directly via private CVaR in ME, via social CVaR in SP). **Within** $\gamma=0.5$ runs, **increasing $\beta$** strengthens this effect: CVaR focuses on a **narrower, more extreme** tail, so capacity and dispatch shift further toward hedging catastrophic years. (Hoschle et al. Fig. 6 shows monotonic capacity shifts as **their** $\beta$ decreases from $1$ toward $0$ at fixed $\gamma=0.5$ — analogous direction to **increasing** Rockafellar $\beta$ here.)
 
-**VRES (solar/wind):**
-- **Low-renewable scenarios** ($y$ with weak SOLAR/WIND) imply low output per MW installed → high $\ell_{i,y}$ for fixed `cap_VRES`.
-- Higher effective penalty on tail → often **lower optimal `cap_VRES`** or less aggressive investment than at $\gamma=1$, and dispatch that hedges tail revenue risk.
+Compare **within** each entry point as $\beta$ rises at fixed $\gamma=0.5$. Do not expect ME to copy SP.
 
-**Electrolyzer:**
-- Bad VRES years → high electricity prices and/or low own output → electrolyzer margins worsen in tail.
-- Risk-averse electrolyzer → often **smaller `cap_H2`**, less exposure to “green H₂ bet” across weather draws; may shift operational patterns that reduce tail procurement cost.
+**Social planner (complete risk trading):**
+- Social CVaR is on **aggregate welfare**. The costly years are high-gas (multipliers $1\times/2\times/3\times$) more than low-wind hours.
+- Higher $\beta$ ⇒ **more** green investment (wind, electrolyzer, Haber–Bosch) as a **fuel-price hedge**. $\mathbb{E}[\mathrm{SW}]$ falls and **resource cost** (CAPEX + fuel/OPEX) rises.
+- The step **RN ($\gamma=1$) → $\beta=0.2$** is the large one: CVaR enters at weight $1-\gamma=0.5$ on the worst **12 of 15** years (the three cheapest-gas years are dropped). Later $\beta$ only **thins a nested tail** (9 → 6 → 3 years). The three worst years are always the high-gas / bad-weather cells, so H₂/EP often jump once at $0.2$ and then sit; extra wind keeps accumulating.
 
-**Green offtaker:**
-- Tail scenarios with expensive H₂/GC or weak EP margins → **lower `cap_EP`** or tighter coupling of H₂ intake to mandate at minimum cost in bad years.
+**Market exposure (private CVaR):**
+- Each firm CVaRs **marked-to-market P&L**. For VRES the tail is **bad weather / low revenue**, not the social high-gas years.
+- Higher $\beta$ ⇒ **less** new wind (at $\beta=0.8$ typically **zero** extra MW; existing capacity is the floor). $\mathbb{E}[\mathrm{SW}]$ falls; consumer €/MWh rises. Resource cost is not required to jump on the first RA step (cutting VRES CAPEX can offset extra thermal fuel).
+- Electrolyzer / green offtaker move much less than wind: their private tail is not the same weather object.
 
-**System-level (SP vs ME at $\gamma<1$):**
+**Partial green planners (G-SP, GH2-SP):** same ADMM loop as ME (§6.4, §6.6). Coalition CVaR is still on **joint profit at residual $\lambda$**, not on social welfare. Compare them **to their own RN**, not to full SP.
+
+**System-level:**
 - **Private** CVaRs do not internalise **social** tail risk — ME can have **worse ex-post social CVaR** than SP (§7.6) even when each agent “hedges” privately.
 - **Prices** $\lambda$ shift: agents' FOCs include CVaR gradients, so equilibrium prices differ from $\gamma=1$ and from SP prices.
-- **Consumers/conventional/grey** agents have no CVaR in the model — risk enters only through **market prices** and quantities set by risk-averse partners.
+- **Consumers/conventional/grey** agents have no CVaR — risk enters only through **market prices** and quantities set by risk-averse partners.
 
 **Why investment moves more than hourly dispatch:** `cap` is committed for **all** scenarios; CVaR on `loss_total` penalises “large cap + bad weather” combinations. Dispatch can still vary by $y$ within each scenario; capacity is the main **irreversible** risk lever.
 
 #### 4.10.7 Practical parameter workflow (Hoschle-style)
 
-1. **Risk-neutral benchmark:** `gamma = 1` (any `beta`; inactive). Run SP then ME — verify convergence and quantity/price match (§5.4.2). Risk parameters only matter when $\gamma<1$.
-2. **Risk-averse base case:** `gamma = 0.5` in the `ADMM` block (applies to SP and ME simultaneously), with `beta = 0.8` so the tail spans the worst 3 of the 15 scenarios.
-3. **Risk-aversion sweep:** at fixed `gamma = 0.5`, run separate cases with `beta = 0.2, 0.4, 0.6, 0.8` — **higher `beta` = more risk-averse** (narrower tail). With 15 scenarios these land exactly on whole scenario counts (worst 12, 9, 6, and 3 respectively, since $\beta = 1 - k/15$), so every point in the sweep is well resolved. Compare capacities, prices, and `Risk_Metrics.csv` across the sweep.
-4. **Institution comparison:** for each $(\gamma,\beta)$ pair, compare SP (complete risk trading) vs ME (incomplete); do **not** expect equal quantities/prices at $\gamma<1$ (§4.8, §7.6).
+1. **Risk-neutral benchmark:** `gamma = 1` (any `beta`; inactive). Run SP then ME — verify convergence and quantity/price match (§5.4.2). Full primal/cap warm-start is used only here (§6.6).
+2. **Risk-averse base case:** `gamma = 0.5` in the `ADMM` block (applies to SP and ME simultaneously). Shipped `beta` is the current sweep point (e.g. `0.4` = worst 9 of 15).
+3. **Risk-aversion sweep:** at fixed `gamma = 0.5`, run separate cases with `beta = 0.2, 0.4, 0.6, 0.8` — **higher `beta` = more risk-averse** (narrower tail). With 15 scenarios these land exactly on whole scenario counts (worst 12, 9, 6, and 3 respectively). Compare **within** each entry point: SP invests **more** green; ME invests **less** wind (§4.10.6). Headline metrics: $\mathbb{E}[\mathrm{SW}]$, resource cost, `Cost_Metrics.csv`.
+4. **Institution comparison:** for each $(\gamma,\beta)$ pair, compare SP (complete risk trading) vs ME (incomplete); do **not** expect equal quantities/prices at $\gamma<1$ (§4.8, §7.6). Do **not** seed RA ADMM primal/cap from the matching-$\beta$ SP.
 
 #### 4.10.8 Auxiliary variables (reading outputs)
 
@@ -907,17 +910,17 @@ Between **full decentralisation** (ME: private CVaR per firm) and the **full soc
 
 **What does not change:** five external spot markets still clear via ADMM; prices are equilibrium $\lambda$ for the partial-planner institution, not SP duals.
 
-**Implementation:** ME-style entry scripts (`green_h2_social_planner.jl`, `green_social_planner.jl`) with merged agent modules (`define_merged_agent.jl`, `build_merged_agent.jl`, `solve_merged_agent.jl`, `merged_agent_setup.jl`); one branch in `ADMM_subroutine.jl` for `agents[:merged]`. `PartialPlanners` block in `data.yaml` (§9.2.2). Base `market_exposure.jl` / `social_planner.jl` untouched.
+**Implementation:** ME-style entry scripts (`green_h2_social_planner.jl`, `green_social_planner.jl`) with merged agent modules (`define_merged_agent.jl`, `build_merged_agent.jl`, `solve_merged_agent.jl`, `merged_agent_setup.jl`); one branch in `ADMM_subroutine.jl` for `agents[:merged]`. Same ADMM machinery as ME: private `cap`, RA **λ-only** warm-start (§6.4, §6.6). `PartialPlanners` block in `data.yaml` (§9.2.2). Base `market_exposure.jl` / `social_planner.jl` untouched.
 
 **Outputs:** `green_h2_social_planner_results/` or `green_social_planner_results/` — same CSV layout as ME (`save_results.jl`).
 
 **Comparison ladder (same $\gamma$, $\beta$):**
 
 1. **ME** — incomplete private CVaR (worst tail allocation among decentralised cases).
-2. **GH2-SP / G-SP** — complete sharing **inside** the green coalition only.
+2. **GH2-SP / G-SP** — complete sharing **inside** the green coalition only. Coalition CVaR is **marked-to-market vs residual $\lambda$**, not social CVaR on aggregate welfare.
 3. **SP** — complete sharing on **aggregate social welfare** (best tail management centrally).
 
-Do **not** expect GH2-SP and G-SP to match each other or SP at $\gamma<1$; compare each to SP on ex-post social tail metrics (§7.6).
+Do **not** expect GH2-SP and G-SP to match each other or SP at $\gamma<1$; compare each **to its own RN**, then to SP on ex-post social tail metrics if needed (§7.6).
 
 ---
 
@@ -931,9 +934,7 @@ $$
 \begin{aligned}
 \min \quad & \gamma_i \Bigl(F_i^{\mathrm{cap}}\cdot\mathrm{cap}_i + \sum_y P_y\,\ell^{\mathrm{op}}_{i,y}\Bigr)
            + (1-\gamma_i)\,\mathrm{CVaR}_{i}(\ell_i) \\
-& \quad + \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\bigl(g_i^k(h,d,y)-\bar{g}_i^k(h,d,y)\bigr)^2 \\
-& \quad + \lambda_i^{\mathrm{cap}}\,(\mathrm{cap}_i - z_i^{\mathrm{cap}})
-           + \frac{\rho_i^{\mathrm{cap}}}{2}\,(\mathrm{cap}_i - z_i^{\mathrm{cap}})^2
+& \quad + \sum_k \frac{\rho_k}{2}\sum_{h,d,y} W_{d,y}\bigl(g_i^k(h,d,y)-\bar{g}_i^k(h,d,y)\bigr)^2
 \end{aligned}
 $$
 
@@ -953,15 +954,15 @@ and the total loss that enters CVaR is $\ell_{i,y} = F_i^{\mathrm{cap}}\cdot\mat
 - `W[d,y]` scales representative days to a full year.
 - `γ_i` is a **per-agent risk weight** (`γ=1` → risk-neutral, `γ<1` → risk-averse). Non-trivial CVaR is used only for VRES, electrolyzer, and green offtaker.
 - $\mathrm{CVaR}_{i}(\ell_i)$ is an agent-specific Conditional Value-at-Risk on yearly loss scenarios, with auxiliary variables $\alpha_i$, $u_i(y)$ over $y \in JY$, at confidence level $\beta$.
-- $(\lambda_i^{\mathrm{cap}},\,z_i^{\mathrm{cap}},\,\rho_i^{\mathrm{cap}})$ are the **per-agent capacity equality-split** terms (§6.4); agents without endogenous capacity omit them. Agents without CVaR (conventional, consumer, grey offtaker, importer, GC demand) also drop the $\gamma$/CVaR wrapping and minimise plain expected cost–revenue + ADMM penalties.
+- Installed `cap` is a **private QP variable** with `g ≤ AF·cap` (or peak output ≤ cap for H₂/EP). ADMM does **not** add a $(\mathrm{cap}-z)$ penalty (§6.4). Agents without CVaR (conventional, consumer, grey offtaker, importer, GC demand) drop the $\gamma$/CVaR wrapping and minimise plain expected cost–revenue + energy ADMM penalties.
 
 Three points where this form is easy to get wrong:
 
 1. **CAPEX sits inside the $\gamma$-weighted term**, not as a separate addend outside it. At $\gamma=1$ the agent still pays the full annuity; at $\gamma<1$ CAPEX is also inside every scenario's loss that feeds CVaR.
 2. **Scenario probabilities $P_y$ weight the expected operational loss.** Writing a bare $\sum_{h,d,y} W_{d,y}(\cdots)$ without $P_y$ would overweight years when $nYears>1$.
-3. **Capacity ADMM terms are part of the agent objective** every iteration, in addition to the market-quantity penalties. They vanish at consensus exactly as the market ones do.
+3. **Energy ADMM penalties** $(\rho/2)\|g-\bar g\|^2$ are **algorithmic** only (§4.2, §6); at flow-market consensus they vanish. Capacity is **not** an ADMM consensus constraint.
 
-The ADMM penalties (market and capacity) are **algorithmic** only (§4.2, §6); at convergence they vanish and the solution is the **risk-adjusted competitive MCP** of §4.
+The solution at flow-market convergence is the **risk-adjusted competitive MCP** of §4.
 
 #### CVaR formulation (per agent)
 
@@ -1190,7 +1191,7 @@ Economic case names, literature mapping (d'Aertrycke et al.), and price interpre
 
 ADMM is the **numerical engine** for `market_exposure.jl` and `me_pap.jl`, `me_top.jl`, or `me_sop.jl`. It does **not** define the economic equilibrium (that is the competitive MCP in §4); it **finds** decentralised prices and quantities that satisfy that equilibrium’s KKT conditions. This section is the main reference for **why** ADMM is used, **how** it maps to Boyd et al. (2011), and **what** each residual, penalty, and warm-start component does in code.
 
-**Implementation map:** `Source/ADMM.jl` (main loop), `ADMM_subroutine.jl` (per-agent step), `update_rho.jl` / `update_rho_contracts.jl` (ρ adaptation), `define_results.jl` (warm-start from SP), `ADMM_contracts.jl` (contracts extension).
+**Implementation map:** `Source/ADMM.jl` (main loop), `ADMM_subroutine.jl` (per-agent step), `cap_admm_helpers.jl` (private-capacity disable, failed-QP retry), `update_rho.jl` / `update_rho_contracts.jl` (ρ adaptation), `define_results.jl` (warm-start from SP), `ADMM_contracts.jl` (contracts extension).
 
 ### 6.0 Why ADMM, alternatives, and literature
 
@@ -1205,7 +1206,7 @@ Key structural features that drive the solver choice:
 | **Seven agent types**, many instances | Natural **agent decomposition** — each subproblem is a medium QP/QCP |
 | **Five coupled spot markets** (+ contracts) | Multiple consensus constraints; prices must clear jointly |
 | **3D quantities** $(h,d,y)$ | Large tensors; residuals are **L2 norms** over all slots |
-| **Endogenous capacity** | Extra equality-split ADMM block per capacity owner (§6.4) |
+| **Endogenous capacity** | Private QP variable with $g\le\mathrm{AF}\cdot\mathrm{cap}$ (or peak H₂/EP); **not** an ADMM consensus block (§6.4) |
 | **CVaR agents** | Loss expressions depend on current $\lambda$ → constraints rebuilt each iteration |
 
 #### 6.0.2 Alternative approaches
@@ -1228,9 +1229,9 @@ The **social planner** (`social_planner.jl`) remains indispensable as a **benchm
 
 3. **Prices are dual variables.** Commodity prices $\lambda_k$ are updated by **dual ascent** on market imbalances — the standard ADMM interpretation of Lagrange multipliers for balance constraints (§6.10).
 
-4. **Diagnostics.** Primal/dual residuals and `ADMM_Convergence.csv` give **market-by-market** convergence evidence — essential when five markets and capacity splits can converge at different rates.
+4. **Diagnostics.** Primal/dual residuals and `ADMM_Convergence.csv` give **market-by-market** convergence evidence — the five flow markets can clear at different rates.
 
-5. **Warm-start from SP.** The centralised solution provides $\lambda$, quantities, and capacities for iteration 0 (§6.6), cutting iterations from thousands to hundreds in typical NL runs.
+5. **Warm-start from SP.** At $\gamma=1$, SP $\lambda$, quantities, and capacities seed iteration 0 and ME matches SP in a few iterations. At $\gamma<1$, **only $\lambda$** is loaded — full primal/cap seeds would bias ME toward the planner hedge (§6.6). RA ME typically takes **thousands** of iterations from a cold $\bar g$.
 
 #### 6.0.4 ADMM is the solver, not the economics
 
@@ -1238,13 +1239,13 @@ ADMM iterations, consensus targets $\bar{g}$, and penalties $\rho$ are **algorit
 
 ### 6.1 Iteration Structure
 
-`ADMM.jl` (and `ADMM_contracts.jl` for the contract cases) repeats the steps below until every market **and** every capacity split is within tolerance (§6.5), or `max_iter` is reached. The step numbers are the reference used throughout §6; the deeper details of each step live in the subsections it points to, so nothing is re-derived twice.
+`ADMM.jl` (and `ADMM_contracts.jl` for the contract cases) repeats the steps below until **all five flow markets** are within Boyd tolerance (§6.5), or `max_iter` is reached. Installed capacity is **not** part of the stop. The step numbers are the reference used throughout §6; the deeper details of each step live in the subsections it points to, so nothing is re-derived twice.
 
-1. **Agent solves (x-update).** For each agent, `ADMM_subroutine!` refreshes the ADMM parameters on the agent's JuMP model — consensus target $\bar g$ (§6.2), price $\lambda$, penalty $\rho$, and the capacity-split terms (§6.4) — then rebuilds the objective and solves the convex subproblem with Gurobi. CVaR agents (VRES, electrolyzer, green offtaker) first rebuild their loss expressions and CVaR constraints against the current $\lambda$. The solved net positions are recorded.
+1. **Agent solves (x-update).** For each agent, `ADMM_subroutine!` refreshes the energy ADMM parameters on the agent's JuMP model — consensus target $\bar g$ (§6.2), price $\lambda$, penalty $\rho$ — zeros the unused capacity-split terms (§6.4), then rebuilds the objective and solves the convex subproblem with Gurobi. CVaR agents (VRES, electrolyzer, green offtaker) first rebuild their loss expressions and CVaR constraints against the current $\lambda$. If Gurobi returns no primal, `ensure_agent_solution!` retries then reuses the previous iterate. The solved net positions are recorded.
 
 2. **Market imbalances.** For each market, sum all participants' net positions; for EP subtract fixed demand $D_{\mathrm{EP}}$. With supply positive and demand negative (§6.8), a positive imbalance means excess supply and a negative one excess demand.
 
-3. **Residuals.** For each market compute the **primal residual** — the L2 norm of the imbalance, i.e. distance from clearing — and the **dual residual** — the L2 norm of $\rho\times$(change in each agent's consensus deviation), i.e. how much positions are still moving. Each capacity-owning agent uses the analogous per-agent residuals (§6.4.2). Formal definitions and the stopping test are in §6.5. On iteration 1 the dual residual is $\infty$ (no previous iterate), so at least two iterations always run.
+3. **Residuals.** For each market compute the **primal residual** — the L2 norm of the imbalance, i.e. distance from clearing — and the **dual residual** — the L2 norm of $\rho\times$(change in each agent's consensus deviation), i.e. how much positions are still moving. Formal definitions and the stopping test are in §6.5. On iteration 1 the **flow-market** dual residual is $\infty$ (no previous iterate), so at least two iterations always run. Capacity duals are logged but unused.
 
 4. **Price update (dual ascent).** Each spot-market price moves against its imbalance,
 $$
@@ -1252,11 +1253,11 @@ $$
 $$
 so excess supply lowers the price and excess demand raises it. The factor $\eta_k \in [0.25, 1]$ is **scale-aware damping**: it is $1$ while $\max(r^{\mathrm{pri}}, r^{\mathrm{dual}}) \ge 1.5\times\max(\varepsilon_{\mathrm{pri}},\varepsilon_{\mathrm{dual}})$ (comfortably above the market's Boyd tolerance, §6.5) and shrinks smoothly toward $0.25$ as that ratio falls below 1.5, which stops thin markets from oscillating near the stopping region and keeps step sizes horizon-robust. It is further multiplied by a per-market factor `η_scale` adapted online (§6.9). The H₂-GC price is then projected onto $\lambda_{H2\_GC}\ge 0$ (§6.9).
 
-   Capacity multipliers are updated **earlier in the same iteration** — after primal residuals are computed and before dual residuals — via the analogous ascent $\lambda^{\mathrm{cap}}_m \leftarrow \lambda^{\mathrm{cap}}_m + \rho_m\,(x_m - z_m)$ (§6.4). They are **not** updated in the same code block as the spot-market $\lambda$.
+   Capacity duals may still be written into `ADMM_state["Capacity"]` in the same iteration. They are **not** applied to the next agent QP (`disable_installed_capacity_split!` zeros them before the solve) and they are **not** part of the stop.
 
-5. **Adaptive penalty.** `update_rho!` adjusts every market $\rho_k$ and every per-agent capacity $\rho_m$ by residual balancing (§6.3).
+5. **Adaptive penalty.** `update_rho!` adjusts every **flow-market** $\rho_k$ by residual balancing (§6.3). A per-agent capacity $\rho$ controller still exists in the file; it is vestigial for ME economics.
 
-6. **Convergence test.** Convergence is declared once **all five** spot markets **and every** capacity-owning agent satisfy both their primal and dual Boyd tolerances (§6.5). Capacity is tested per agent, never on the aggregate.
+6. **Convergence test.** Convergence is declared once **all five** spot markets satisfy both their primal and dual Boyd tolerances (§6.5). `within_tol_cap()` always returns `true`.
 
 ### 6.2 Consensus Formula (Sharing ADMM)
 
@@ -1286,7 +1287,7 @@ where $\mathrm{imbalance} = \sum_j q_j$ for markets without fixed demand, and $\
 
 `update_rho.jl` and `update_rho_contracts.jl` implement **Boyd-style residual balancing** (Boyd et al. 2011, §3.4.1): adapt $\rho$ so primal and dual residuals decrease at similar rates.
 
-For each market (and each capacity agent, see §6.4), **after** residuals are computed:
+For each flow market, **after** residuals are computed:
 
 - if `r_p > μ r_d`, **increase** `ρ` (consensus too loose — penalise deviations harder);
 - if `r_d > μ r_p`, **decrease** `ρ` (dual changing too fast — soften penalty);
@@ -1302,9 +1303,9 @@ The hysteresis threshold is **`μ = 1.2`** (`rho_balance_threshold` in `ADMM_sta
 
 3. **ρ bounds.** `ρ_max` prevents exploding penalties (ill-conditioned agent QPs); `ρ_min` prevents $\rho\to 0$ while primal residual is still large.
 
-4. **Same law for capacity.** Per-agent `ρ_cap[m]` uses the identical ratio test (§6.4.4) so VRES, electrolyzer, and green offtaker capacity splits do not share one compromised penalty.
+4. **Capacity $\rho$ is vestigial for ME.** `update_rho.jl` still has a per-agent `ρ_cap[m]` controller from the retired $x=z$ split. `disable_installed_capacity_split!` zeros $\rho^{\mathrm{cap}}$ on the model every iteration, so that controller does not affect investment.
 
-`ρ` initial values come from `data.yaml` (`rho_initial` per market, `rho_cap_initial` for capacity). They are **numerical knobs**, not calibrated economic parameters. The λ-step damping, the H₂-GC price projection, and the other numerical stabilisers in `ADMM.jl` (which sit *outside* `update_rho!`) are collected in §6.9.
+`ρ` initial values come from `data.yaml` (`rho_initial` per market). `rho_cap_initial` is unused for ME economics. They are **numerical knobs**, not calibrated economic parameters. The λ-step damping, the H₂-GC price projection, and the other numerical stabilisers in `ADMM.jl` (which sit *outside* `update_rho!`) are collected in §6.9.
 
 #### 6.3.1 Per-market parameters
 
@@ -1316,7 +1317,7 @@ The hysteresis threshold is **`μ = 1.2`** (`rho_balance_threshold` in `ADMM_sta
 | `ppa`, `ppa_cap` | 1.05 | 1/1.05 | 500 | Thin bilateral pool; conservative but responsive. |
 | `hpa`, `hpa_cap` | 1.05 | 1/1.05 | 500 | Same logic as PPA for hydrogen contracts. |
 
-Capacity consensus is a per-agent equality split (§6.4), so each capacity-owning agent has its own `ρ_cap[m]` update with the same residual-balancing rule.
+Capacity $\rho$ in `update_rho.jl` is leftover from the retired $x=z$ split (§6.4); it does not affect the ME QP.
 
 #### 6.3.2 Pseudo-code
 
@@ -1331,147 +1332,46 @@ for each flow market k:
     else
         ρ_k <- ρ_k
 
-for each capacity-owning agent m:
-    rp_m = ||x_cap_m - z_cap_m||
-    rd_m = ||ρ_m * (z_cap_m^k - z_cap_m^{k-1})||
-    if rp_m > μ*rd_m:
-        ρ_m <- min(ρ_max_cap, τ_cap * ρ_m)
-    elseif rd_m > μ*rp_m:
-        ρ_m <- max(ρ_min_cap, ρ_m / τ_cap)
-    else
-        ρ_m <- ρ_m
+# leftover: a per-agent ρ_cap loop still exists in update_rho.jl.
+# It is a no-op for ME investment (ρ_cap is zeroed on the model).
 ```
 
-### 6.4 Capacity ADMM (Equality Split per Agent)
+### 6.4 Installed capacity (private QP variable)
 
-Capacity consensus is treated as a **textbook ADMM equality split** at the agent level, not as a soft penalty against a derived target. This subsection gives the formal model, residual definitions, and the rationale for each design choice.
+Installed `cap` is a **private JuMP variable** in each investing agent’s subproblem. ADMM coordinates the **five energy markets** only. This matches the Alessio reference architecture: capacity is chosen inside the agent QP subject to physics, not as a second consensus constraint.
 
 #### 6.4.1 Formal model
 
-For every capacity-owning agent `m ∈ {VRES, GreenProducer, GreenOfftaker}` we introduce **one scalar** equality split (not one per scenario year — capacity itself is non-anticipative):
+For VRES, electrolyzer, and green offtaker:
 
-- **Primal** `x_m` — the agent's own capacity variable (`cap_VRES`, `cap_H2_y`, or `cap_EP_y`);
-- **Auxiliary** `z_m` — a scalar capacity target equal to the **peak** of the agent's latest realised flow profile across the whole $(h,d,y)$ horizon (fallback: ADMM flow target if no history yet). For VRES, $z = \max_{h,d,y} g_{\mathrm{elec}}/\mathrm{AF}$; for electrolyzers, $z = \max_{h,d,y} h2_{\mathrm{out}}$; for green offtakers, $z = \max_{h,d,y} ep$. In the contracts case, VRES and electrolyzer targets use pool + contract flows. An optional EMA with weight `cap_z_relax` (code default 1.0 = no smoothing) blends $z$ against its previous value.
-- **Dual** `λ_m` — Lagrange multiplier for the equality `x_m = z_m`;
-- **Per-agent penalty** `ρ_m` — scalar weight, one per agent.
+- **Decision** `cap` — scalar, non-anticipative (one MW number for all scenarios).
+- **Physics** — VRES: $g(h,d,y) \le \mathrm{AF}(h,d,y)\cdot\mathrm{cap}$; electrolyzer: peak H₂ output $\le$ cap; green offtaker: peak EP $\le$ cap. Existing capacity is a floor (`cap = cap_initial + inv`, `inv ≥ 0`).
+- **Economics** — CAPEX $F^{\mathrm{cap}}\cdot\mathrm{cap}$ sits in expected loss and in every CVaR scenario loss (§5.1). Energy ADMM penalties $(\rho/2)\|g-\bar g\|^2$ act on **flows**, not on `cap`.
 
-The agent solves, each ADMM iteration:
+There is **no** live $x=z$ capacity split in ME / G-SP / GH2-SP. Before every agent solve, `disable_installed_capacity_split!` (`Source/cap_admm_helpers.jl`) zeros $\lambda^{\mathrm{cap}}$ and $\rho^{\mathrm{cap}}$ on the model, so even if the objective still contains a $(\mathrm{cap}-z)$ term it is a numerical no-op.
 
-```
-x_m^k = argmin_{x ≥ 0}  f_m(x, ...)
-                       + λ_m^{k-1} · (x - z_m^k)
-                       + (ρ_m^{k-1}/2) · (x - z_m^k)²
-```
+The coordinator in `ADMM.jl` may still log `Capacity_Consensus.csv` and update internal $\lambda^{\mathrm{cap}}$ / $\rho^{\mathrm{cap}}$ histories. Those diagnostics **do not enter the QP** and **do not gate stopping** (`within_tol_cap()` is always `true`). Aggregate `cap_dual` often prints as `Inf` on iteration 1 and can stay meaningless; ignore it for ME convergence.
 
-where `f_m` is the agent's own economic loss (operational + CAPEX − revenue, plus CVaR / risk and other ADMM market penalties). After all agents solve we perform the **dual ascent** (this happens after primal residuals are computed and before dual residuals — see §6.1):
+#### 6.4.2 Why not $z = \mathrm{peak}(g)/\mathrm{AF}$
 
-```
-λ_m^k = λ_m^{k-1} + ρ_m^{k-1} · (x_m^k - z_m^k)
-```
+An earlier implementation treated capacity as an equality-split ADMM block: auxiliary $z = \max g/\mathrm{AF}$ (or peak H₂ / EP), dual $\lambda^{\mathrm{cap}}(\mathrm{cap}-z)+(\rho^{\mathrm{cap}}/2)(\mathrm{cap}-z)^2$, and a Boyd test on $|x-z|$. That **slaves installed MW to last-iteration dispatch**. Combined with a matching-$\beta$ social-planner primal warm-start, $\bar g$ was the planner’s extra green hedge, $g\le\mathrm{AF}\cdot\mathrm{cap}$ could not cut MW until energy ADMM unwound it, and RA ME sat near SP then slid toward RN — the wrong private-CVaR trend (§4.10.6). Alessio never splits capacity that way. The split is therefore disabled.
 
-This is the standard equality-split ADMM update (Boyd et al. 2011, §3.1). The Capacity_Consensus.csv file still writes one row per `(iter, agent, jy)` for joinability against scenario-indexed results; the underlying decision is the same scalar for every `jy`.
+Yaml keys `epsilon_cap`, `rho_cap_*`, and `cap_z_relax` remain in `data.yaml` for leftover logging and (contracts-only) bilateral $C$. They **do not drive ME investment**.
 
-#### 6.4.2 Residuals
+#### 6.4.3 What still binds capacity
 
-Per-agent residuals follow the Boyd definition for the `x = z` split:
+Capacity is identified by the agent FOC: annuity vs expected (and CVaR-weighted) operating margin, subject to $g\le\mathrm{AF}\cdot\mathrm{cap}$. At $\gamma=1$, ME and SP share the same convex program, so capacities agree once the **five flow markets** clear. At $\gamma<1$, private CVaR is a different institution from social CVaR; ME capacity need not match SP.
 
-```
-Primal:  r_m^k = | x_m^k - z_m^k |                 (scalar absolute residual)
-Dual:    s_m^k = | ρ_m^{k-1} · (z_m^k - z_m^{k-1}) |   (Δz, not Δx)
-```
-
-The dual residual uses the change in the **auxiliary** `z` (not the change in the primal `x`). This is the ADMM-correct definition: if `x` has frozen but `z` is still drifting, a Δx-based residual would falsely declare convergence; Δz captures the true ADMM dual progress (Boyd et al. 2011, Eq. 3.12).
-
-For diagnostics and the one-line summary, the aggregate residuals reported in `ADMM_Convergence.csv` as `cap_primal` / `cap_dual` are the L2 norms over agents:
-
-```
-r_cap^k = sqrt(Σ_m r_m^k²),    s_cap^k = sqrt(Σ_m s_m^k²)
-```
-
-#### 6.4.3 Stopping rule
-
-Convergence is checked **per agent**, not on the aggregate. For each capacity-owning agent the Boyd test uses a **dedicated scalar MW tolerance** `ε_cap` (`ADMM.epsilon_cap`), not the flow-market `ε_abs`:
-
-```
-ε_pri_m  = ε_cap + ε_rel · ResidualScale_Primal_m
-ε_dual_m = ε_cap + ε_rel · ResidualScale_Dual_m
-```
-
-Capacity is one decision, so there is **no** `sqrt(n_slots)` factor (unlike flow markets, §6.5). Reusing the per-slot flow `ε_abs` on a scalar split would make capacity ~50× tighter in MW than the market L2 test — that is a dimensional mismatch, not “the same accuracy.” In the contracts case the right-hand side is further multiplied by `cap_tol_relax` (§6.7). Capacity is converged iff `r_m ≤ ε_pri_m` and `s_m ≤ ε_dual_m` for **every** `m`. *Why per-agent and not aggregate*: averaging residuals across agents can hide a single laggard whose split is still far from feasibility; an aggregate test would declare convergence even when one agent type (e.g. a strongly binding electrolyzer) has not satisfied the equality. The per-agent test is direction-correct: capacity is "done" when every agent's split is satisfied.
-
-The optional knob `cap_tol_relax` multiplies the right-hand side of the per-agent **physical investment capacity** test in the **contracts** case only (shipped `data.yaml` value: **10**; code fallback if the key is absent: **100**). Plain ME leaves it at 1. See §6.7. Bilateral contract capacity $C$ (PPA/HPA cap consensus) uses `ε_cap` without this extra multiplier.
-
-#### 6.4.4 Per-agent ρ controller
-
-Each capacity-owning agent's penalty $\rho_m$ follows the **same** residual-balancing rule as the flow markets (§6.3), applied to that agent's own $(r_m, s_m)$: increase when the primal residual dominates, decrease when the dual dominates, otherwise hold. Only the bounds differ — increase factor 1.05, decrease factor 1/1.05, $\rho_{\max}=30$, $\rho_{\min}=0.10$, one controller **per agent**. The three knobs below are **code defaults** (they are not present in the shipped `data.yaml`; override them there only if you need to):
-
-```yaml
-ADMM:
-  rho_cap_initial: 0.1      # present in data.yaml
-  rho_cap_inc_factor: 1.05  # code default
-  rho_cap_max: 30.0         # code default
-```
-
-Using a separate controller per agent (rather than one global $\rho_{\mathrm{cap}}$) is essential because the capacity owners have very different residual scales; the justification is §6.4.6.
-
-#### 6.4.5 Why the equality split
-
-The capacity block uses the augmented-Lagrangian equality split:
-
-```
-L_cap = λ_cap · (x - z) + (ρ_cap/2) · (x - z)^2
-```
-
-This structure is used because:
-
-1. the linear dual term provides first-order correction toward `x = z`;
-2. the quadratic term provides curvature and numerical regularization;
-3. both terms are in currency units and vanish at consensus.
-
-With dual ascent `λ <- λ + ρ (x-z)`, the split follows textbook ADMM dynamics for equality constraints.
-
-#### 6.4.6 Why per-agent ρ (and not a single global ρ_cap)
-
-A single global `ρ_cap` forces a compromise across very heterogeneous agent types:
-
-- **VRES**: capacity grows by tens of MW per step; CAPEX is moderate; the binding constraint is `cap ≥ peak(g)/AF`.
-- **Electrolyzer**: capacity is tightly coupled to four markets simultaneously (elec, elec_GC, H2, H2_GC); CAPEX is high; the binding constraint is `cap ≥ peak(h2_out)`.
-- **Green offtaker**: capacity is decoupled from elec but tied to EP flow; CAPEX is small relative to operational margin.
-
-When the controller picks a single `ρ_cap` that suits one of these, the others sit either in the dead band (no progress) or over the kink (limit cycles). Per-agent `ρ_m` removes this compromise; each agent's controller specialises to its own residual scale.
-
-#### 6.4.7 Units check (and why penalties don't bias the social-planner equivalence)
-
-The economic loss `f_m` is in € (currency); `λ · (x - z)` has units `[€/MW] · [MW] = €`; `(ρ/2) · (x - z)²` has units `[€/MW²] · [MW²] = €`. All three terms add cleanly. Because the ADMM penalty and dual terms vanish exactly at consensus (`x = z`), they have no effect on the centralised social-planner optimum: the planner does not solve a per-agent subproblem, hence has no `λ_cap` / `ρ_cap` / `z_cap` parameters (`add_*_to_planner!` functions never touch these). At γ = 1 (risk-neutral) the ADMM equilibrium therefore converges to the same primal/dual solution as the planner by the first welfare theorem — see §6.6 for the SP warm-start that we rely on for fast convergence.
-
-#### 6.4.8 Iteration order in the main loop
-
-Capacity is woven into the full §6.1 iteration; it is **not** a self-contained 7-step block that ends with its own convergence test. The capacity-relevant order inside iteration `k` is:
-
-1. **Derive `z^k` and set parameters** (inside `ADMM_subroutine!`, before the agent solve): compute `z_m^k` from realized flow histories (fallback to ADMM targets when history is empty), optionally under-relax
-   `z^k ← α·z_raw^k + (1-α)·z^{k-1}` with `α = cap_z_relax` (code default 1.0 = off), re-project the model-feasible capacity floor, then write `:z_cap = z_m^k`, `:λ_cap = λ_m^{k-1}`, `:ρ_cap = ρ_m^{k-1}` onto the agent model.
-2. **Agent solves**: produces `x_m^k`.
-3. **Market imbalances**, then **primal residuals** (flow markets and per-agent capacity `r_m^k = |x_m^k − z_m^k|`).
-4. **Capacity dual ascent**: `λ_m^k = λ_m^{k-1} + ρ_m^{k-1} · (x_m^k - z_m^k)`, pushed to history — this happens **before** dual residuals and **before** the spot-market λ update.
-5. **Dual residuals** (flow markets and per-agent capacity `s_m^k = |ρ_m^{k-1} · (z_m^k − z_m^{k-1})|`).
-6. **Spot-market λ update**, then **`update_rho!`** (which also updates every per-agent `ρ_m`).
-7. **Single convergence test** at the end of the iteration: all five spot markets **and** every capacity agent (§6.5). Capacity does not declare convergence on its own.
-
-This ordering is identical for `market_exposure` and the ME contract cases (`me_pap`, `me_top`, `me_sop`); only the `z` derivation differs (the contracts case adds the PPA / HPA flow contributions when computing the peak of `g_bar + g_bar_ppa`, etc.).
-
-**Why this choice (`z` under-relaxation):**
-
-In tightly-coupled runs, raw `z` targets can jump sharply when flow consensus oscillates across markets. Because the capacity dual residual uses `Δz`, these jumps can produce very large `s_m` and trigger controller overreaction even when `x` is moving in the right direction. Under-relaxation damps target motion, reducing artificial dual spikes and improving monotonic progress toward the split fixed point.
-
-`z` projection enforces feasibility against the model structure: minimum installed-capacity floor implied by nonnegative investment variables (scalar `cap` per agent).
+Green coalitions (`green_social_planner.jl`, `green_h2_social_planner.jl`) use the same private-`cap` rule (`solve_merged_agent.jl` also calls `disable_installed_capacity_split!`).
 
 ### 6.5 Convergence Tolerances (Boyd-style)
 
-Instead of a single scalar tolerance, the implementation follows the **absolute + relative** stopping criteria proposed by Boyd et al. (2011) for ADMM. Three knobs are stored in `data.yaml` → `ADMM`:
+Instead of a single scalar tolerance, the implementation follows the **absolute + relative** stopping criteria proposed by Boyd et al. (2011) for ADMM. ME stopping uses **flow-market** knobs only:
 
 - Flow-market absolute tolerance `ε_abs` (MW **per slot**), from `epsilon_abs` if present, otherwise `epsilon` (ME) or `epsilon_contracts` (ME+C).
-- Capacity absolute tolerance `ε_cap` (MW, **scalar**), from `epsilon_cap` (default `5.0`).
 - Relative tolerance `ε_rel` (dimensionless), from `epsilon_rel` if present, otherwise `0.0`.
+
+`epsilon_cap` remains in `data.yaml` but **does not enter the ME stop** (`within_tol_cap()` always returns `true`; §6.4).
 
 Let:
 
@@ -1489,9 +1389,8 @@ The stopping rule is:
 
 - **Primal (flow)**: for every spot market `k`, the L2 norm of the imbalance vector must satisfy `‖r_k‖₂ ≤ ε_pri_k`.
 - **Dual (flow)**: for every spot market `k`, the L2 norm of the change in consensus deviation must satisfy `‖s_k‖₂ ≤ ε_dual_k`.
-- **Capacity**: for every capacity-owning agent `m`, both the primal and dual scalar residuals must satisfy the per-agent Boyd test of §6.4.3 (`ε_cap`, not `ε_abs · √n`).
 
-**All five spot markets and every capacity-owning agent** must simultaneously satisfy their conditions for convergence to be declared (`within_tol(...) && within_tol_cap()` in `ADMM.jl`). Declaring "five markets done" while capacity is still drifting is not convergence.
+**All five spot markets** must simultaneously satisfy both conditions (`within_tol(...)` in `ADMM.jl`). Installed capacity is a private QP variable and is **not** tested.
 
 This has three advantages over a single scalar `epsilon`:
 
@@ -1511,68 +1410,66 @@ Default horizon: $n = 24 \times 8 \times 15 = 2{,}880$ slots, $\sqrt{n} = \sqrt{
 |------|-------|------------------|----------------|
 | `epsilon` | **0.2** MW/slot | ME flow markets | L2 ≤ $0.2 \times 53.67 = \mathbf{10.73}$ MW |
 | `epsilon_contracts` | **2.0** MW/slot | ME+C flow markets (PPA/HPA energy uses the same) | L2 ≤ $2.0 \times 53.67 = \mathbf{107.3}$ MW |
-| `epsilon_cap` | **5.0** MW | Scalar $x=z$ split (physical cap; also PPA/HPA $C$) | $|x-z| \le \mathbf{5.0}$ MW (ME and contract $C$); $\times$ `cap_tol_relax` for ME+C physical cap |
-| `cap_tol_relax` | **10** | Extra ME+C multiplier on physical investment only | ME+C physical cap ≤ $\mathbf{50}$ MW |
+| `epsilon_cap` | **5.0** MW | Unused for ME stop; leftover yaml (contracts $C$ only) | not applied to installed `cap` |
+| `max_iter` | **5000** | Iteration budget | RA ME typically converges around 3{,}000–4{,}000 from a cold $\bar g$ |
 
 **1. Flow-market `epsilon = 0.2` (ME).**
 Boyd's `sqrt(n)` rule means the per-slot accuracy is exactly `ε_abs`: RMS imbalance ≤ 0.2 MW. On the Dutch system this is negligible:
 
 - vs peak load ~18,000 MW: $0.2 / 18000 = 0.0011\%$.
-- Money-metric upper bound (treat 0.2 MW as a persistent hourly imbalance at a typical electricity price ~32 €/MWh): $0.2 \times 32 \times 8760 \approx 56$ k€/year, against $\mathbb{E}[\mathrm{SW}] \approx 49$ bn € — about **0.00011%** of welfare. The actual money-metric is smaller because the residual is an L2 budget across 2,880 slots, not a bias in every hour.
-- The previous value `0.1` already cleared all five markets in the $\gamma=0.5$, $\beta=0.8$ ME run (L2 residuals ~1.6–3.1 vs a 5.37 MW bar). Doubling to 0.2 keeps the same economic interpretation and gives modest headroom without letting prices wander: a 0.2 MW RMS gap cannot move a 30 €/MWh electricity price in any economically reportable way.
+- Money-metric upper bound (treat 0.2 MW as a persistent hourly imbalance at a typical electricity price ~110 €/MWh on the current 15-scenario grid): $0.2 \times 110 \times 8760 \approx 193$ k€/year, against $\mathbb{E}[\mathrm{SW}] \approx 40$ bn € — about **0.0005%** of welfare. The actual money-metric is smaller because the residual is an L2 budget across 2,880 slots, not a bias in every hour.
+- A 0.2 MW RMS gap cannot move a ~110 €/MWh electricity price in any economically reportable way.
 
 **2. Flow-market `epsilon_contracts = 2.0` (ME+C).**
-ME+C adds PPA/HPA energy tensors plus two scalar $C$ splits on top of the five spot markets, so residual floors sit higher than in plain ME. **2.0 MW RMS is Boyd's $\varepsilon_{\mathrm{rel}}\sim 10^{-4}$ applied to NL peak load** ($10^{-4}\times 18{,}000 = 1.8$ MW). That is **10×** the ME bar (`2.0 / 0.2`), still **7× tighter** than Boyd's looser $10^{-3}$ relative (18 MW RMS). Money-metric: $2.0 \times 32 \times 8760 \approx 560$ k€/year (**0.0011%** of 49 bn € welfare). The L2 bar of 107 MW looks large only if one forgets it is an Euclidean budget over 2,880 slots; the economically meaningful figure is the 2 MW RMS.
+ME+C adds PPA/HPA energy tensors plus shared-contract $C$ on top of the five spot markets, so residual floors sit higher than in plain ME. **2.0 MW RMS is Boyd's $\varepsilon_{\mathrm{rel}}\sim 10^{-4}$ applied to NL peak load** ($10^{-4}\times 18{,}000 = 1.8$ MW). That is **10×** the ME bar (`2.0 / 0.2`). Money-metric: $2.0 \times 110 \times 8760 \approx 1.9$ M€/year (**~0.005%** of 40 bn € welfare). The L2 bar of 107 MW looks large only if one forgets it is an Euclidean budget over 2,880 slots; the economically meaningful figure is the 2 MW RMS.
 
-**3. Capacity `epsilon_cap = 5.0` MW.**
-Capacity is a **scalar** (one MW number per agent), so Boyd's `sqrt(n)` factor does **not** apply. Reusing a 0.1–1 MW cap test against a flow L2 bar of tens of MW is a dimensional mismatch, not “the same accuracy.” Relative to SP capacities (wind 76.4 GW, solar 55.0 GW, electrolyzer 1.43 GW, green offtaker 1.07 GW):
-
-- 5 MW is $5/76358 = 0.0065\%$ of wind and $0.009\%$ of solar — **tighter than Boyd $10^{-4}$** on VRES.
-- 5 MW is $0.35\%$ of the electrolyzer and $0.47\%$ of the offtaker — between Boyd $10^{-3}$ and a few-tenths of a percent, and **one typical PEM stack** (5–20 MW). Planning models do not commission 1 MW of electrolysis.
-- Money-metric at shipped annuities: 5 MW of wind × 18,500 €/MW-year = **92.5 k€/year**; 5 MW of electrolyzer × 262,000 €/MW_e-year ≈ **1.3 M€/year** — both **≪ 0.003%** of 49 bn € welfare.
-- **Observed ADMM floor.** In the $\gamma=0.5$, $\beta=0.8$ ME run, all five spot markets were inside the old 5.37 MW bar from iteration 418 onward. Wind $|x-z|$ never fell to 0.1 MW: it reached a best of **0.17 MW at iter 476**, then oscillated in **0.23–0.67 MW** (`ρ_cap` frozen near 0.9). That band is a penalty-augmented limit cycle. A 1 MW bar sits above the ME floor but was **too tight for bilateral contract $C$** (the same scalar-split trap on a hedge that inherits PPA/HPA energy chatter). 5 MW sits above that floor with margin; chasing 1 MW of $C$ is asking the solver to kill a sub-stack consensus gap.
-
-**4. Contracts physical-cap extra factor `cap_tol_relax = 10`.**
-In ME+C, physical `z_cap` uses **pool flow only** (same as ME): hedges do not occupy a second slice of plant capacity. Effective bar: $10 \times 5.0 = \mathbf{50}$ MW = $0.065\%$ of the 76 GW wind fleet (Boyd $10^{-3}$ is 0.1%) and $3.5\%$ of the 1.43 GW electrolyzer. Bilateral hedge capacity $C$ does **not** get this extra factor; it uses `ε_cap = 5.0` MW like a scalar contract position.
-
-**What we are not doing.** These values do not change the equilibrium (penalties vanish at $x=z$ and market imbalance 0). They only stop the loop from burning hundreds of iterations on sub-stack capacity chatter after prices and dispatch have already cleared. For a tighter numerical study, lower `epsilon` / `epsilon_cap`; do not raise `max_iter` in the hope that a 1 MW contract-$C$ split will eventually die.
+**What we are not doing.** These values do not change the equilibrium (energy penalties vanish at market imbalance 0). For a tighter numerical study, lower `epsilon`; do not raise `max_iter` hoping a leftover capacity CSV column will die. `epsilon_cap` / `cap_tol_relax` do **not** gate ME.
 
 #### Two epsilon values: `epsilon` vs `epsilon_contracts`
 
-The **ME contract cases** (`me_pap`, `me_top`, `me_sop`) have more coupled markets (standard flows + contract energy + contract capacity + capacity consensus) and stronger interdependence (VRES splits pool vs contract; electrolyzer does the same). As a result, convergence is slower and residuals tend to be larger than in `market_exposure`. To avoid running to `max_iter` without declaring convergence when results are already good enough, the contracts case uses a separate tolerance:
+The **ME contract cases** (`me_pap`, `me_top`, `me_sop`) have more coupled markets (standard flows + contract energy + shared $C$) and stronger interdependence. As a result, convergence is slower and residuals tend to be larger than in `market_exposure`. To avoid running to `max_iter` without declaring convergence when results are already good enough, the contracts case uses a separate tolerance:
 
 - **`epsilon`** — Used by `market_exposure` (shipped **0.2** MW/slot).
 - **`epsilon_contracts`** — Used by `me_pap.jl` / `me_top.jl` / `me_sop.jl` when set in `data.yaml` (shipped **2.0** MW/slot, 10× ME). If not set, the contracts case falls back to `epsilon`.
-- **`epsilon_cap`** — Shared scalar MW bar for capacity splits in both ME and ME+C (shipped **5.0** MW).
-
-Both cases use the same convergence logic; only the flow-market `ε_abs` and the contracts-only `cap_tol_relax` multiplier differ. **`cap_tol_relax`** relaxes **physical investment capacity** consensus only (§6.4, §6.7); bilateral contract $C$ uses `ε_cap` without that multiplier.
+- **`epsilon_cap`** — Not used for ME installed-capacity stopping. Contracts may still use it for bilateral $C$.
 
 ### 6.6 Warm-start from Social Planner
 
-Warm-starting ADMM from the social planner solution is **critical** for fast, reliable convergence. Implementation: `define_results.jl` (and `define_results_contracts.jl`) reads `social_planner_results/` when present. Run **`social_planner.jl` first**, then **`market_exposure.jl`**.
+Implementation: `define_results.jl` (and `define_results_contracts.jl`) reads `social_planner_results/` when present. Run **`social_planner.jl` first**, then **`market_exposure.jl`**. Green coalitions use the same rule (`admm_is_risk_neutral`).
 
-#### 6.6.1 Three warm-start components
+Whether primal and capacity seeds are applied depends on $\gamma$:
+
+| $\gamma$ | What is loaded | Why |
+|---|---|---|
+| **$=1$** (risk-neutral) | $\lambda$ **and** primal quantities **and** `set_start_value` on `cap_*` | ME $=$ SP at $\gamma=1$. Full seeds put ADMM on the KKT point; typical convergence in **a few** iterations. |
+| **$<1$** (risk-averse) | **$\lambda$ only** | Matching-$\beta$ SP dispatch is extra **green as a gas hedge**. Seeding $\bar g$ / `cap` from that hedge pins $g\le\mathrm{AF}\cdot\mathrm{cap}$ to the planner’s extra MW — the opposite of private weather-CVaR, which **cuts** wind. Cold $\bar g$ is required. Typical RA ME: **~3{,}000–4{,}000** iterations (`max_iter: 5000`). |
+
+#### 6.6.1 Three warm-start components (applied only at $\gamma=1$)
 
 | # | Component | Source file | What it fixes |
 |---|---|---|---|
-| **1** | **Prices $\lambda$** | `social_planner_results/Market_Prices.csv` | Without SP prices, ADMM uses scalar `initial_price` from `data.yaml` — far from peak/off-peak structure → large early imbalances and slow λ search |
-| **2** | **Primal quantities** | `social_planner_results/SP_Primal_Quantities.csv` | Pre-populates `results["g"]`, `h2`, etc. so iteration 1 has **previous quantities = SP** → consensus targets $\bar{g} \approx$ SP → **near-zero imbalance on iteration 1** when λ also matches SP |
-| **3** | **Capacity** | `social_planner_results/SP_Capacities.csv` | `set_start_value` on `cap_*` variables; seeds capacity ADMM auxiliaries `z_cap` so $x_{\mathrm{cap}} \approx z_{\mathrm{cap}} \approx$ SP from the start |
+| **1** | **Prices $\lambda$** | `social_planner_results/Market_Prices.csv` | Without SP prices, ADMM uses scalar `initial_price` from `data.yaml` — far from peak/off-peak structure → large early imbalances and slow λ search. **Loaded at every $\gamma$.** |
+| **2** | **Primal quantities** | `social_planner_results/SP_Primal_Quantities.csv` | Pre-populates `results["g"]`, `h2`, etc. so iteration 1 has **previous quantities = SP** → $\bar{g} \approx$ SP. **$\gamma=1$ only** (`use_primal_warmstart=false` and empty file path when $\gamma<1$). |
+| **3** | **Capacity starts** | `social_planner_results/SP_Capacities.csv` | `set_start_value` on `cap_*` (Gurobi MIP/QP start, not an ADMM $z$). **$\gamma=1$ only.** |
 
-#### 6.6.2 Why each component matters
+#### 6.6.2 Why RA must not inherit SP primals
 
-**Prices only (no primal warm-start):** Agents still solve with $\bar{g} = 0$ on iteration 1 (empty quantity history → zero consensus target). They are penalised toward zero net positions → wrong dispatch, huge imbalances, many iterations to recover.
+At $\gamma=1$, first ADMM iteration approximates **“each agent re-optimises at SP prices with SP quantities as targets”** — close to the KKT point.
 
-**Primal without capacity:** Flow consensus may clear while `z_cap` is derived from zero flows → capacity penalty pulls investment toward **zero MW** — exactly wrong for a model where VRES/H₂/EP capacity is endogenous.
+At $\gamma<1$, **prices only** is the correct seed. Agents solve with $\bar{g} = 0$ on iteration 1 (empty quantity history). That is slow, but it lets private CVaR choose capacity. Loading SP quantities would:
 
-**Full warm-start:** First ADMM iteration approximates **“each agent re-optimises at SP prices with SP quantities as targets”** — close to the KKT point. Typical effect: convergence in **hundreds** of iterations instead of thousands, and tighter final residuals at a given `epsilon`.
+1. set $\bar g$ to the planner’s extra green,
+2. force `cap` up via $g\le\mathrm{AF}\cdot\mathrm{cap}$ until energy ADMM unwinds it,
+3. produce the false “ME copies SP then slides toward RN” hump.
 
 #### 6.6.3 Operational notes
 
 - Primal warm-start requires **matching horizon**: `nTimesteps × nReprDays × nYears` rows in CSV must equal ADMM shape. With the default 15-scenario grid that is `24 × 8 × 15 = 2880` rows, so the SP results must come from a run over the **same** `Scenarios` block (otherwise primal warm-start is skipped with a warning). One-year SP **price** files are automatically replicated across years; one-year **primal** files are **not** — they are rejected. Primal warm-start is also gated on a successful price warm-start (`sp_loaded == true` in `define_results.jl`): a primal CSV alone is not enough.
 - SP prices are loaded **as-is** (no H2_GC clamp at load); negative H2_GC at SP optimum would be inconsistent with equilibrium — the **floor** is applied after each λ update in `ADMM.jl`.
-- Console message when all three load: `ADMM warm-start: λ from SP prices, primal quantities from SP, capacity seeds for N agents`.
-- If `social_planner_results/` is missing, ADMM still runs from `initial_price` scalars — valid, but use for debugging only when benchmarking against SP.
+- Console: at $\gamma<1$ typically `ADMM warm-start: λ from SP prices`. At $\gamma=1$: `ADMM warm-start: λ from SP prices, primal quantities from SP, capacity seeds for N agents`.
+- If `social_planner_results/` is missing, ADMM still runs from `initial_price` scalars — valid, but slow.
+- **Fresh Julia process.** After changing `Source/*.jl`, start a new `julia --project=.` (do not reuse a VS Code terminalserver REPL). Julia 1.12 world-age / Revise will otherwise keep a stale `TeeStream` and can crash in `save_results` after ADMM has already converged. Post-run text is teed to `run_summary.txt` via `tee_run_log.jl` (capture to a temp file, then replay — `redirect_stdout` on Julia 1.12 does not accept a custom IO).
+- CSVs are written **after** `ADMM!` returns. Killing a mid-run loses the iterate.
 
 ### 6.7 Contract Pools ADMM (me_pap / me_top / me_sop)
 
@@ -1582,7 +1479,7 @@ The contracts loop (`ADMM_contracts.jl`) **extends** the full standard ME iterat
 
 | Step | What happens |
 |------|----------------|
-| (base) | Full §6.1 iteration for the five spot markets and physical capacity |
+| (base) | Full §6.1 iteration for the five spot markets (installed `cap` is private; §6.4) |
 | +1 | Inside each agent subroutine: `apply_shared_contract_caps!` — fix `ppa_cap` / `hpa_cap` to `SharedCap` |
 | +2 | Contract **energy** imbalances: `g_ppa` vs `g_ppa_from`; `h2_hpa` vs `h2_hpa_from` |
 | +3 | `update_shared_contract_capacity!` — bargaining update for $C$; `record_shared_cap_residuals!` |
@@ -1591,7 +1488,7 @@ The contracts loop (`ADMM_contracts.jl`) **extends** the full standard ME iterat
 
 **Markets tracked for convergence** (all must clear):
 
-- The five **spot** markets and every **physical capacity** agent (§6.5).
+- The five **spot** markets (§6.5). Installed `cap` is private and is not in the ME stop.
 - **PPA/HPA energy** (`ppa`, `hpa`): 3D imbalances; $\lambda^{\mathrm{ppa}}_i$, $\lambda^{\mathrm{hpa}}_j$ prices; Boyd residuals like spot markets.
 - **Shared cap** (`ppa_cap_*`, `hpa_cap_*` in `ADMM_Convergence.csv`): scalar $|C - q^{\mathrm{peak}}|$ and $|C^k - C^{k-1}|$ — **not** supplier-cap minus buyer-cap.
 - **Shared $C$ settled** (`shared_contract_capacity_settled`): ADMM does **not** stop while any link is expanding, pending an expand (`CapSignal` up), or moving more than `contract_cap.settle_tol` MW per iteration. Holding a positive $C$ after both sides stop asking for more is allowed. Idle snap to zero still has to finish and then stay flat. Flow residuals alone can pass while $C$ is still crawling.
@@ -1599,8 +1496,8 @@ The contracts loop (`ADMM_contracts.jl`) **extends** the full standard ME iterat
 **Tolerances** (contracts case is more coupled; see §6.5):
 
 - **`epsilon_contracts`** — Base per-slot tolerance for flow markets (shipped 2.0 vs ME `epsilon` 0.2; 10× ratio).
-- **`epsilon_cap`** — Scalar MW bar for physical and bilateral contract capacity (shipped 5.0 MW).
-- **`cap_tol_relax`** — Extra multiplier for **physical** investment capacity only (shipped `data.yaml` value: 10 → 50 MW).
+- **`epsilon_cap`** — Unused for ME installed `cap`. May still apply to bilateral contract $C$.
+- **`cap_tol_relax`** — Leftover physical $x=z$ multiplier; installed-capacity split is disabled (§6.4).
 - **`contract_cap.settle_tol`** — Max allowed $|C^k - C^{k-1}|$ (MW) when declaring convergence (default 0.5).
 
 Full economic interpretation of $C$, $K$, volume modes, and the $C$ step-size rule: §2 *Contract pools*. Configuration: `ADMM.contract_cap`, `PPAs`, `HPAs` in `data.yaml`.
@@ -1623,14 +1520,15 @@ Coupled multi-market ADMM with endogenous investment (and, in the contract cases
 | **Scale-aware η damping** | Shrinks the λ step from $1$ toward $0.25$ as a market nears its Boyd tolerance, damping end-game oscillation. | §6.1 step 4 |
 | **Per-market `η_scale`** | An extra multiplier on each market's λ step, adapted online: reduced (×0.85, floor 0.15) when that market's normalized merit worsens step-on-step, eased back up (×1.03, cap 1.0) when it improves. | `ADMM.jl` |
 | **H₂-GC price projection** | Clamps $\lambda_{H2\_GC}\ge 0$ after each update (projected ADMM). A producer never issues certificates at a negative price, so supply is $0$ there; without the clamp, negative prices attract unbounded demand and create a persistent limit cycle. | §6.1 step 4 |
-| **Adaptive ρ** | Boyd residual balancing, per market and per capacity agent. | §6.3 |
+| **Adaptive ρ** | Boyd residual balancing, per flow market. Capacity $\rho$ in `update_rho.jl` is vestigial for ME. | §6.3 |
+| **Failed-QP retry** | If Gurobi returns no primal, `ensure_agent_solution!` retries (new backend, tighter NumericFocus, barrier-only) then reuses the last ADMM iterate and damps $\rho$. | `cap_admm_helpers.jl` |
 | **Best-iterate tracking** | Records the lowest-**merit** iterate seen so far and reports it if `max_iter` is reached without convergence. | `ADMM.jl` |
 
 Here **merit** is the maximum over markets of (residual ÷ its Boyd tolerance), so a single number is comparable across markets of very different magnitude.
 
 **Experimental steering (present in code, disabled by default).** The loop also contains a checkpoint rollback, per-market "basin guards", and a rescue mode that would blend $\lambda$ and $\rho$ back toward best-so-far values during long stalls. These are gated **off** (`enable_recovery_steering = false`, and the basin-guard activation threshold set beyond `max_iter`) because they tended to over-steer tightly coupled runs. The shipped algorithm relies only on the plain ADMM updates plus the stabilisers in the table above; treat the gated branches as inactive when reading `ADMM.jl`.
 
-In practice this gives fast coarse convergence in the first iterations and few late plateaus. The main levers for tighter final residuals are a smaller `epsilon` (§6.5) and the social-planner warm-start (§6.6), **not** the disabled steering.
+In practice this gives fast coarse convergence in the first iterations and few late plateaus. The main levers are a smaller `epsilon` (§6.5) and the $\gamma$-aware social-planner warm-start (§6.6), **not** the disabled steering.
 
 ### 6.10 Mapping to Boyd et al. (2011)
 
@@ -1648,13 +1546,13 @@ This project uses the **sharing ADMM** variant for market $k$: each agent $i$ ha
 | $z$-update (consensus average) | $\bar{g}_i^k = q_i^{k-1} - \frac{1}{n+1}\mathrm{imbalance}^{k-1}$ | §6.2 |
 | Dual ascent $u \leftarrow u + \rho(x-z)$ | $\lambda^{k+1} = \lambda^k - \eta\rho\,\mathrm{imbalance}^k$ (sign: imbalance = supply−demand) | §6.1 step 4, §6.8 |
 | Primal residual $\|Ax+Bz-c\|_2$ | $\|\mathrm{imbalance}^k\|_2$ per market | §6.1 step 3 |
-| Dual residual $\|\rho A^\top(z^k-z^{k-1})\|_2$ | $\|\rho\,\Delta(\text{consensus deviation})\|_2$; capacity uses $\Delta z$ | §6.1 step 3, §6.4.2 |
+| Dual residual $\|\rho A^\top(z^k-z^{k-1})\|_2$ | $\|\rho\,\Delta(\text{consensus deviation})\|_2$ on **flow** markets | §6.1 step 3 |
 | Stopping: $\|r\|_2 \le \epsilon_{\mathrm{pri}}$, $\|s\|_2 \le \epsilon_{\mathrm{dual}}$ | Boyd abs + rel tolerances with $\sqrt{n_{\mathrm{slots}}}$ scaling | §6.5 |
 | Adaptive $\rho$ (residual balancing) | `update_rho!` with $\mu=1.2$ | §6.3 |
 
 **Extensions beyond vanilla Boyd:**
 
-- **Multiple coupled consensus constraints** (five markets + capacity splits + optional contract pools) — one ADMM loop, market-specific $\rho_k$.
+- **Multiple coupled consensus constraints** (five energy markets + optional contract pools) — one ADMM loop, market-specific $\rho_k$. Installed capacity is **not** a consensus constraint (§6.4).
 - **Projected dual step** for H2_GC ($\lambda\ge 0$).
 - **η damping** and the H₂-GC projection — engineering stabilisers for tightly coupled energy markets (§6.9); not in the original Boyd proof but standard in applied ADMM.
 - **CVaR rebuild** each iteration — agent $f_i$ changes with $\lambda$; subproblem remains convex but is re-solved from scratch.
@@ -1739,7 +1637,7 @@ Solver options live in the `SocialPlanner` block of `data.yaml` and are applied 
 | H₂ price | ~71 €/MWh | ~$7\times10^{-5}$ €/MWh |
 | EP price | ~175 €/MWh | ~$1.7\times10^{-4}$ €/MWh |
 | H₂ GC price | ~113 €/MWh_GC | ~$1.1\times10^{-4}$ €/MWh_GC |
-| Expected social welfare | ~43 bn € | ~43 k€ |
+| Expected social welfare | ~40 bn € | ~40 k€ |
 | VRES installed capacity | ~40 GW (solar + wind) | ~40 kW |
 
 These residuals are negligible for:
@@ -1770,10 +1668,9 @@ These residuals are negligible for:
 
 Set `risk_warmstart: false` only to skip the extra RN solve (e.g. $\gamma=1$, or after you have confirmed a single RA pass succeeds). See also **§9.2.1**.
 
-#### ADMM note on capacity tolerance scaling
+#### ADMM note on capacity
 
-In `market_exposure` ADMM, flow-market tolerances use Boyd-style horizon scaling (`ε_abs * sqrt(n_slots) + ε_rel * scale`), where `n_slots = nHours × nReprDays × nYears`.  
-Capacity consensus is not a full flow tensor; it is a scalar MW split. It is therefore tested against a dedicated `ε_cap` (shipped 5.0 MW) with **no** `sqrt(n_slots)` factor — see §6.5. Applying the flow `ε_abs` unscaled to capacity would make the cap test ~50× tighter in MW than the market L2 test.
+In `market_exposure` ADMM, flow-market tolerances use Boyd-style horizon scaling (`ε_abs * sqrt(n_slots) + ε_rel * scale`). Installed capacity is a **private QP variable** and is **not** in the stopping test (§6.4, §6.5). `epsilon_cap` in yaml does not gate ME.
 
 ### 7.3 Code Architecture
 
@@ -1837,13 +1734,13 @@ The formulations are structurally identical in SP and ME:
 
 - **Social planner**: Each agent's scalar capacity is added to the centralised planner model. The planner optimises one investment per agent jointly with scenario-indexed dispatch. Expected welfare uses `Σ_y P[y] × sw_aux[y]`.
 
-- **Market exposure (ADMM)**: Each agent holds scalar `cap` in its decentralised model and reaches a **consensus capacity** through the per-agent equality split $x_m = z_m$ of §6.4 — i.e. a dual term $\lambda^{\mathrm{cap}}_m(x-z)$ **plus** the quadratic penalty $(\rho^{\mathrm{cap}}_m/2)(x-z)^2$. The target `z_cap` is the capacity implied by flow consensus over **all** scenarios (e.g. for VRES, `z_cap = max over (h,d,y) of g_bar[h,d,y] / AF[h,d,y]`). At convergence every agent's `cap` equals its `z_cap`. Full model, residuals, and controller: §6.4.
+- **Market exposure (ADMM)**: Each agent holds scalar `cap` in its decentralised QP. Physics bind it (`g \le AF \times cap`, or peak H₂/EP). ADMM does **not** add a $(\mathrm{cap}-z)$ penalty or a $z=\mathrm{peak}(g)/\mathrm{AF}$ target (§6.4).
 
-**Why warm-start matters for investment**: Without capacity warm-start from the SP, the first ADMM iteration has `z_cap` derived from zero flows (ḡ = 0), so `z_cap = 0`. Agents are then penalised toward zero capacity, which is far from the equilibrium. With SP capacity seeds (`set_start_value`) and primal warm-start (ḡ = SP), `z_cap` is consistent with SP flows and the capacity penalty pulls agents toward the SP investment levels from the first iteration. This dramatically speeds convergence of the investment consensus.
+**Warm-start and investment.** At $\gamma=1$, SP prices, quantities, and cap starts put ME on the planner KKT point. At $\gamma<1$, **do not** seed primal/cap from the matching-$\beta$ SP: that hedge is extra green, which is the opposite of private weather-CVaR (§6.6).
 
 ### 7.6 Risk metrics post-processing (CVaR reporting)
 
-After each run, the project writes **`Risk_Metrics.csv`**, **`Social_Welfare_Per_Year.csv`**, **`Welfare_By_Group_Per_Year.csv`**, and **`Welfare_By_Agent_Per_Year.csv`**, and prints a **risk metrics** block to the console. Implementation: `Source/compute_social_risk_metrics.jl`, called from `save_social_planner_results.jl`, `save_results.jl`, and `save_results_contracts.jl`. The planner **objective is unchanged**: demand utility stays inside social welfare and social CVaR. The extra files are a **reporting split** so RA / contract effects are visible on the non-demand remainder.
+After each run, the project writes **`Risk_Metrics.csv`**, **`Cost_Metrics.csv`**, **`Social_Welfare_Per_Year.csv`**, **`Welfare_By_Group_Per_Year.csv`**, and **`Welfare_By_Agent_Per_Year.csv`**, and prints a **welfare and cost metrics** block to the console (also teed to `run_summary.txt`). Implementation: `Source/compute_social_risk_metrics.jl`, called from `save_social_planner_results.jl`, `save_results.jl`, and `save_results_contracts.jl`. The planner **objective is unchanged**: demand utility stays inside social welfare and social CVaR. The extra files are a **reporting split** so RA effects are visible on the non-demand remainder. Headline comparison objects are $\mathbb{E}[\mathrm{SW}]$ and **resource cost** ($=-\mathbb{E}[\text{ex-demand welfare}]$), not a $\beta$-mixed “RA consumer cost.”
 
 #### What is reported
 
@@ -1885,6 +1782,8 @@ When $\gamma = 1$, social CVaR is inactive in objectives; reported values should
 | File | Contents |
 |---|---|
 | `Risk_Metrics.csv` | One row per metric (`expected_social_welfare`, `social_CVaR`, `alpha_social`, `sum_private_CVaR`, `social_CVaR_gap_vs_SP`, `expected_welfare_demand`, `expected_welfare_ex_demand`, `share_demand_of_E_SW`, `welfare_ex_demand_CVaR`, plus `expected_welfare_group_*`) |
+| `Cost_Metrics.csv` | $\mathbb{E}[\mathrm{SW}]$, **resource cost**, expected consumer CWAP (€/MWh) for electricity / EP / H₂, expenditure and energy totals |
+| `run_summary.txt` | Same console block as below, captured by `tee_run_log.jl` |
 | `Social_Welfare_Per_Year.csv` | `scenario_year`, `probability`, `social_welfare`, `social_loss`, `welfare_demand`, `welfare_ex_demand` |
 | `Welfare_By_Group_Per_Year.csv` | Per scenario year, planner welfare by group (`elec_demand`, `gc_demand`, `vres`, `conventional`, `h2_producer`, offtakers, …) |
 | `Welfare_By_Agent_Per_Year.csv` | Same split at agent id |
@@ -1892,43 +1791,26 @@ When $\gamma = 1$, social CVaR is inactive in objectives; reported values should
 
 #### Console log
 
-Logs report **positive welfare** (bn EUR): expected welfare, **demand utility vs ex-demand rest**, **tail welfare** (= average welfare in the worst $(1-\beta)$ share of scenarios; higher is better), min scenario welfare, spread, and the spread/tail of the ex-demand remainder. Internally the solver uses loss $L_y=-\mathrm{SW}_y$; `Risk_Metrics.csv` stores both `social_CVaR` (the model's epigraph variable) and `social_CVaR_recomputed` (ex-post from the realised per-scenario welfares). ADMM runs add **SP tail welfare (benchmark)** and **tail welfare gap vs SP** (negative ⇒ ME worse on aggregate tail).
+The default print is **`print_cost_metrics_summary!`** (not the older `print_risk_metrics_summary!` block). It reports $\mathbb{E}[\mathrm{SW}]$ (bn €), **resource cost** (CAPEX + fuel/OPEX $= -\mathbb{E}[\text{ex-demand welfare}]$), and **expected** consumer €/MWh (expenditure / energy; **not** a CVaR mix). ADMM then prints a run summary (status, iterations, flow residuals, installed cap / inv). The same text is written to `run_summary.txt`.
 
-**Tail lines are always the ex-post value.** At $\gamma = 1$ the CVaR term carries zero objective weight, so the solver's `cvar_social` variable is left arbitrarily loose and is not a meaningful number; reporting it would produce nonsense such as a tail welfare below the minimum scenario welfare, and an ADMM-vs-SP gap of several billion euros where the two are in fact identical. Both the console lines and the SP benchmark comparison therefore use the recomputed value.
+`Risk_Metrics.csv` is still written for the CVaR / demand-vs-rest split. Compare **within** each entry point on $\mathbb{E}[\mathrm{SW}]$ and resource cost as $\beta$ rises (§4.10.6). Do not treat private CVaR as social CVaR.
 
-Example block:
-
-Actual output of `social_planner.jl` on the 15-scenario grid at $\gamma=0.5$, $\beta=0.8$:
+Example (ME, $\gamma=0.5$, $\beta=0.8$, 15-scenario grid with gas multipliers $1\times/2\times/3\times$):
 
 ```
 ------------------------------------------------------------------------
-  Social planner risk metrics
+  Welfare and cost metrics
 ------------------------------------------------------------------------
-  Case:                    social_planner
-  gamma:                   0.5000
-  beta:                    0.8000  (tail = worst 20% of scenario years)
-  E[social welfare]:                42.542 bn EUR
-  Tail welfare (CVaR):              41.741 bn EUR  (higher = safer tail)
-  Min scenario welfare:             41.677 bn EUR
-  Welfare spread (max−min):          1.957 bn EUR
-  Risk-adjusted objective:            42.142 bn EUR
+  Expected social welfare:                    39.909 bn EUR
+  Total resource cost:                        15.141 bn EUR/year
+    (CAPEX + fuel/OPEX; no market transfers. Equals −E[ex-demand welfare].)
+  Consumer CWAP (electricity):                112.80 €/MWh
+  Expected consumer cost (final energy):      128.45 €/MWh
 ```
 
-Two checks worth running on any such output:
+On the current calibration, RA ME $\mathbb{E}[\mathrm{SW}]$ falls from ~39.96 bn at RN toward ~39.91 bn at $\beta=0.8$; electricity CWAP rises from ~109 toward ~113 €/MWh. Full SP moves the other way on **green MW** (more wind as a gas hedge) while $\mathbb{E}[\mathrm{SW}]$ also falls.
 
-**The objective identity.** `Risk-adjusted objective` must equal $\gamma\,\mathbb{E}[\mathrm{SW}] + (1-\gamma)\,\mathrm{CVaR\text{-}welfare}$. Here $0.5 \times 42.542 + 0.5 \times 41.741 = 42.142$ — exact, confirming the reported pieces are mutually consistent.
-
-**Risk aversion moves the right way.** Comparing against the risk-neutral run of the same grid ($\gamma=1$):
-
-| Metric | $\gamma=1$ | $\gamma=0.5$, $\beta=0.8$ | Direction |
-|---|---|---|---|
-| E[social welfare] | 42.544 | 42.542 | slightly **lower** — expected welfare is sacrificed |
-| Tail welfare (CVaR) | 41.655 | 41.741 | **higher** — the tail is made safer |
-| Welfare spread | 1.997 | 1.957 | **narrower** — outcomes less dispersed |
-
-That is the textbook signature of CVaR aversion: pay a little expected welfare to buy a better worst case. The effect is small here because the scenarios are not yet very dispersed in welfare terms (the spread is ~4.7% of the mean); it grows as $\beta$ rises or $\gamma$ falls.
-
-When $\beta$ is too fine for the scenario count, the reporter appends an explicit warning and the $\beta$ values that give a tail of whole scenarios:
+When $\beta$ is too fine for the scenario count, a warning still exists in `print_risk_metrics_summary!`:
 
 ```
   (NOTE: beta = 0.95 implies a 5.0% tail, narrower than one of the 15
@@ -1959,7 +1841,7 @@ When $\beta$ is too fine for the scenario count, the reporter appends an explici
 - `years[jy]` — the **weather file label** used to load `timeseries_<label>.csv` and `output_<label>/…`. Labels are **not calendar dates** (label 1 is built from 2015 ERA5 weather; see the table in §9.7). Because three gas scenarios share each weather label, each file is read **once per label** and reused.
 - `gas_multiplier[jy]` — the scaling applied to `Fuel.GasPrice` in that scenario.
 
-With the default grid, `years = Dict(1=>1, 2=>1, 3=>1, 4=>2, …, 15=>5)` and `gas_multiplier = [1.0, 1.1, 1.2, 1.0, …]`: gas varies fastest, so `jy = 1..3` are weather year 1 at the three gas levels. **Investment is decided once** before operations; scenarios differ only in availability factors, demand, fuel-linked costs, dispatch, and the scenario-weighted expected profit / CVaR. See §7.5, §9.7, and §9.8.
+With the default grid, `years = Dict(1=>1, 2=>1, 3=>1, 4=>2, …, 15=>5)` and `gas_multiplier = [1.0, 2.0, 3.0, 1.0, …]`: gas varies fastest, so `jy = 1..3` are weather year 1 at the three gas levels. **Investment is decided once** before operations; scenarios differ only in availability factors, demand, fuel-linked costs, dispatch, and the scenario-weighted expected profit / CVaR. See §7.5, §9.7, and §9.8.
 
 ### 8.4 3D Arrays
 
@@ -1983,7 +1865,7 @@ All prices, quantities, and imbalances are stored as 3D arrays `[jh, jd, jy]`. S
 | Parameter | Value | Description |
 |---|---|---|
 | `weather_years` | `[1, 2, 3, 4, 5]` | Weather file labels; each reads `Input/timeseries_<label>.csv` and `Input/output_<label>/` (§9.7) |
-| `gas_price_multipliers` | `[1.00, 1.10, 1.20]` | Scaling applied to `Fuel.GasPrice`; coal, biomass, and CO₂ are unaffected (§9.8) |
+| `gas_price_multipliers` | `[1.00, 2.00, 3.00]` | Scaling applied to `Fuel.GasPrice`; coal, biomass, and CO₂ are unaffected (§9.8) |
 
 The scenario count is **derived**: `nYears = 5 × 3 = 15`, all equiprobable.
 
@@ -2007,11 +1889,11 @@ This block is the **single source of truth** for every fuel- and carbon-linked c
 |---|---|---|
 | `rho_initial` | 1.0 | Default penalty weight (neutral starting point) |
 | `nScenarioYears` | 15 | Fallback scenario count, used only if the `Scenarios` block is absent (§9.1.1) |
-| `max_iter` | 1000 | Maximum ADMM iterations |
+| `max_iter` | 5000 | Maximum ADMM iterations. RA ME typically converges around 3{,}000–4{,}000 from a cold $\bar g$ (§6.6). |
 | `epsilon` | 0.2 | ME flow-market Boyd `ε_abs` (MW per slot); L2 bar = 0.2 × √2880 ≈ 10.73 MW. See §6.5. |
 | `epsilon_contracts` | 2.0 | [me_pap / me_top / me_sop] Flow-market `ε_abs`; 10× ME (Boyd $10^{-4}$ of NL peak). L2 bar ≈ 107 MW (§6.5). |
-| `epsilon_cap` | 5.0 | Scalar MW bar for physical (and bilateral contract) capacity splits. Not scaled by √n_slots (§6.4.3, §6.5). |
-| `cap_tol_relax` | 10 | [me_pap / me_top / me_sop only] Extra multiplier on `ε_cap` for **physical investment** capacity (§6.4): 10 × 5 = 50 MW. Does **not** apply to bilateral contract $C$. |
+| `epsilon_cap` | 5.0 | Unused for ME installed-capacity stopping. Leftover yaml; contracts may use it for bilateral $C$. |
+| `cap_tol_relax` | 10 | [me_pap / me_top / me_sop] Leftover multiplier on physical $x=z$ (disabled in ME; §6.4). |
 | `contract_cap.initial` | 0 | Seed $C$ (MW). `0` = no-contract warm start; raise if $q \le C$ is presolved away (§2). |
 | `contract_cap.relaxation` | 0.35 | Unused on expand/hold (kept for compatibility). Idle unused $C$ still snaps to 0. |
 | `contract_cap.expand_step` | 25 | Minimum MW added to $C$ when **both** sides’ cap shadows want more $C$ (§2). Applied **undamped**. |
@@ -2022,12 +1904,12 @@ This block is the **single source of truth** for every fuel- and carbon-linked c
 | `contract_cap.settle_iters` | 3 | Consecutive iterations $C$ must stay within `settle_tol` (and not be expanding). Hold at a used $C$ is settled. |
 | `contract_cap.bind_tol` | 1e-6 | Numerical tolerance: treat $q^{\mathrm{peak}} \approx C$ as binding. |
 | `contract_cap.dual_tol` | 1e-4 | Min W-weighted shadow of $q \le C$ (€/MW-year) to count as “wants more $C$”. |
-| `rho_cap_initial` | 0.1 | Initial per-agent capacity penalty for the equality split (§6.4). Present in shipped `data.yaml`. |
-| `rho_cap_inc_factor` | 1.05 | Per-agent capacity controller increase factor; decrease factor is the reciprocal. **Code default** (not in shipped `data.yaml`). See §6.4.4. |
-| `rho_cap_max` | 30 | Per-agent capacity penalty upper bound. **Code default** (not in shipped `data.yaml`). See §6.4.4. |
-| `cap_z_relax` | 1.0 | Under-relaxation factor for capacity target update `z^k ← α z_raw^k + (1-α) z^{k-1}`. `1.0` disables damping. **Code default** (not in shipped `data.yaml`). Use `0.2–0.8` only if target oscillations cause large `Δz` dual spikes. See §6.4.8. |
-| `gamma` | 1.0 | Risk weight on expected loss vs CVaR ($\gamma=1$ risk-neutral; $\gamma=0.5$ risk-averse base case). Shared by SP and ME. See §4.10. |
-| `beta` | 0.95 | CVaR confidence level (Rockafellar–Uryasev); **higher $\beta$ = more risk-averse** at fixed $\gamma<1$. Sensitivity sweep: $0.2,0.4,0.6,0.8$ at $\gamma=0.5$ (§4.10.4). Inactive when $\gamma=1$. |
+| `rho_cap_initial` | 0.1 | Present in shipped yaml; **unused for ME investment** (`disable_installed_capacity_split!` zeros $\rho^{\mathrm{cap}}$ each iteration, §6.4). |
+| `rho_cap_inc_factor` | 1.05 | Vestigial capacity-ρ controller increase factor. **Code default** (not in shipped `data.yaml`). |
+| `rho_cap_max` | 30 | Vestigial capacity-ρ upper bound. **Code default**. |
+| `cap_z_relax` | 1.0 | Vestigial $z$-target under-relaxation from the retired $x=z$ split. **Code default**. |
+| `gamma` | 0.5 | Risk weight on expected loss vs CVaR ($\gamma=1$ risk-neutral; $\gamma=0.5$ risk-averse base case). Shared by SP and ME. See §4.10. |
+| `beta` | 0.4 | CVaR confidence level (Rockafellar–Uryasev); **higher $\beta$ = more risk-averse** at fixed $\gamma<1$. Sensitivity sweep: $0.2,0.4,0.6,0.8$ at $\gamma=0.5$ (§4.10.4). Inactive when $\gamma=1$. Shipped value is the current sweep point. |
 
 ### 9.2.1 SocialPlanner (`SocialPlanner` block)
 
@@ -2155,7 +2037,7 @@ These are physically reasonable but not pulled from a single NL statistic; flagg
 - **Electrolyser `OperationalCost` = 3 €/MWh_H₂** — variable O&M estimate (water, stack); fixed O&M is inside the IEA 3%-of-CAPEX annuity.
 - **Consumer `A_E` = 500 €/MWh, `B_E` = 0.0025; GC demand `B_GC` = 0.0005** — quadratic-utility shape parameters; chosen to keep electricity demand near-inelastic at the ~20 GW scale and the GC market well-scaled (not NL price observations).
 - **Importer `ImportCost` = 250 €/MWh_EP** — inactive (`Capacity = 0`); retained for re-enabling imports.
-- **Risk parameters `gamma` = 1.0 (risk-neutral default; set `0.5` for risk-averse runs), `beta` = 0.95; all `rho_initial`, tolerances, `max_iter`** — algorithmic/risk-preference settings, not NL data.
+- **Risk parameters `gamma` = 0.5 (risk-averse base; set `1.0` for RN), `beta` in the sweep $0.2,0.4,0.6,0.8$; all `rho_initial`, flow-market tolerances, `max_iter`** — algorithmic/risk-preference settings, not NL data.
 
 ### 9.7 Weather Scenarios, Representative Days, and Availability Factors
 
@@ -2401,7 +2283,7 @@ Weather is one uncertainty axis; the **natural-gas price** is the other. Togethe
 ```yaml
 Scenarios:
   weather_years: [1, 2, 3, 4, 5]
-  gas_price_multipliers: [1.00, 1.10, 1.20]
+  gas_price_multipliers: [1.00, 2.00, 3.00]
 ```
 
 `Source/define_scenarios.jl` expands this into the flat scenario index used everywhere else:
@@ -2412,10 +2294,10 @@ n_{\mathrm{years}} = 5 \times 3 = 15,
 jy = (i_{\mathrm{weather}} - 1)\cdot 3 + i_{\mathrm{gas}}
 $$
 
-Gas varies **fastest**, so scenarios group by weather year: `jy = 1,2,3` are weather year 1 at 1.0/1.1/1.2 × gas, `jy = 4,5,6` are weather year 2, and so on to `jy = 13,14,15` for weather year 5. All 15 are equiprobable, `P[jy] = 1/15`. `build_scenario_grid` returns two lookups: `years[jy]` (the weather **file label**, so `timeseries_<label>.csv` is read once per label and reused by the three gas variants) and `gas_multiplier[jy]`. Every entry point prints the resulting grid at start-up, so a run's log always records the uncertainty set it optimised over:
+Gas varies **fastest**, so scenarios group by weather year: `jy = 1,2,3` are weather year 1 at $1\times/2\times/3\times$ gas, `jy = 4,5,6` are weather year 2, and so on to `jy = 13,14,15` for weather year 5. All 15 are equiprobable, `P[jy] = 1/15`. `build_scenario_grid` returns two lookups: `years[jy]` (the weather **file label**, so `timeseries_<label>.csv` is read once per label and reused by the three gas variants) and `gas_multiplier[jy]`. Every entry point prints the resulting grid at start-up, so a run's log always records the uncertainty set it optimised over:
 
 ```
-Scenario grid: 5 weather year(s) [1, 2, 3, 4, 5] x 3 gas level(s) [1.0, 1.1, 1.2] = 15 scenarios (equal probability 0.0667 each)
+Scenario grid: 5 weather year(s) [1, 2, 3, 4, 5] x 3 gas level(s) [1.0, 2.0, 3.0] = 15 scenarios (equal probability 0.0667 each)
 ```
 
 If the `Scenarios` block is absent, the grid degenerates to weather years `1..nScenarioYears` at a single multiplier of 1.0, reproducing the pre-grid behaviour.
@@ -2451,15 +2333,15 @@ $$
 
 with `GasIntensity = 1.720` MWh_th/MWh_EP (32 GJ_LHV per t NH₃ ÷ 5.167 MWh/t) and `CO2Intensity = 0.348` tCO₂/MWh_EP (1.8 tCO₂/t NH₃, process **plus** fuel). The CO₂ cost is charged in full: NL grey ammonia's process CO₂ is ETS-covered, and free allocation is a lump-sum transfer that does not change the marginal decision.
 
-Only **gas** carries the scenario multiplier. The +10%/+20% scenarios represent a gas-market shock, so coal, biomass, and the ETS price are held fixed — which also means the shock genuinely reorders the merit order rather than shifting it uniformly.
+Only **gas** carries the scenario multiplier. The $2\times$/$3\times$ scenarios represent a gas-market shock, so coal, biomass, and the ETS price are held fixed — which also means the shock genuinely reorders the merit order rather than shifting it uniformly.
 
 | Scenario gas level | Gas price (€/MWh_th) | CCGT | Coal | Biomass | OCGT (benchmark)* | Grey NH₃ MC |
 |---|---|---|---|---|---|---|
 | 1.00 × | 34.40 | **83.3** | 85.4 | 89.8 | 127.9 | **85.7** €/MWh_EP (443 €/t) |
-| 1.10 × | 37.84 | **89.3** | 85.4 | 89.8 | 136.9 | 91.6 €/MWh_EP (473 €/t) |
-| 1.20 × | 41.28 | **95.2** | 85.4 | 89.8 | 146.0 | 97.6 €/MWh_EP (504 €/t) |
+| 2.00 × | 68.80 | **142.6** | 85.4 | 89.8 | 218.4 | 144.9 €/MWh_EP (749 €/t) |
+| 3.00 × | 103.20 | **202.0** | 85.4 | 89.8 | 308.9 | 204.1 €/MWh_EP (1{,}054 €/t) |
 
-(Power values in €/MWh_e.) *OCGT is not a separate agent; the column is the peaking SRMC used for contract `ng_elec` benchmarks in `contract_strike.jl`. At 1.00 × gas, CCGT is cheapest; at 1.10 × gas, CCGT exceeds coal (merit order inverts); at 1.20 ×, CCGT exceeds both coal and biomass.
+(Power values in €/MWh_e.) *OCGT is not a separate agent; the column is the peaking SRMC used for contract `ng_elec` benchmarks in `contract_strike.jl`. At 1.00 × gas, CCGT is cheapest; at $2\times$ and $3\times$, CCGT is far above coal and biomass (merit order inverts on the first shock).
 
 #### Why the 2024 fuel anchor
 
@@ -2480,13 +2362,13 @@ Flat `Technology` plants and legacy staged stacks can coexist in one model. The 
 
 #### Choosing `beta` with 15 scenarios
 
-CVaR at level $\beta$ averages the worst $(1-\beta)$ share of scenarios. With 15 equiprobable scenarios, one scenario is 6.7% of the mass, so the default `beta = 0.95` requests a 5% tail that is **narrower than a single scenario** — CVaR then collapses onto the single worst outcome. That is well defined but coarse, and the risk-metrics reporter now prints an explicit warning when it happens, together with the values that give a tail of `k` whole scenarios:
+CVaR at level $\beta$ averages the worst $(1-\beta)$ share of scenarios. With 15 equiprobable scenarios, one scenario is 6.7% of the mass, so $\beta = 0.95$ requests a 5% tail that is **narrower than a single scenario** — CVaR then collapses onto the single worst outcome. That is well defined but coarse. Use values that give a tail of $k$ whole scenarios:
 
 $$
 \beta = 1 - \frac{k}{15} \quad\Rightarrow\quad \beta = 0.933\ (k{=}1),\; 0.867\ (k{=}2),\; 0.800\ (k{=}3),\; 0.667\ (k{=}5)
 $$
 
-`beta = 0.8` (worst 3 of 15) is a reasonable default for risk-averse runs.
+The shipped RA cases use $\beta\in\lbrace 0.2,0.4,0.6,0.8\rbrace$ (worst 12, 9, 6, and 3 of 15). `beta = 0.8` is the strongest standard sweep point, not a required default.
 
 ## 10. Project Structure
 
@@ -2508,6 +2390,8 @@ Now/
 │   ├── visualize_results.py
 │   ├── visualize_results.ipynb
 │   └── figures/
+│
+├── Data/
 │   └── data.yaml               # All configuration: agents, markets, ADMM settings
 │
 ├── Input/
@@ -2560,7 +2444,9 @@ Now/
 │   ├── solve_EP_demand_agent.jl      # Placeholder (EP demand)
 │   │
 │   ├── define_results.jl             # Initialize result & ADMM state dictionaries
-│   ├── ADMM.jl                       # Main ADMM coordination loop
+│   ├── cap_admm_helpers.jl           # Private-cap disable, failed-QP retry, γ=1 test
+│   ├── tee_run_log.jl                # Capture post-run summary → run_summary.txt
+│   ├── ADMM.jl                       # Main ADMM coordination loop (five flow markets)
 │   ├── ADMM_subroutine.jl            # Per-agent step: update params, solve, record
 │   ├── update_rho.jl                 # Adaptive ρ update (Boyd residual balancing, §6.3)
 │   ├── save_results.jl               # Write market-exposure CSV outputs
@@ -2590,10 +2476,12 @@ Now/
 │   ├── Agent_Summary.csv             # Per-agent net positions, capacity & objective (same schema as SP)
 │   ├── Agent_Objectives_Per_Timestep.csv
 │   ├── Market_Prices.csv             # Final ADMM prices λ for all five markets
-│   ├── Capacity_Consensus.csv        # Per-iteration capacity equality split (§6.4)
+│   ├── Capacity_Consensus.csv        # Leftover logging; not an ME stop (§6.4)
 │   ├── Offtaker_GC_Diagnostics.csv   # GC compliance per offtaker
 │   ├── H2_Producer_Diagnostics.csv   # H₂ GC-to-production ratio
 │   ├── Risk_Metrics.csv              # Welfare / CVaR summary vs SP + demand/rest split
+│   ├── Cost_Metrics.csv              # E[SW], resource cost, expected consumer CWAP
+│   ├── run_summary.txt               # Teed console summary (cost metrics + ADMM status)
 │   ├── Social_Welfare_Per_Year.csv   # Per-scenario welfare, loss, demand, ex-demand
 │   ├── Welfare_By_Group_Per_Year.csv # Planner welfare by group (no transfers)
 │   ├── Welfare_By_Agent_Per_Year.csv
@@ -2631,6 +2519,8 @@ Now/
     ├── SP_Primal_Quantities.csv      # Full primal allocation per (jy, jd, jh)
     ├── Agent_Objectives_Per_Timestep.csv
     ├── Risk_Metrics.csv              # Written by compute_social_risk_metrics.jl
+    ├── Cost_Metrics.csv
+    ├── run_summary.txt
     ├── Social_Welfare_Per_Year.csv
     ├── Welfare_By_Group_Per_Year.csv
     └── Welfare_By_Agent_Per_Year.csv
@@ -2644,11 +2534,13 @@ Now/
 
 | File | Purpose |
 |---|---|
-| `market_exposure.jl` | Entry point for distributed ADMM. Sections 1–13: env, packages, dirs, source loading, data loading, results folder, agent init, market params, agent params, build models, run ADMM, save results. |
+| `market_exposure.jl` | Entry point for distributed ADMM. RA: λ-only SP warm-start; RN: λ + primal + cap starts. Save via `Base.invokelatest(save_results, …)`. |
 | `me_pap.jl` | ME + PPA (PaP) + HPA (PaP). Self-contained entry point; contract modules under `Source/`. Outputs to `me_pap_results/`. |
 | `me_top.jl` | Same as `me_pap.jl` but HPA volume = take-or-pay. Outputs to `me_top_results/`. |
 | `me_sop.jl` | Same as `me_pap.jl` but HPA volume = send-or-pay. Outputs to `me_sop_results/`. |
-| `social_planner.jl` | Entry point for centralised benchmark. Sections 1–12: same structure as market_exposure but builds a single planner model instead of per-agent models + ADMM loop. Section 11 solves the planner as a convex QCP with IPOPT and requires direct dual availability. |
+| `social_planner.jl` | Entry point for centralised benchmark. Builds a single planner model; Section 11 solves it as a convex QCP with IPOPT. |
+| `green_h2_social_planner.jl` | Partial planner: electrolyzer + green offtaker merged. Same ADMM as ME (private cap, RA λ-only warm-start). |
+| `green_social_planner.jl` | Partial planner: VRES + electrolyzer + green offtaker merged. Same ADMM as ME. |
 
 ### 11.2 Parameter Definition Files
 
@@ -2662,7 +2554,7 @@ Now/
 | `define_elec_GC_demand_parameters.jl` | PeakLoad, Load_Column, A_GC, B_GC, LOAD_GC timeseries. |
 | `define_EP_demand_parameters.jl` | Placeholder; copies EP_Demand block if present. |
 | `define_*_market_parameters.jl` | Each market: name, initial_price, rho_initial, prices list. EP market also builds 3D demand array D_EP. |
-| `define_results.jl` | Initialises results["λ"], per-agent quantity buffers, ADMM ρ lists, Imbalances, PriceHistory, ImbalanceMean, Residuals, Tolerance. |
+| `define_results.jl` | Initialises results["λ"], per-agent quantity buffers, ADMM ρ lists, Imbalances, PriceHistory, ImbalanceMean, Residuals, Tolerance. `use_primal_warmstart` is **false** when $\gamma<1$. |
 
 ### 11.3 Model Building Files
 
@@ -2677,6 +2569,7 @@ Now/
 | `build_H2_agent_contracts.jl` | `build_H2_agent_contracts!()` — GreenProducer with PPA buy-side and HPA sell-side | — (contracts case only) |
 | `build_offtaker_agent_contracts.jl` | `build_offtaker_agent_contracts!()` — GreenOfftaker with HPA buy-side (others delegate to base build_offtaker_agent!) | — (contracts case only) |
 | `build_social_planner.jl` | — | `build_social_planner!()` — orchestrates all add_*_to_planner!, adds balance constraints, aggregates welfare, adds epigraph + single social CVaR, sets risk-adjusted objective |
+| `build_merged_agent.jl` | `build_merged_agent!()` — green coalition QP (private cap; same energy ADMM as ME) | — (partial planners only) |
 
 ### 11.4 Solve Files
 
@@ -2692,21 +2585,23 @@ Now/
 
 | File | Role |
 |---|---|
-| `ADMM.jl` | Main loop: iterate agents → imbalances → primal/dual residuals → scale-aware price update → adaptive ρ update → convergence check. Progress bar + summary printout. |
-| `ADMM_subroutine.jl` | Per-agent step: update g_bar/λ/ρ on model → dispatch to solve_* → extract & record quantities. H₂-GC remains hourly (full 3D), consistent with other markets. |
+| `ADMM.jl` | Main loop: iterate agents → imbalances → primal/dual residuals → scale-aware price update → adaptive ρ update → **five-market** Boyd stop (`within_tol_cap` always true). |
+| `ADMM_subroutine.jl` | Per-agent step: update g_bar/λ/ρ on model → `disable_installed_capacity_split!` → dispatch to solve_* → `ensure_agent_solution!` on failed QP → extract & record quantities. |
+| `cap_admm_helpers.jl` | `admm_is_risk_neutral`, `disable_installed_capacity_split!`, `ensure_agent_solution!`, leftover capacity-residual helpers. |
 | `ADMM_contracts.jl` | Same ADMM flow as `ADMM.jl` plus PPA + HPA energy/capacity consensuses and λ_ppa/λ_hpa updates. |
-| `ADMM_subroutine_contracts.jl` | Per-agent step with PPA/HPA g_bar, λ, ρ updates and extraction. Dispatches to contracts solvers for power/H2/offtaker contract agents. |
-| `update_rho.jl` | Minimal residual-balancing ρ update with market-specific rates/caps; includes per-agent capacity ρ update for the `x_cap = z_cap` split. |
-| `update_rho_contracts.jl` | Residual-balancing ρ update for standard markets, per-agent capacity split, and ppa/hpa energy/capacity consensuses. |
+| `ADMM_subroutine_contracts.jl` | Per-agent step with PPA/HPA g_bar, λ, ρ updates and extraction. Also disables installed-capacity split. |
+| `update_rho.jl` | Minimal residual-balancing ρ update with market-specific rates/caps. Capacity-ρ loop is vestigial for ME. |
+| `update_rho_contracts.jl` | Residual-balancing ρ update for standard markets and ppa/hpa energy/capacity consensuses. |
 
 ### 11.6 Save Files
 
 | File | Role |
 |---|---|
-| `save_results.jl` | Writes: ADMM_Convergence.csv, ADMM_Diagnostics.csv, Capacity_Consensus.csv, per-market history CSVs, Agent_Summary.csv, Agent_Objectives_Per_Timestep.csv, Offtaker_GC_Diagnostics.csv, H2_Producer_Diagnostics.csv, Market_Prices.csv. |
-| `save_results_contracts.jl` | Writes the same major ADMM outputs as save_results (with PPA/HPA columns) plus: PPAs.csv, HPAs.csv, Green_Agents_Detail.csv. Agent_Summary matches market_exposure structure (no explicit contract columns). |
-| `compute_social_risk_metrics.jl` | Post-processing: social CVaR, \(\mathbb{E}[\mathrm{SW}]\), demand vs ex-demand split, private CVaR sum, SP comparison; writes Risk_Metrics.csv and welfare decomposition CSVs. |
-| `save_social_planner_results.jl` | Called after the direct QCP solve, with duals available. Writes: Market_Prices.csv, SP_Primal_Quantities.csv, SP_Capacities.csv, Agent_Summary.csv, Agent_Objectives_Per_Timestep.csv. (Risk_Metrics.csv and Social_Welfare_Per_Year.csv are written separately by `compute_social_risk_metrics.jl`, which also prints the risk summary.) |
+| `save_results.jl` | Writes ADMM CSVs, Agent_Summary, Market_Prices, then `write_admm_risk_outputs!` + `Cost_Metrics.csv`. Tees cost metrics and ADMM summary via `tee_run_log.jl`. Unconditionally `include`s `tee_run_log.jl` (Julia 1.12 world-age). |
+| `save_results_contracts.jl` | Writes the same major ADMM outputs as save_results (with PPA/HPA columns) plus: PPAs.csv, HPAs.csv, Green_Agents_Detail.csv. |
+| `compute_social_risk_metrics.jl` | Post-processing: social CVaR, \(\mathbb{E}[\mathrm{SW}]\), resource cost, demand vs ex-demand split, private CVaR sum; writes Risk_Metrics.csv, Cost_Metrics.csv, and welfare decomposition CSVs. Prints `print_cost_metrics_summary!`. |
+| `save_social_planner_results.jl` | Called after the direct QCP solve, with duals available. Writes: Market_Prices.csv, SP_Primal_Quantities.csv, SP_Capacities.csv, Agent_Summary.csv, Agent_Objectives_Per_Timestep.csv, plus risk/cost metrics via `compute_social_risk_metrics.jl`. |
+| `tee_run_log.jl` | Captures post-run stdout to a temp file, replays to the terminal and `run_summary.txt` (Julia 1.12 `redirect_stdout` cannot wrap a custom IO). |
 
 ---
 
@@ -2716,9 +2611,9 @@ Now/
 
 | File | Contents |
 |---|---|
-| `ADMM_Convergence.csv` | Columns: `iter`, `{market}_primal`, `{market}_dual` for each of the 5 markets, plus `cap_primal` / `cap_dual` (aggregate L2 over agents) and **per-agent** `cap_primal_<m>` / `cap_dual_<m>` columns from the equality-split capacity ADMM (§6.4). One row per ADMM iteration. Used for convergence plots. |
-| `ADMM_Diagnostics.csv` | Columns: `iter`, `{market}_rho`, `{market}_price_mean`, `{market}_imb_mean` for each flow market, plus per-agent `cap_rho_<m>` columns (one per cap-owning agent). |
-| `Capacity_Consensus.csv` | Per-iteration, per-agent, per-year snapshot of the capacity equality split. Columns: `iter`, `AgentID`, `jy`, `x_cap`, `z_cap`, `lambda_cap`, `rho_cap`, `primal_local`, `dual_local`. Use this to identify the agent / year that gates capacity convergence; analogous to `{Market}_Market_History.csv` but at the (iter, agent, year) granularity that the per-agent split naturally produces. See §6.4 for the formal model. |
+| `ADMM_Convergence.csv` | Columns: `iter`, `{market}_primal`, `{market}_dual` for each of the 5 **flow** markets, plus leftover `cap_primal` / `cap_dual` columns (not used for stopping; `cap_dual` is often `Inf`). One row per ADMM iteration. |
+| `ADMM_Diagnostics.csv` | Columns: `iter`, `{market}_rho`, `{market}_price_mean`, `{market}_imb_mean` for each flow market, plus leftover per-agent `cap_rho_<m>` columns. |
+| `Capacity_Consensus.csv` | Leftover per-iteration capacity log from the retired $x=z$ split. **Not** an ME stop and **not** the economic capacity model (§6.4). |
 | `{Market}_Market_History.csv` | Per-market CSV with: `iter`, `rho`, `price_mean`, `imb_mean`, `primal_res`, `dual_res`. |
 | `Agent_Summary.csv` | One row per agent — the main per-agent result table. Columns: `AgentID`, `Group`, `Type`, the five net positions `elec_net_sum`, `H2_net_sum`, `elec_GC_net_sum`, `H2_GC_net_sum`, `EP_net_sum` (summed over all hours, representative days and scenarios at the final iteration; **+ = sold into the market, − = bought**), plus `Capacity_Final_MW`, `Investment_Total_MW`, `Objective_Value`. The social planner writes the **same schema**, which is what makes the SP-vs-ME comparison in `visualization/` a direct column-by-column merge. |
 | `Agent_Objectives_Per_Timestep.csv` | Per-agent objective contribution resolved to each (jy, jd, jh) slot; use it to see *when* an agent earns or loses money rather than only the annual total. |
@@ -2726,6 +2621,8 @@ Now/
 | `Offtaker_GC_Diagnostics.csv` | Columns: `AgentID`, `Type`, `EP_total`, `H2_in_total` (H₂ basis the mandate is measured on: bought H₂ for green, `ep/γ_NH3` for grey), `H2_GC_total`, `GC_share` (= GCs / H₂ basis), `GC_mandate` (= `γ_GC`), `GC_slack` (= share − mandate; > 0 ⇒ compliant). |
 | `H2_Producer_Diagnostics.csv` | Columns: `AgentID`, `H2_total`, `H2_GC_total`, `GC_per_H2`. |
 | `Risk_Metrics.csv` | `expected_social_welfare`, `social_CVaR`, `sum_private_CVaR`, gap vs SP, demand vs ex-demand split — §7.6. |
+| `Cost_Metrics.csv` | $\mathbb{E}[\mathrm{SW}]$, resource cost, expected consumer CWAP (€/MWh). |
+| `run_summary.txt` | Teed console: cost metrics + ADMM/SP run summary. |
 | `Social_Welfare_Per_Year.csv` | Per-year aggregate welfare, loss, `welfare_demand`, `welfare_ex_demand`. |
 | `Welfare_By_Group_Per_Year.csv` | Per-year planner welfare by group (elec/GC demand vs VRES, conventional, H₂, offtakers). |
 | `Welfare_By_Agent_Per_Year.csv` | Per-year planner welfare by agent id. |
@@ -2734,7 +2631,7 @@ Now/
 
 ### 12.2 ME contract results (`me_pap_results/`, `me_top_results/`, `me_sop_results/`)
 
-The ME contract entry points produce the same major ADMM outputs as market_exposure (ADMM_Convergence, ADMM_Diagnostics, `Capacity_Consensus.csv`, 5× Market_History, Agent_Summary, Market_Prices, Risk_Metrics, Social_Welfare_Per_Year, Welfare_By_Group_Per_Year, Welfare_By_Agent_Per_Year), with additional PPA/HPA energy columns and **shared-cap alignment** columns (`ppa_cap_*`, `hpa_cap_*`: $|C - q^{\mathrm{peak}}|$ and $|C^k - C^{k-1}|$) in convergence and diagnostics. Per-agent **investment** capacity columns and `Capacity_Consensus.csv` follow the equality-split structure in §6.4. Two ME-only files are **not** written by the contracts saver: `Offtaker_GC_Diagnostics.csv` and `H2_Producer_Diagnostics.csv`. Additional contract outputs:
+The ME contract entry points produce the same major ADMM outputs as market_exposure (ADMM_Convergence, ADMM_Diagnostics, leftover `Capacity_Consensus.csv`, 5× Market_History, Agent_Summary, Market_Prices, Risk_Metrics, Cost_Metrics, Social_Welfare_Per_Year, Welfare_By_Group_Per_Year, Welfare_By_Agent_Per_Year), with additional PPA/HPA energy columns and **shared-cap alignment** columns (`ppa_cap_*`, `hpa_cap_*`) in convergence and diagnostics. Installed `cap` is private as in ME (§6.4). Two ME-only files are **not** written by the contracts saver: `Offtaker_GC_Diagnostics.csv` and `H2_Producer_Diagnostics.csv`. Additional contract outputs:
 
 | File | Contents |
 |---|---|
@@ -2750,6 +2647,8 @@ Outputs from the **complete risk trading** benchmark (`social_planner.jl`; §4.8
 |---|---|
 | `Market_Prices.csv` | Columns: `Time`, `Elec_Price`, `H2_Price`, `Elec_GC_Price`, `H2_GC_Price`, `EP_Price`. One row per (jy, jd, jh) timestep. Prices = balance-constraint duals scaled per §7.2: `dual / (W[jd,jy] × μ[jy])`, where `μ[jy]` is the effective scenario weight from the epigraph dual (equals `P[jy]` at $\gamma=1$; includes CVaR tail weight at $\gamma<1$). Expected marginal social values at $\gamma=1$; **risk-adjusted** social shadow prices at $\gamma<1$. |
 | `Risk_Metrics.csv` | **Long format**: columns `Metric`, `Value`, `Unit`, including demand vs ex-demand split. See §7.6. |
+| `Cost_Metrics.csv` | $\mathbb{E}[\mathrm{SW}]$, resource cost, expected consumer CWAP. |
+| `run_summary.txt` | Teed console summary. |
 | `Social_Welfare_Per_Year.csv` | One row per scenario. Columns: `case`, `scenario_year`, `probability`, `social_welfare`, `social_loss`, `welfare_demand`, `welfare_ex_demand`. |
 | `Welfare_By_Group_Per_Year.csv` | Per-year planner welfare by group. |
 | `Welfare_By_Agent_Per_Year.csv` | Per-year planner welfare by agent. |

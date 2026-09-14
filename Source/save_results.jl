@@ -29,9 +29,7 @@ end
 if !isdefined(@__MODULE__, :_aligned_cap_target)
     include(joinpath(@__DIR__, "cap_admm_helpers.jl"))
 end
-if !isdefined(@__MODULE__, :with_run_summary_log)
-    include(joinpath(@__DIR__, "tee_run_log.jl"))
-end
+include(joinpath(@__DIR__, "tee_run_log.jl"))
 include(joinpath(@__DIR__, "compute_social_risk_metrics.jl"))
 
 function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_market::Dict,
@@ -788,8 +786,9 @@ function save_results(mdict::Dict, elec_market::Dict, H2_market::Dict, elec_GC_m
 
     write_admm_risk_outputs!(mdict, agents, results_dir; case_label = case_label)
     cost_metrics = collect_cost_metrics(mdict, agents; λ_elec=λ_elec, λ_H2=λ_H2, λ_EP=λ_EP)
+    write_cost_metrics_csv(cost_metrics, results_dir)
     with_run_summary_log(results_dir) do
-        print_cost_metrics_summary!(cost_metrics; title = "Cost metrics")
+        print_cost_metrics_summary!(cost_metrics)
         print_admm_run_summary!(ADMM_state, results, agents; results_dir=results_dir)
     end
 

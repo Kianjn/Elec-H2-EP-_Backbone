@@ -1,0 +1,50 @@
+# run_summary.txt
+# script:  c:\Users\kjafarinejad\.vscode\extensions\julialang.language-julia-1.219.2\scripts\terminalserver\terminalserver.jl
+# written: 2026-09-13T17:16:11.801
+# results: c:\Users\kjafarinejad\Models\Project01\Now\green_social_planner_results
+
+
+------------------------------------------------------------------------
+  Welfare and cost metrics
+------------------------------------------------------------------------
+  Expected social welfare:                    39.890 bn EUR
+  Total resource cost:                        15.137 bn EUR/year
+    (CAPEX + fuel/OPEX; no market transfers. Equals −E[ex-demand welfare].)
+  Consumer CWAP (electricity):                112.29 €/MWh
+  Expected consumer cost (final energy):      125.53 €/MWh
+    expenditure / energy:                     16.151 bn EUR  /  128.66 TWh
+    electricity                               112.29 €/MWh   (113.13 TWh)
+    ammonia (EP)                              221.97 €/MWh   (15.53 TWh)
+    hydrogen (final only)                       0.00 €/MWh   (0.00 TWh)
+    (H₂ converted to ammonia is excluded from final energy.)
+    Hours weighted by representative-day weights W and scenario probabilities.
+    Consumer €/MWh is expected expenditure / expected MWh, not a CVaR mix.
+
+------------------------------------------------------------------------
+  ADMM run summary
+------------------------------------------------------------------------
+  Status:     Converged
+  Iterations: 1787
+
+  Market                Primal        Dual    Mean price
+  ----------------  ----------  ----------  ------------
+  Electricity        1.052e+01   1.051e+01      112.9002
+  Hydrogen           0.000e+00   0.000e+00      128.0000
+  Electricity_GC     7.213e+00   8.933e+00        9.3423
+  H2_GC              2.617e+00   4.464e+00      136.5628
+  End_Product        7.933e+00   2.931e+00      222.5174
+  Capacity (agg.)    0.000e+00         Inf           n/a
+
+  Agent                             Role                Unit    Final cap.  New investment
+  --------------------------------  --------------  --------  ------------  --------------
+  Green_Coalition / Solar           Solar                 MW      25881.00          0.00
+  Green_Coalition / Wind            Wind                  MW      11784.68          2.68
+  Green_Coalition / Electrolyzer    Electrolyzer       MW_H2        998.59        465.26
+  Green_Coalition / EP plant        EP plant           MW_EP        748.94        348.94
+
+  Agent                       Primal        Dual         ρ
+  ----------------------  ----------  ----------  --------
+  Green_Coalition          0.000e+00   0.000e+00     0.100
+  Slowest capacity agent: Green_Coalition (max residual = 0.000e+00)
+
+  Results saved to: c:\Users\kjafarinejad\Models\Project01\Now\green_social_planner_results

@@ -325,13 +325,15 @@ for m in agents[:elec_GC_demand]
 end
 
 # ------------------------------------------------------------------------------
-# SECTION 11b: CAPACITY WARM-START FROM SP (optional)
+# SECTION 11b: CAPACITY WARM-START FROM SP (risk-neutral only)
 # ------------------------------------------------------------------------------
-# If SP_Capacities.csv exists, set start values on capacity variables so the
-# solver begins near the SP solution. Helps investment consensus converge.
+# RA ME must not inherit the matching-β planner dispatch: that hedge adds green,
+# which is the opposite of the private weather-tail response. Alessio starts
+# capacity as a free QP variable. Keep SP λ as a price hint.
 n_cap_warmstart = 0
 sp_cap_file = joinpath(home_dir, "social_planner_results", "SP_Capacities.csv")
-if isfile(sp_cap_file)
+rn_admm = admm_is_risk_neutral(data)
+if rn_admm && isfile(sp_cap_file)
     try
         sp_cap_df = CSV.read(sp_cap_file, DataFrame)
         jy_set = collect(mdict[agents[:all][1]].ext[:sets][:JY])
@@ -374,11 +376,13 @@ TO = TimerOutput()
 # otherwise fall back to uniform scalar initial_price from data.yaml.
 sp_prices_file = joinpath(home_dir, "social_planner_results", "Market_Prices.csv")
 sp_primal_file = joinpath(home_dir, "social_planner_results", "SP_Primal_Quantities.csv")
-# Primal warm-start: pre-populate g_bar with SP quantities so iter 1 agents solve
-# with λ=SP and g_bar=SP → zero imbalance → prices stay at SP. Without it, g_bar=0
-# biases agents toward zero and causes immediate price drift.
+# Primal warm-start only when γ=1 (ME = SP). Under RA, g_bar = SP generation
+# would pin cap via g ≤ AF·cap to the planner's extra green.
 define_results!(merge(run_general, data["ADMM"]), results, ADMM, agents, elec_market, H2_market, elec_GC_market, H2_GC_market, EP_market;
-    sp_prices_file=sp_prices_file, sp_primal_file=sp_primal_file, sp_cap_file=sp_cap_file, use_primal_warmstart=true)
+    sp_prices_file=sp_prices_file,
+    sp_primal_file=rn_admm ? sp_primal_file : "",
+    sp_cap_file=rn_admm ? sp_cap_file : "",
+    use_primal_warmstart=rn_admm)
 
 # Single consolidated warm-start message
 ws = results["warmstart"]
@@ -403,7 +407,7 @@ ADMM["walltime"] = TimerOutputs.tottime(TO) * 10^-9 / 60
 # SECTION 13: SAVE RESULTS
 # ------------------------------------------------------------------------------
 
-save_results(mdict, elec_market, H2_market, elec_GC_market, H2_GC_market, ADMM, results, agents;
+Base.invokelatest(save_results, mdict, elec_market, H2_market, elec_GC_market, H2_GC_market, ADMM, results, agents;
     results_dir=results_dir)
 
 YAML.write_file(joinpath(results_dir, "TimerOutput.yaml"), TO)

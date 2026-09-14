@@ -1,0 +1,36 @@
+# run_summary.txt
+# reconstructed after Julia 1.12 tee crash (ADMM had already written CSVs)
+# script:  market_exposure.jl
+# results: c:\Users\kjafarinejad\Models\Project01\Now\market_exposure_results
+
+------------------------------------------------------------------------
+  Welfare and cost metrics
+------------------------------------------------------------------------
+  Expected social welfare:                    39.944 bn EUR
+  Total resource cost:                        15.122 bn EUR/year
+    (CAPEX + fuel/OPEX; no market transfers. Equals −E[ex-demand welfare].)
+  Consumer CWAP (electricity):                108.82 €/MWh
+  Expected consumer cost (final energy):      122.64 €/MWh
+    expenditure / energy:                     15.779 bn EUR  /  128.66 TWh
+    electricity                               108.82 €/MWh   (113.13 TWh)
+    ammonia (EP)                              223.28 €/MWh   (15.53 TWh)
+    hydrogen (final only)                       NaN €/MWh   (0.00 TWh)
+
+------------------------------------------------------------------------
+  ADMM run summary
+------------------------------------------------------------------------
+  Status:     Converged
+  Iterations: 3771
+
+  Last residuals (from ADMM_Convergence.csv):
+    Electricity     primal 8.30    dual 10.66
+    Hydrogen        primal 0.52    dual 0.53
+    Electricity_GC  primal 6.24    dual 6.09
+    H2_GC           primal 0.95    dual 1.03
+    EP              primal 0.61    dual 0.65
+
+  Capacity (Agent_Summary.csv):
+    Gen_VRES_Solar     final 25881.00 MW     inv 0.00
+    Gen_VRES_Wind      final 12975.98 MW     inv 1193.98
+    Prod_H2_Green      final   998.86 MW_H2  inv 465.53
+    Offtaker_Green     final   749.15 MW_EP  inv 349.15

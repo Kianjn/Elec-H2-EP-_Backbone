@@ -109,91 +109,10 @@ function ADMM_subroutine!(m::String, data::Dict, results::Dict, ADMM_state::Dict
             mod.ext[:parameters][:ρ_EP]    = ADMM_state["ρ"]["EP"][end]
         end
 
-        # ----------------------------------------------------------------
-        # Capacity consensus parameter refresh (per-agent ADMM equality split)
-        #
-        # We derive the auxiliary z_cap (capacity target) from the just-set
-        # flow consensus (g_bar_*), then plumb the per-agent dual λ_cap and
-        # penalty ρ_cap from ADMM_state["Capacity"][m] into the JuMP model
-        # so that the upcoming solve sees:
-        #     ... + Σ_y [ λ_cap[y]·(x - z) + (ρ_cap/2)·(x - z)² ]
-        # which is the standard ADMM x-update for the split x = z.
-        #
-        # The dual ascent λ ← λ + ρ·(x - z) is performed AFTER the solve in
-        # ADMM.jl (because it needs x^k = the value just computed). Here we
-        # only push z^k and read back the previous-iteration λ^{k-1}.
-        # ----------------------------------------------------------------
+        # Installed capacity is a private QP variable (Alessio). ADMM
+        # coordinates energy only: do not penalize (cap − peak(g/AF)).
         if haskey(mod.ext[:parameters], :z_cap)
-            cap_state = ADMM_state["Capacity"]
-            # On the first ADMM iteration, if z was warm-started from SP
-            # capacities, use that target directly to keep x and z aligned.
-            if get(ADMM_state, "n_iter", 0) == 0 && !isempty(cap_state["z"][m])
-                z_raw = cap_state["z"][m][end]
-                z_cap = z_raw isa Real ? Float64(z_raw) :
-                        (isempty(z_raw) ? 0.0 : Float64(maximum(z_raw)))
-                mod.ext[:parameters][:z_cap] = z_cap
-                λ_raw = cap_state["λ"][m][end]
-                mod.ext[:parameters][:λ_cap] = λ_raw isa Real ? Float64(λ_raw) :
-                    (isempty(λ_raw) ? 0.0 : Float64(λ_raw[1]))
-                mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
-            else
-                agent_type = String(get(mod.ext[:parameters], :Type, ""))
-                JY = mod.ext[:sets][:JY]
-                z_cap = 0.0
-                cap_floor = if agent_type == "VRES"
-                    get(mod.ext[:parameters], :Capacity, 0.0)
-                elseif agent_type == "GreenProducer"
-                    get(mod.ext[:parameters], :Capacity_H2_Output, 0.0)
-                elseif agent_type == "GreenOfftaker"
-                    get(mod.ext[:parameters], :Capacity_EP_Out, 0.0)
-                else
-                    0.0
-                end
-                z_cap = cap_floor
-                if agent_type == "VRES"
-                    flow_ref = isempty(get(results["g"], m, [])) ?
-                               mod.ext[:parameters][:g_bar_elec] : results["g"][m][end]
-                    AF = mod.ext[:timeseries][:AF]
-                    for jy in JY
-                        for jh in 1:n_ts, jd in 1:n_rd
-                            af = AF[jh, jd, jy]
-                            if af > 1e-9
-                                z_cap = max(z_cap, max(0.0, flow_ref[jh, jd, jy] / af))
-                            end
-                        end
-                    end
-                elseif agent_type == "GreenProducer"
-                    flow_ref = isempty(get(results["h2"], m, [])) ?
-                               mod.ext[:parameters][:g_bar_H2] : results["h2"][m][end]
-                    for jy in JY
-                        z_cap = max(z_cap, max(0.0, maximum(flow_ref[:, :, jy])))
-                    end
-                elseif agent_type == "GreenOfftaker"
-                    flow_ref = isempty(get(results["EP"], m, [])) ?
-                               mod.ext[:parameters][:g_bar_EP] : results["EP"][m][end]
-                    for jy in JY
-                        z_cap = max(z_cap, max(0.0, maximum(flow_ref[:, :, jy])))
-                    end
-                end
-
-                z_alpha = get(get(data, "ADMM", Dict()), "cap_z_relax", 1.0)
-                z_alpha = min(1.0, max(0.05, z_alpha))
-                if !isempty(cap_state["z"][m])
-                    z_prev = cap_state["z"][m][end]
-                    z_prev_scalar = z_prev isa Real ? Float64(z_prev) :
-                        (isempty(z_prev) ? z_cap : Float64(z_prev[1]))
-                    z_cap = z_alpha * z_cap + (1.0 - z_alpha) * z_prev_scalar
-                end
-                z_cap = max(z_cap, cap_floor)
-
-                _cap_z_push!(cap_state["z"][m], z_cap)
-
-                mod.ext[:parameters][:z_cap] = z_cap
-                λ_raw = cap_state["λ"][m][end]
-                mod.ext[:parameters][:λ_cap] = λ_raw isa Real ? Float64(λ_raw) :
-                    (isempty(λ_raw) ? 0.0 : Float64(λ_raw[1]))
-                mod.ext[:parameters][:ρ_cap] = cap_state["ρ"][m][end]
-            end
+            disable_installed_capacity_split!(mod.ext[:parameters])
         end
     end
 

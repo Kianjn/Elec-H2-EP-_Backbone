@@ -22,7 +22,9 @@ end
 #   9. update_rho! adapts ρ per market (Boyd rule with hysteresis/freeze).
 #   10. Anti-stall logic: if merit worsens for a long window, restart from best
 #       checkpoint and continue with smaller dual steps.
-#   11. If all primal and dual residuals are below tolerance, set convergence=1.
+#   11. Installed VRES/H2/EP capacity is a private QP variable (Alessio):
+#       ADMM coordinates energy, not an x = peak(g/AF) split.
+#   12. If all flow primal and dual residuals are below tolerance, set convergence=1.
 #   Progress bar is left clean (no per-iteration print).
 #
 # ARGUMENTS:
@@ -755,23 +757,8 @@ function ADMM!(results::Dict, ADMM_state::Dict, elec_market::Dict, H2_market::Di
             return (rp <= eps_pr) && (rd <= eps_du)
         end
 
-        # Per-agent capacity convergence: each capacity-owning agent must
-        # individually satisfy the Boyd absolute+relative test on its own
-        # primal and dual residuals. The aggregate "cap" key is intentionally
-        # NOT used for stopping — averaging across agents can hide one agent
-        # whose split is still far from feasible.
+        # Installed capacity is private (Alessio). Stopping is flow-market Boyd only.
         function within_tol_cap()
-            isempty(cap_agents) && return true
-            cap_state = ADMM_state["Capacity"]
-            for m in cap_agents
-                rp_m = cap_state["Primal"][m][end]
-                rd_m = cap_state["Dual"][m][end]
-                eps_pr_m, eps_du_m = _cap_boyd_eps(ADMM_state, m)
-                if !(isfinite(rp_m) && isfinite(rd_m) &&
-                     rp_m <= eps_pr_m && rd_m <= eps_du_m)
-                    return false
-                end
-            end
             return true
         end
 

@@ -621,12 +621,13 @@ function save_social_planner_results!(planner::Model, planner_state::Dict, agent
     write_sp_risk_outputs!(planner, planner_state, mdict, agents, results_folder)
     cost_metrics = collect_cost_metrics(mdict, agents; planner_state=planner_state,
                                         λ_elec=λ_elec, λ_H2=λ_H2, λ_EP=λ_EP)
+    write_cost_metrics_csv(cost_metrics, results_folder)
     with_run_summary_log(results_folder) do
         print_social_planner_run_summary!(prices_df, var_dict, agents, JY,
                                           power_vres, H2_producers, offtaker_green;
                                           results_dir=results_folder,
                                           solver_status=get(planner_state, :solver_status, termination_status(planner)))
-        print_cost_metrics_summary!(cost_metrics; title = "Cost metrics")
+        print_cost_metrics_summary!(cost_metrics)
     end
 
     return nothing

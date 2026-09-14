@@ -6,6 +6,35 @@
 # snapshot is a length-1 (or legacy length-nYears) vector. Always push via
 # _cap_z_push! so a bare Float64 is never appended to z history.
 
+"""True iff this ADMM run is risk-neutral (γ = 1).
+
+RA ADMM must not inherit the matching-β social-planner dispatch: that hedge
+builds extra green, which is the opposite of the private weather-tail response.
+"""
+function admm_is_risk_neutral(data)::Bool
+    admm = get(data, "ADMM", data)
+    g = Float64(get(admm, "gamma", get(data, "gamma", 1.0)))
+    return abs(g - 1.0) <= 1e-12
+end
+
+"""Drop the installed-capacity ADMM split (Alessio).
+
+`cap` stays a private QP variable with `g ≤ AF·cap`. ADMM coordinates energy
+only. Zeroing λ_cap and ρ_cap makes the `(x − z)` penalty a no-op even if the
+objective still contains the term.
+"""
+function disable_installed_capacity_split!(p::Dict)
+    haskey(p, :z_cap) || return nothing
+    z = p[:z_cap]
+    if z isa AbstractVector
+        p[:λ_cap] = zeros(length(z))
+    else
+        p[:λ_cap] = 0.0
+    end
+    p[:ρ_cap] = 0.0
+    return nothing
+end
+
 """Extract scalar capacity / dual value from scalar or legacy vector storage."""
 _cap_scalar(x) = x isa Real ? Float64(x) : (isempty(x) ? 0.0 : Float64(x[1]))
 

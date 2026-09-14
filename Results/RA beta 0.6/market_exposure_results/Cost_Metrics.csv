@@ -1,0 +1,17 @@
+Metric,Value,Unit
+gamma,0.5,-
+beta,0.6,-
+expected_social_welfare,3.9912660518396034e10,EUR
+resource_cost,1.5138214072843828e10,EUR/year
+elec_cwap,112.30302872046221,EUR/MWh
+ep_cwap,237.19296297684187,EUR/MWh
+h2_cwap,NaN,EUR/MWh
+blended_cwap,127.37891102270657,EUR/MWh
+elec_exp,1.2705203697379854e10,EUR
+ep_exp,3.683975940812959e9,EUR
+h2_exp,0.0,EUR
+total_exp,1.6389179638192816e10,EUR
+elec_qty,1.1313322394006725e8,MWh
+ep_qty,1.553155664728823e7,MWh
+h2_qty,0.0,MWh
+total_qty,1.2866478058735546e8,MWh

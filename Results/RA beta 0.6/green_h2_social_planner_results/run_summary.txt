@@ -1,0 +1,52 @@
+# run_summary.txt
+# script:  c:\Users\kjafarinejad\.vscode\extensions\julialang.language-julia-1.219.2\scripts\terminalserver\terminalserver.jl
+# written: 2026-09-13T18:09:16.833
+# results: c:\Users\kjafarinejad\Models\Project01\Now\green_h2_social_planner_results
+
+
+------------------------------------------------------------------------
+  Welfare and cost metrics
+------------------------------------------------------------------------
+  Expected social welfare:                    39.915 bn EUR
+  Total resource cost:                        15.136 bn EUR/year
+    (CAPEX + fuel/OPEX; no market transfers. Equals −E[ex-demand welfare].)
+  Consumer CWAP (electricity):                111.76 €/MWh
+  Expected consumer cost (final energy):      126.52 €/MWh
+    expenditure / energy:                     16.279 bn EUR  /  128.66 TWh
+    electricity                               111.76 €/MWh   (113.13 TWh)
+    ammonia (EP)                              234.03 €/MWh   (15.53 TWh)
+    hydrogen (final only)                       0.00 €/MWh   (0.00 TWh)
+    (H₂ converted to ammonia is excluded from final energy.)
+    Hours weighted by representative-day weights W and scenario probabilities.
+    Consumer €/MWh is expected expenditure / expected MWh, not a CVaR mix.
+
+------------------------------------------------------------------------
+  ADMM run summary
+------------------------------------------------------------------------
+  Status:     Converged
+  Iterations: 3772
+
+  Market                Primal        Dual    Mean price
+  ----------------  ----------  ----------  ------------
+  Electricity        9.161e+00   1.068e+01      112.2918
+  Hydrogen           0.000e+00   0.000e+00      128.0000
+  Electricity_GC     1.001e+01   9.206e+00       29.7747
+  H2_GC              1.780e-01   1.243e-01      158.3432
+  End_Product        8.897e-01   8.075e-01      234.4518
+  Capacity (agg.)    0.000e+00         Inf           n/a
+
+  Agent                             Role                Unit    Final cap.  New investment
+  --------------------------------  --------------  --------  ------------  --------------
+  Gen_VRES_Solar                    VRES                  MW      25881.00          0.00
+  Gen_VRES_Wind                     VRES                  MW      11867.64         85.64
+  GreenH2_Coalition / Electrolyzer  Electrolyzer       MW_H2        998.85        465.52
+  GreenH2_Coalition / EP plant      EP plant           MW_EP        749.14        349.14
+
+  Agent                       Primal        Dual         ρ
+  ----------------------  ----------  ----------  --------
+  Gen_VRES_Solar           0.000e+00   0.000e+00     0.100
+  Gen_VRES_Wind            0.000e+00   0.000e+00     0.100
+  GreenH2_Coalition        0.000e+00   0.000e+00     0.100
+  Slowest capacity agent: Gen_VRES_Solar (max residual = 0.000e+00)
+
+  Results saved to: c:\Users\kjafarinejad\Models\Project01\Now\green_h2_social_planner_results
